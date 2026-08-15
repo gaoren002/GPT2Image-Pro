@@ -17,12 +17,12 @@
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
     "drizzle-orm": "^0.45.2",
-    "nanoid": "^5.1.15",
-    "pg": "^8.22.0",
-    "ws": "^8.21.0"
+    "nanoid": "^5.1.16",
+    "pg": "^8.23.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.21.0",
     "dotenv": "^16.5.0",
     "drizzle-kit": "^0.31.10",
     "typescript": "^5"

@@ -1,3 +1,4 @@
+/** 外部图片编辑请求适配：统一 JSON/表单输入，图片型号语义由统一操作按分组处理。 */
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -18,6 +19,7 @@ import {
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
+import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
   createJsonKeepAliveResponse,
@@ -54,7 +56,6 @@ import {
 } from "@/features/image-generation/request-utils";
 import {
   alignImageSizeToStep,
-  getImageModel,
   IMAGE_PROMPT_MAX_CHARACTERS,
   IMAGE_PROMPT_TOO_LONG_MESSAGE,
   validateImageSize,
@@ -525,12 +526,6 @@ function toPartialPayload(image: PartialImageResult, index: number) {
   };
 }
 
-function invalidImageModelError() {
-  return openAIImageError(
-    "Unsupported model for /v1/images/edits. Use a gpt-image-* model."
-  );
-}
-
 export const postExternalImageEdits = withApiLogging(
   async (request: NextRequest) => {
     const auth = await authenticateExternalApiRequest(request);
@@ -565,11 +560,18 @@ export const postExternalImageEdits = withApiLogging(
         if (!isPlainRecord(body)) {
           return openAIImageError("Request body must be a JSON object.");
         }
+        // 避免数字/布尔值被 FormData 转为可放行的任意别名，其余非法类型也不能静默丢弃。
+        if (body.model !== undefined && typeof body.model !== "string") {
+          return openAIImageError("model must be a string.");
+        }
         formData = formDataFromJson(body);
         imageReferences = getJsonImageReferences(body);
         maskReference = getJsonMaskReference(body);
       } else {
         formData = await request.formData();
+        if (formData.getAll("model").some((value) => typeof value !== "string")) {
+          return openAIImageError("model must be a string.");
+        }
         imageReferences = getFormImageReferences(formData);
         maskReference = getFormMaskReference(formData);
       }
@@ -672,10 +674,9 @@ export const postExternalImageEdits = withApiLogging(
 
     const responseFormat =
       getText(formData, "response_format") === "url" ? "url" : "b64_json";
-    const model = getImageModel(getText(formData, "model") || undefined);
-    if (!model) {
-      return invalidImageModelError();
-    }
+    const model = normalizeExternalImageModelInput(
+      getText(formData, "model") || undefined
+    );
     const gptModel =
       getText(formData, "gptModel") ||
       getText(formData, "gpt_model") ||

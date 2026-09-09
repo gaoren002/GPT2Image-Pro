@@ -2,17 +2,23 @@
 
 本文描述 Adobe Firefly 后端（adobe，mode=direct「Adobe Firefly 直连」）如何作为一个
 特殊的 firefly account 成员挂入后端分组，并按 priority 参与同池调度，从而天然成为
-普通图像请求的兜底层。所有行为均可在下列源文件核对：
+非纯 Web 主组中普通图像请求的兜底层。所有行为均可在下列源文件核对：
 
 - 调度选择：`apps/web/src/features/image-backend-pool/service.ts` 的 `selectPoolMember`
   （`fireflyOnly` 判定见约 2099-2101 行，adobe 候选构造见约 2536-2590 行，候选合并/按
   priority 排序见约 2592-2698 行）。
-- firefly 模型前缀识别：同文件 `isAdobeFireflyModelId`（约 377 行，`firefly-` 前缀）。
+- 主组优先与模型前缀规则：`apps/web/src/features/image-backend-pool/model-routing.ts`。
 - force_firefly 透传：`apps/web/src/features/image-generation/operations.ts`
   （约 1118-1129 行，force_firefly/firefly-* 强制关闭 preferWebFirst）。
 
 > 注意：本文中的具体数值取自下方「当前生产配置（示例，以 admin 实际为准）」。这些字段
 > 全部在 admin 控制台「Adobe 后端」tab 与「分组」配置中可改，文档随配置而变。
+
+纯 Web 主组的图片请求接受任意图片别名，统一使用 `gpt-image-2.5`；旧版、Sunburst、
+Flare、`firefly-*` 或其他图片名称均不改变实际型号。`force_firefly` 不能覆盖此规则，
+Adobe 直连与 Adobe 来源 API 均被排除，不作为兜底。Chat/Responses 顶层文本模型仍按原
+白名单和套餐权限校验。下文 Adobe 路由规则适用于非纯 Web 主组；混合主组选择 Web 子组
+不会改变其原有模型路由规则。
 
 ## 1. adobe 作为分组成员如何参与调度
 
@@ -63,8 +69,8 @@ Adobe 后端「Adobe Firefly 直连」字段：
 
 ## 3. 三种进入 adobe 的方式
 
-`selectPoolMember` 内 `fireflyOnly = forceFirefly || isAdobeFireflyModelId(requestedModel)`
-决定候选集是否收敛到「仅 adobe」。据此有三种进入路径：
+非纯 Web 主组中，`forceFirefly` 或 `firefly-*` 前缀决定候选集是否收敛到 Adobe 路由
+（含 Adobe 来源 API）。据此有三种进入路径：
 
 ### ① 普通请求兜底（fireflyOnly = false）
 
@@ -77,9 +83,8 @@ Adobe 后端「Adobe Firefly 直连」字段：
 
 - 判定条件：`requestedModel` 以 `firefly-` 开头（如 `firefly-nano-banana-pro-2k-16x9`，
   或只写族名 `firefly-gpt-image-2`）。
-- 候选集：service.ts 约 2426-2427 / 2495-2496 行将 `api`、`account` 成员整体过滤掉
-  （`!fireflyOnly` 条件不成立），候选只剩 adobe。
-- 结果：显式选 Firefly 族出图，绕过 web/codex/api。
+- 候选集：排除普通 `api` 与 `account`，保留 adobe 和 Adobe 来源 API。
+- 结果：显式选 Firefly 族出图，绕过 web/codex/普通 api。
 
 ### ③ `force_firefly: true`（fireflyOnly = true）
 
@@ -87,15 +92,16 @@ Adobe 后端「Adobe Firefly 直连」字段：
 - 透传链：route/handlers → `operations.ts`（同时强制 `preferWebFirst=false`，见约 1123-1129
   行）→ `getEffectiveConfig` → `resolveImageBackendPoolConfig` → `selectPoolMember`
   （`forceFirefly` 参数）。
-- 候选集：与 ② 相同，`api`/`account` 被排除，候选只剩 adobe。
+- 候选集：与 ② 相同，保留 adobe 和 Adobe 来源 API。
 - 结果：对任意模型（含普通 gpt-image）强制改用 adobe 出图；模型族解析见兼容转换文档。
 
 ## 4. 如果 adobe 不在用户所在分组会怎样
 
-adobe 候选来自当前分组（含子组展开）。若用户被分到一个不含 adobe 成员的分组：
+adobe 候选来自当前分组（含子组展开）。纯 Web 主组始终按前述固定型号规则出图。
+若非纯 Web 主组不含 adobe 或 Adobe 来源 API 成员：
 
-- 方式 ②（firefly-* 模型）与方式 ③（force_firefly）：候选收敛到仅 adobe，但该组没有
-  adobe 成员，候选为空，`selectPoolMember` 返回 null，上层抛
+- 方式 ②（firefly-* 模型）与方式 ③（force_firefly）：候选收敛到 Adobe 路由，但该组没有
+  对应成员，候选为空，`selectPoolMember` 返回 null，上层抛
   `ImageBackendPoolUnavailableError`（「当前生图后端分组没有可用账号或 API」）。即对这两类
   请求表现为「无可用后端」。
 - 方式 ①（普通请求）：不受影响——候选仍有该组的 api/account 成员，照常出图，只是没有

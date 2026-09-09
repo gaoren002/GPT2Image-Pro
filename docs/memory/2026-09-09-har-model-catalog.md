@@ -60,6 +60,7 @@ prepare 和 submit 都发送 `thinking_effort`、`conversation_origin: "tpp"`、
 - 新消息按用户消息的 `working_turn_id` / `turn_exchange_id` 与父链关联，隔离前后轮次。抓包没有翻页请求，未猜测 cursor 参数；本次查询只读取最新十轮。
 - Work 的 analysis 文本不是最终答复；空的最终答复仍应结束轮询，不能沿用此前文本。
 - 用户随后明确确认 Web 默认已经是 GPT Image 2.5，并否决额外版本保护。已移除 Web 2.5 拦截、因模型版本强制转 Responses 的路由与报价逻辑，恢复纯 Web 生成/编辑和混合组 Web 优先。HAR 没有 API 风格图片版本字段，不应据此阻止网页默认引擎请求；继续沿用 `picture_v2`。
+- 用户进一步要求纯 Web 主组任意图片型号均按 2.5 执行，选路、倍率、记录和界面已同步，见 [Web 分组固定模型](2026-09-09-web-group-model.md)。
 - Work 目录声明图片工具可用，不代表本资料实测了 Work 五模型的图片工具矩阵。
 
 ## Astra + Sunburst 的 API 配置

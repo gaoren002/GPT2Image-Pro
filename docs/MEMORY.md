@@ -22,6 +22,7 @@
 
 ## 功能
 
+- [2026-09-09 Web 分组固定模型](memory/2026-09-09-web-group-model.md) — 用户明确纯 Web 主组任意图片型号均按 2.5；选路前清除 Firefly 意图并排除 Adobe 来源，出站/倍率/记录/UI 同步；文本模型权限独立。
 - [2026-09-09 HAR 模型表](memory/2026-09-09-har-model-catalog.md) — Work 五模型映射 `-wm` 与专用档位，Images 最新/5.6/5.5 分表；兼容新版 messages 会话读取；Astra + Sunburst 配对回归。用户确认 Web 默认已是 2.5，已移除版本拦截，恢复 Web 优先与报价。
 - [2026-09-09 模型升级](memory/2026-09-09-model-upgrade.md) — 图片默认 `gpt-image-2.5`，API/Codex 别名出站映射 Sunburst；Web 使用默认 2.5；普通文本仅 5.5，Ultra+ 通过 `models.premium` 开放 Astra 与 5.6 三款。
 - [UI 一致性治理](memory/ui-consistency-2026-09.md) — 黑白墨纸全站规格(圆角/阴影/动效/Tab/眉标/页头/加载态 token 基准)+PlanBadge 黑白化；动效基建在 packages/ui globals.css(animate-fade-up/stagger/lift-hover/skeleton-shimmer)；vitest 并行满载偶发 3 用例超时假失败(--fileParallelism=false 全绿)

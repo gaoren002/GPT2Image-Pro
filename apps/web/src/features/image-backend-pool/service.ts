@@ -1,3 +1,4 @@
+/** 后端池服务：在套餐和主分组边界内选择可用成员，并管理租约、重试及成员状态。 */
 import { createHash } from "node:crypto";
 import { db } from "@repo/database";
 import {
@@ -74,6 +75,7 @@ import {
   type ImageApiHealthResult,
 } from "./health-check";
 import { parseImportTokensText } from "./import-token-parser";
+import { resolvePoolModelRouting } from "./model-routing";
 import type {
   AdminImageBackendAccountListOptions,
   AdminImageBackendAccountStatusFilter,
@@ -131,8 +133,8 @@ type ResolveBackendOptions = {
   userId: string;
   apiKeyId?: string;
   requestKind: ImageBackendRequestKind;
-  // 请求的模型 id。adobe（Firefly）按模型前缀自动路由：firefly-* 只调度 adobe 后端，
-  // 其余模型（gpt-image 等）只调度 codex/web/api，二者互不混用。
+  // 请求模型：纯 Web 主组的图片请求统一用 GPT Image 2.5；其他组保留 Firefly 前缀路由。
+  // chat 的顶层模型是文本模型，不随图片型号归一而更改。
   requestedModel?: string;
   preferredMemberId?: string;
   preferredMemberType?: "api" | "account" | "adobe";
@@ -143,8 +145,7 @@ type ResolveBackendOptions = {
   // 账号 plan 过滤(opt-in,默认 "any" 不过滤)。"paid" 仅选付费级账号,供 PPT/PSD
   // 可编辑文件生成用(代码解释器限付费)。只作用于 account 候选,不影响 api/adobe。
   accountPlanFilter?: ImageBackendAccountPlanFilter;
-  // 强制走 adobe（firefly）后端：与 requestedModel 为 firefly-* 前缀等价地把候选收敛到
-  // 仅 adobe。供 force_firefly 请求标志使用（用户可对任意模型强制改用 adobe 出图）。
+  // 非纯 Web 主组可强制走 Adobe；纯 Web 主组固定图片型号的规则优先于此标志。
   forceFirefly?: boolean;
   allowAnyResponsesBackend?: boolean;
   // 跨组选真 web 账号(忽略 apiKeyId/用户偏好的分组作用域):PPT/PSD 可编辑文件生成必须用
@@ -426,12 +427,6 @@ function normalizeGroupBackendType(
   value?: unknown
 ): ImageBackendGroupBackendType {
   return value === "web" || value === "responses" ? value : "mixed";
-}
-
-// adobe（Firefly）模型按前缀识别：所有 firefly-* 模型自动路由到 adobe 后端，其余模型
-// （gpt-image 等）只走 codex/web/api。用于调度时的成员过滤，保证二者互不混用。
-function isAdobeFireflyModelId(model?: string | null): boolean {
-  return (model || "").trim().toLowerCase().startsWith("firefly-");
 }
 
 function stripTrailingSlash(value: string) {
@@ -2285,9 +2280,14 @@ async function selectPoolMember(
   capacityWaitCount = 0,
   accountPlanFilter: ImageBackendAccountPlanFilter = "any"
 ): Promise<PoolMember | null> {
-  // fireflyOnly：候选收敛到仅 adobe 的两种触发——显式 force_firefly 标志，或请求模型
-  // 本身就是 firefly-* 前缀。两者语义一致：本次只调度 adobe 后端，不混入 api/account。
-  const fireflyOnly = forceFirefly || isAdobeFireflyModelId(requestedModel);
+  // 只看目标主组；mixed 组选中 Web 子组时仍保留其原始模型与 Adobe 路由规则。
+  const modelRouting = resolvePoolModelRouting({
+    groupBackendType: getGroupBackendType(groupMetadata),
+    requestKind,
+    requestedModel,
+    forceFirefly,
+  });
+  const fireflyOnly = modelRouting.fireflyOnly;
   const selectionStartedAt = Date.now();
   const contexts = groupContexts?.length
     ? groupContexts
@@ -2630,6 +2630,7 @@ async function selectPoolMember(
         // fireflyOnly（force_firefly 或 firefly-* 模型）时通用 API 不参与、只走 adobe；
         // 但「Adobe 来源」api（上游即 Adobe）参与 firefly 候选：force_firefly 直接以 gpt
         // 格式服务，显式 firefly-* 由下游反向转换成 gpt 请求后服务。
+        (!modelRouting.excludeAdobeBackends || !row.adobeSourced) &&
         (!fireflyOnly || row.adobeSourced) &&
         // 阶段参与纯按车道:web 偏好只取 web/mixed 分组的 API、codex 偏好只取 codex/mixed
         // 分组的 API（mixed 谁都可请求）。是否经 responses 端点出图属于"能否服务该
@@ -2741,9 +2742,8 @@ async function selectPoolMember(
       metadata: row.metadata,
     }));
 
-  // adobe 成员：作为特殊 firefly account 成员，对图像生成/编辑请求始终参与候选（无论
-  // fireflyOnly 与否），按 priority 与 api/account 同池排序——管理员把 adobe 优先级调低即
-  // 天然成为兜底。fireflyOnly 时 api/account 已被排除，候选自然只剩 adobe。
+  // 非纯 Web 主组中，Adobe 对生成/编辑请求作为同池候选；纯 Web 固定 2.5 时排除
+  // 会改回旧型号的 Adobe，避免已授权的组路由在实际出站时失效。
   const adobeMembers: PoolMember[] = adobeRows
     .filter((row) => {
       const matchedGroupId = row.matchedGroupId || row.groupId;
@@ -2751,6 +2751,7 @@ async function selectPoolMember(
       const metadata = context?.metadata ?? groupMetadata;
       const effectiveRequestKind = requestKind || "image_generation";
       return (
+        !modelRouting.excludeAdobeBackends &&
         (effectiveRequestKind === "image_generation" ||
           effectiveRequestKind === "image_edit") &&
         groupBackendAllowsRequest(metadata, effectiveRequestKind) &&
@@ -2953,8 +2954,8 @@ async function selectPoolMember(
       stickySessionMember,
       accountBackendPreference,
       accountBackendPreferenceMode,
-      requestedModel,
-      forceFirefly,
+      modelRouting.requestedModel,
+      modelRouting.forceFirefly,
       staleRetryCount + 1,
       capacityWaitCount,
       accountPlanFilter
@@ -2983,8 +2984,8 @@ async function selectPoolMember(
       stickySessionMember,
       accountBackendPreference,
       accountBackendPreferenceMode,
-      requestedModel,
-      forceFirefly,
+      modelRouting.requestedModel,
+      modelRouting.forceFirefly,
       staleRetryCount,
       capacityWaitCount + 1,
       accountPlanFilter
@@ -3236,6 +3237,12 @@ async function resolvePoolMember(
     }),
   ]);
 
+  const modelRouting = resolvePoolModelRouting({
+    groupBackendType: getGroupBackendType(group.metadata),
+    requestKind: options.requestKind,
+    requestedModel: options.requestedModel,
+    forceFirefly: options.forceFirefly,
+  });
   const member = await selectPoolMember(
     group.id,
     group.metadata,
@@ -3253,8 +3260,8 @@ async function resolvePoolMember(
     stickySessionMember,
     options.accountBackendPreference,
     options.accountBackendPreferenceMode,
-    options.requestedModel,
-    options.forceFirefly,
+    modelRouting.requestedModel,
+    modelRouting.forceFirefly,
     0,
     0,
     options.accountPlanFilter ?? "any"
@@ -3262,7 +3269,8 @@ async function resolvePoolMember(
   if (!member) {
     const fallback = await resolveAnyResponsesMember();
     if (fallback) return fallback;
-    if (requestedGroup.explicit) {
+    // 默认 Web 组同样保留已验权的组上下文，避免上层按被忽略的 Firefly 名称误报 Adobe 故障。
+    if (requestedGroup.explicit || getGroupBackendType(group.metadata) === "web") {
       throw new ImageBackendPoolUnavailableError(
         `生图后端分组「${group.name}」没有可用账号或 API`
       );
@@ -3294,6 +3302,12 @@ async function resolveAnyWebPoolMember(
     if (!groupBackendAllowsRequest(group.metadata, options.requestKind)) {
       continue;
     }
+    const modelRouting = resolvePoolModelRouting({
+      groupBackendType: getGroupBackendType(group.metadata),
+      requestKind: options.requestKind,
+      requestedModel: options.requestedModel,
+      forceFirefly: options.forceFirefly,
+    });
     const member = await selectPoolMember(
       group.id,
       group.metadata,
@@ -3307,8 +3321,8 @@ async function resolveAnyWebPoolMember(
       null,
       "web",
       options.accountBackendPreferenceMode,
-      options.requestedModel,
-      options.forceFirefly,
+      modelRouting.requestedModel,
+      modelRouting.forceFirefly,
       0,
       0,
       options.accountPlanFilter ?? "any"
@@ -3352,6 +3366,12 @@ async function resolveAnyResponsesPoolMember(
         key: options.stickySessionKey,
       }),
     ]);
+    const modelRouting = resolvePoolModelRouting({
+      groupBackendType: getGroupBackendType(group.metadata),
+      requestKind: "responses",
+      requestedModel: options.requestedModel,
+      forceFirefly: options.forceFirefly,
+    });
     const member = await selectPoolMember(
       group.id,
       group.metadata,
@@ -3365,8 +3385,8 @@ async function resolveAnyResponsesPoolMember(
       stickySessionMember,
       "responses",
       options.accountBackendPreferenceMode,
-      options.requestedModel,
-      options.forceFirefly,
+      modelRouting.requestedModel,
+      modelRouting.forceFirefly,
       0,
       0,
       options.accountPlanFilter ?? "any"
@@ -3395,12 +3415,14 @@ export async function resolveImageBackendPoolConfig(
       options,
       resolved.group.metadata
     );
-    // 盖 firefly 意图(与 selectPoolMember:2174 的 fireflyOnly 同口径):让换号重试能
-    // 保持「只走 Adobe」,避免 firefly 请求被重试到非 Adobe 后端。
+    // 与选号使用同一主组策略；纯 Web 组不得在写回时恢复原始 Firefly 意图。
     if (result?.config.backend) {
-      result.config.backend.fireflyOnly =
-        options.forceFirefly === true ||
-        isAdobeFireflyModelId(options.requestedModel);
+      result.config.backend.fireflyOnly = resolvePoolModelRouting({
+        groupBackendType: getGroupBackendType(resolved.group.metadata),
+        requestKind: options.requestKind,
+        requestedModel: options.requestedModel,
+        forceFirefly: options.forceFirefly,
+      }).fireflyOnly;
     }
     return result;
   } catch (error) {

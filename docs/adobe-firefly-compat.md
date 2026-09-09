@@ -1,10 +1,13 @@
 # Adobe Firefly 兼容转换
 
-当一个请求带 `force_firefly`，或本身就是 `firefly-*` 模型、或在普通调度里兜底到了 adobe
+在非纯 Web 主组中，当一个请求带 `force_firefly`，或本身就是 `firefly-*` 模型、或在普通调度里兜底到了 adobe
 后端时，我们把**站内标准请求（你的 prompt / size / quality / model / images）兼容转换成
 Adobe Firefly 接受的格式**再派发。本转换是有损/语义近似的：站内的部分参数 Adobe 不消费，
 会被静默忽略；gpt-image 请求落到 adobe 实际走的是 Firefly 侧的 gpt-image，风格/能力与
 OpenAI 原生并非 1:1。
+
+纯 Web 主组的图片请求统一使用 `gpt-image-2.5`，忽略图片别名与 `force_firefly`，不进入
+Adobe 或 Adobe 来源 API，也不应用这里的模型转换和 Adobe 模型族倍率。
 
 转换逻辑均可在源码核对：
 

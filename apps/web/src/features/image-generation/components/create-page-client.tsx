@@ -2643,18 +2643,24 @@ export function CreatePageClient({
     waterfallAllowed,
   ]);
 
-  const [textModel, setTextModel] = useCreateRuntimeState(
+  const [selectedTextModel, setTextModel] = useCreateRuntimeState(
     "textModel",
     "default"
   );
-  const [editModel, setEditModel] = useCreateRuntimeState(
+  const [selectedEditModel, setEditModel] = useCreateRuntimeState(
     "editModel",
     "default"
   );
-  const [chatImageModel, setChatImageModel] = useCreateRuntimeState(
+  const [selectedChatImageModel, setChatImageModel] = useCreateRuntimeState(
     "chatImageModel",
     "default"
   );
+  // 纯 Web 的实际图片模型固定为 2.5；保留其他分组的选择，切回时恢复且不影响主文本模型。
+  const textModel = isWebOnlyBackend ? DEFAULT_IMAGE_MODEL : selectedTextModel;
+  const editModel = isWebOnlyBackend ? DEFAULT_IMAGE_MODEL : selectedEditModel;
+  const chatImageModel = isWebOnlyBackend
+    ? DEFAULT_IMAGE_MODEL
+    : selectedChatImageModel;
   const [useEditFirstImageSize, setUseEditFirstImageSize] =
     useCreateRuntimeState("useEditFirstImageSize", true);
   const [useAutoEditSize, setUseAutoEditSize] = useCreateRuntimeState(

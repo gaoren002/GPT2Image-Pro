@@ -1,3 +1,4 @@
+/** 外部图片生成请求适配：校验请求结构，图片型号语义交由统一操作按分组处理。 */
 import { randomUUID } from "node:crypto";
 import { withApiLogging } from "@repo/shared/api-logger";
 import {
@@ -17,6 +18,7 @@ import {
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
+import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
   createJsonKeepAliveResponse,
@@ -40,7 +42,6 @@ import {
 import {
   alignImageSizeToStep,
   DEFAULT_IMAGE_SIZE,
-  getImageModel,
   IMAGE_PROMPT_MAX_CHARACTERS,
   IMAGE_PROMPT_TOO_LONG_MESSAGE,
   validateImageSize,
@@ -155,10 +156,6 @@ function toPartialPayload(image: PartialImageResult, index: number) {
   };
 }
 
-function resolveImageModel(model: string | undefined) {
-  return getImageModel(model);
-}
-
 export const postExternalImageGenerations = withApiLogging(
   async (request: NextRequest) => {
     const auth = await authenticateExternalApiRequest(request);
@@ -193,12 +190,7 @@ export const postExternalImageGenerations = withApiLogging(
       );
     }
 
-    const imageModel = resolveImageModel(parsed.data.model);
-    if (!imageModel) {
-      return openAIImageError(
-        "Unsupported model for /v1/images/generations. Use a gpt-image-* model, or call /v1/responses for Responses image models."
-      );
-    }
+    const imageModel = normalizeExternalImageModelInput(parsed.data.model);
 
     const plan = await getUserPlan(auth.userId);
     const limits = await getPlanLimits(plan.plan);

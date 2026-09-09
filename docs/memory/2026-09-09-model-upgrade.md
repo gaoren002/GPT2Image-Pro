@@ -10,7 +10,7 @@
 ## Web 边界
 
 - 用户确认 ChatGPT Web 默认图片引擎已经是 GPT Image 2.5，沿用 `picture_v2` 即可。先前因缺少 API 风格版本字段而加入的限制被用户否决并移除。
-- 默认、Sunburst、Flare 图片选择均可进入 Web 生成/编辑流程；混合组恢复既有 Web 优先、失败后回退逻辑，报价按预测车道计算。真正需要 Responses 的 Agent 等请求仍按原业务限制调度。
+- 纯 Web 主组的任意图片型号统一为 2.5，详见 [固定模型规则](2026-09-09-web-group-model.md)；混合组恢复既有 Web 优先、失败后回退逻辑，报价按预测车道计算。真正需要 Responses 的 Agent 等请求仍按原业务限制调度。
 - 后续依据用户 HAR 补齐五模型的 Work slug 与 Images 预设，详见 [HAR 模型表](2026-09-09-har-model-catalog.md)。套餐权限、API/Codex 的图片模型字段映射保持不变。
 
 ## 来源

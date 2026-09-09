@@ -81,6 +81,20 @@ export function getImageModel(model?: string | null, fallback?: string | null) {
   return DEFAULT_IMAGE_MODEL;
 }
 
+/**
+ * 按已选主分组解析实际图片型号，供生成记录、计费和出站共用；不改变文本模型。
+ * 纯 Web 忽略任意输入和后端默认值，统一为 2.5；其他分组仍校验图片型号，无副作用。
+ */
+export function getImageModelForGroup(
+  model?: string | null,
+  fallback?: string | null,
+  groupBackendType?: "web" | "mixed" | "responses"
+) {
+  return groupBackendType === "web"
+    ? DEFAULT_IMAGE_MODEL
+    : getImageModel(model, fallback);
+}
+
 /** 将站内默认简称解析为上游正式 ID；显式模型和后端自定义名称不变。 */
 export function getUpstreamImageModel(model: string): string {
   const requested = model.trim();

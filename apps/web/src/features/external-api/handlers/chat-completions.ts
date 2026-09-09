@@ -1,3 +1,4 @@
+/** 外部 Chat 请求适配：独立传递文本型号与图片型号，交由统一操作校验权限和分组。 */
 import { withApiLogging } from "@repo/shared/api-logger";
 import {
   canUsePlanCapability,
@@ -9,6 +10,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
+import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
   createJsonKeepAliveResponse,
@@ -35,7 +37,6 @@ import { uploadTemporaryImageUrls } from "@/features/image-generation/request-ut
 import {
   alignImageSizeToStep,
   DEFAULT_IMAGE_SIZE,
-  getImageModel,
   isImageModel,
   validateImageSize,
 } from "@/features/image-generation/resolution";
@@ -452,14 +453,9 @@ export const postExternalChatCompletions = withApiLogging(
     const topLevelModelIsImage = isImageModel(topLevelModel);
     const explicitImageModel =
       parsed.data.imageModel || parsed.data.image_model;
-    const imageModel = getImageModel(
+    const imageModel = normalizeExternalImageModelInput(
       explicitImageModel || (topLevelModelIsImage ? topLevelModel : undefined)
     );
-    if ((parsed.data.imageModel || parsed.data.image_model) && !imageModel) {
-      return openAIImageError(
-        "Unsupported image_model. Use a gpt-image-* model."
-      );
-    }
 
     const responseFormat = imageResponseFormat(parsed.data.response_format);
     const useStreamResponse = wantsImageStreamResponse(

@@ -78,6 +78,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_SIZE,
   getImageModel,
+  getImageModelForGroup,
   getUpstreamImageModel,
   isImageModel,
   normalizeImageModel,
@@ -220,15 +221,13 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+/** 解析已选分组的图片型号并映射 API 别名；非 Web 的非法型号仍在发送前拒绝。 */
 function getModel(config: ApiConfig, model?: string) {
-  const requestedModel = normalizeImageModel(model);
-  if (requestedModel && !isImageModel(requestedModel)) {
-    throw new Error(
-      "Unsupported model for image generation. Use a gpt-image-* model."
-    );
-  }
-
-  const imageModel = getImageModel(requestedModel, config.model);
+  const imageModel = getImageModelForGroup(
+    model,
+    config.model,
+    config.backend?.groupBackendType
+  );
   if (!imageModel) {
     throw new Error(
       "Unsupported model for image generation. Use a gpt-image-* model."
@@ -4118,6 +4117,9 @@ export async function generateImage(
   params: GenerateImageParams,
   callbacks?: ImageGenerationCallbacks
 ): Promise<GenerateImageResult> {
+  if (config.backend?.groupBackendType === "web") {
+    params = { ...params, model: DEFAULT_IMAGE_MODEL };
+  }
   if (config.backend?.reportResult) {
     return retryPoolBackendResult(
       config,
@@ -4279,6 +4281,9 @@ export async function editImage(
   params: EditImageParams,
   callbacks?: ImageGenerationCallbacks
 ): Promise<GenerateImageResult> {
+  if (config.backend?.groupBackendType === "web") {
+    params = { ...params, model: DEFAULT_IMAGE_MODEL };
+  }
   if (config.backend?.reportResult) {
     return retryPoolBackendResult(
       config,
@@ -4537,6 +4542,10 @@ export async function generateChatImage(
   params: ChatImageParams,
   callbacks?: ImageGenerationCallbacks
 ): Promise<GenerateImageResult> {
+  // 分组仅固定图片型号；顶层文本模型仍走统一白名单和套餐校验。
+  if (config.backend?.groupBackendType === "web") {
+    params = { ...params, imageModel: DEFAULT_IMAGE_MODEL };
+  }
   if (config.backend?.reportResult) {
     return retryPoolBackendResult(
       config,

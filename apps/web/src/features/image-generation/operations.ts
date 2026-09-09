@@ -65,7 +65,7 @@ import {
   alignImageSizeToStep,
   DEFAULT_IMAGE_SIZE,
   getImageCreditCostBreakdown,
-  getImageModel,
+  getImageModelForGroup,
   type ImageBaseCreditPricing,
   type ImageQualityLevel,
   type ImageThinkingLevel,
@@ -1126,9 +1126,8 @@ export async function runImageGenerationForUser(
   // 统一的 Web-first 偏好(默认开启,详见 shouldForceWebBackend)。两个变量同值,
   // 分别供 gen/edit 路径(forceWebBackend)与 chat 路径(mixWebFirst)透传到 service 层;
   // chat 的 mix_web_first 已并入该决策,不再单独走像素区间判定。
-  // Firefly(adobe)模型按前缀路由,永远走 adobe 后端,绝不参与 Web-first 调度;否则会被
-  // 导向 web/codex 账号 → "分组无可用后端"。force_firefly 强制走 adobe 同理。故二者一律
-  // 关闭 Web-first 偏好,确保 firefly 路径不被 Web-first 覆盖。
+  // Firefly 型号及强制标志在非纯 Web 组沿用 Adobe 路由，因此不主动施加 Web 优先偏好。
+  // 纯 Web 主组在后端池内优先归一为 2.5，不受此处未施加偏好的影响。
   const preferWebFirst =
     !isFireflyModel(input.model) &&
     !input.forceFirefly &&
@@ -1351,6 +1350,19 @@ export async function runImageGenerationForUser(
 
           const { config, useCredits } = effectiveConfig;
           leasedConfig = config;
+          // 先按已选主分组确定实际图片型号，再计算倍率和记录，避免 Web 按输入的 Firefly 族计费。
+          const imageModel = getImageModelForGroup(
+            input.mode === "chat" ? input.imageModel : input.model,
+            config.model,
+            config.backend?.groupBackendType
+          );
+          if (!imageModel) {
+            return {
+              error:
+                "Unsupported model for image generation. Use a gpt-image-* model.",
+              generationId,
+            };
+          }
           // 整体计费倍率 = 整个 Adobe(后端)倍率 × 该 firefly 图像模型族倍率。
           // 模型族倍率只在此处折入一次,得到的 effectiveMultiplier 作为本次请求统一的
           // billingMultiplier 向下传递,确保扣费/明细/退款/元数据口径一致(退款须按相同
@@ -1360,7 +1372,9 @@ export async function runImageGenerationForUser(
             await getRuntimeSettingJson("IMAGE_MODEL_MULTIPLIERS")
           );
           const modelMultiplier = resolveImageModelMultiplier(
-            input.model,
+            config.backend?.groupBackendType === "web"
+              ? imageModel
+              : input.model,
             imageModelMultipliers
           );
           const billingMultiplier = backendBillingMultiplier * modelMultiplier;
@@ -1418,7 +1432,6 @@ export async function runImageGenerationForUser(
                 initialCreditCharge,
               })
             : 0;
-          let imageModel: string;
           let gptModel: string | undefined;
           let recordModel: string;
           try {
@@ -1439,28 +1452,8 @@ export async function runImageGenerationForUser(
                     planCapabilities.features["models.premium"],
                 });
               }
-              const requestedImageModel = getImageModel(
-                input.imageModel,
-                config.model
-              );
-              if (!requestedImageModel) {
-                throw new Error(
-                  "Unsupported model for image generation. Use a gpt-image-* model."
-                );
-              }
-              imageModel = requestedImageModel;
               recordModel = gptModel || imageModel;
             } else {
-              const requestedImageModel = getImageModel(
-                input.model,
-                config.model
-              );
-              if (!requestedImageModel) {
-                throw new Error(
-                  "Unsupported model for image generation. Use a gpt-image-* model."
-                );
-              }
-              imageModel = requestedImageModel;
               gptModel = await resolveRequestedPoolGptModel({
                 config,
                 model: input.gptModel,

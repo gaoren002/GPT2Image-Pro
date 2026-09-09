@@ -1,3 +1,4 @@
+/** 验证图片型号、分组归一、尺寸和积分纯函数，无网络及数据库依赖。 */
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,6 +9,7 @@ import {
   getImageBaseCredits,
   getImageCreditCostBreakdown,
   getImageModel,
+  getImageModelForGroup,
   getQualityMultiplier,
   getThinkingMultiplier,
   GPT_IMAGE_25_FLARE_MODEL,
@@ -30,6 +32,37 @@ import {
   THINKING_MULTIPLIER,
   validateImageSize,
 } from "./resolution";
+
+describe("纯 Web 分组图片模型", () => {
+  it.each([
+    undefined,
+    "",
+    "gpt-image-2",
+    "gpt-image-2.5-flare",
+    "firefly-nano-banana",
+    "custom-image-model",
+  ])("将 %s 统一为 2.5，不采用后端默认型号", (model) => {
+    expect(getImageModelForGroup(model, "gpt-image-2", "web")).toBe(
+      "gpt-image-2.5"
+    );
+  });
+
+  it.each([
+    undefined,
+    "mixed",
+    "responses",
+  ] as const)("其他分组 %s 保留型号与校验", (group) => {
+    expect(getImageModelForGroup("gpt-image-2", undefined, group)).toBe(
+      "gpt-image-2"
+    );
+    expect(getImageModelForGroup("firefly-nano-banana", undefined, group)).toBe(
+      "firefly-nano-banana"
+    );
+    expect(
+      getImageModelForGroup("custom-image-model", undefined, group)
+    ).toBeNull();
+  });
+});
 
 describe("image resolution credit pricing", () => {
   it("keeps legacy default anchor prices for 1024 square and 4K", () => {

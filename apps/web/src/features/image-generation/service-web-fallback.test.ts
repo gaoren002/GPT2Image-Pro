@@ -1,3 +1,4 @@
+/** 验证 Web 分组固定图片模型和实际失败回退；隔离数据库、账号池及网络副作用。 */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@repo/shared/system-settings", () => ({
@@ -41,12 +42,70 @@ vi.mock("@/features/image-backend-pool/service", () => backendPoolMock);
 vi.mock("./chatgpt-web", () => ({
   generateImageWithChatGptWeb: vi.fn(async () => ({ error: "terminated" })),
   editImageWithChatGptWeb: vi.fn(async () => ({ error: "terminated" })),
+  chatWithChatGptWeb: vi.fn(async () => ({ responseText: "回复" })),
 }));
 
 describe("image service Web-first fallback", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it.each([
+    "gpt-image-2",
+    "gpt-image-2.5-flare",
+    "firefly-nano-banana",
+    "arbitrary-model",
+  ])("纯 Web 的生成、编辑和聊天图片字段 %s 统一为 2.5", async (model) => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { generateImage, editImage, generateChatImage } = await import(
+      "./service"
+    );
+    const {
+      generateImageWithChatGptWeb,
+      editImageWithChatGptWeb,
+      chatWithChatGptWeb,
+    } = await import("./chatgpt-web");
+    const config = {
+      baseUrl: "https://chatgpt.com",
+      apiKey: "test-key",
+      backend: {
+        type: "pool-account" as const,
+        id: "web-1",
+        groupBackendType: "web" as const,
+        accountBackend: "web" as const,
+      },
+    };
+    const imageBase64 = Buffer.from("web-default").toString("base64");
+    vi.mocked(generateImageWithChatGptWeb).mockResolvedValueOnce({
+      imageBase64,
+    });
+    vi.mocked(editImageWithChatGptWeb).mockResolvedValueOnce({ imageBase64 });
+    expect(
+      (await generateImage(config, { prompt: "draw", model })).imageBase64
+    ).toBe(imageBase64);
+    expect(
+      (await editImage(config, { prompt: "edit", model, images: [] }))
+        .imageBase64
+    ).toBe(imageBase64);
+    for (const mock of [generateImageWithChatGptWeb, editImageWithChatGptWeb]) {
+      expect(mock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ model: "gpt-image-2.5-sunburst" })
+      );
+    }
+    const result = await generateChatImage(config, {
+      prompt: "hello",
+      model: "gpt-5.5",
+      imageModel: model,
+      webChat: true,
+    });
+    expect(result.responseText).toBe("回复");
+    expect(chatWithChatGptWeb).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ gptModel: "gpt-5.5", model: "gpt-image-2.5" }),
+      []
+    );
   });
 
   it.each([

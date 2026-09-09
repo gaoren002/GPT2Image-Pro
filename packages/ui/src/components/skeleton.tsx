@@ -1,5 +1,7 @@
 "use client";
 
+import { cn } from "../utils";
+
 /**
  * 统一骨架屏组件(全站加载态单一来源)。
  *

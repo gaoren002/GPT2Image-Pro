@@ -33,6 +33,7 @@
 
 ## 工程 / CI
 
+- [2026-09-09 蓝绿部署](memory/2026-09-09-blue-green-deployment.md) — 生产已运行 `7889acca` 模型升级与 Web 固定 2.5；3307/3308 和公网冒烟通过；无数据库迁移，Worker 保持原版本；旧 release 与配置备份保留供回滚。
 - [CI/CD 流水线](CI-CD.md) — ci.yml 6 门禁（docs-mirror/lint/typecheck/test/build/docker-build）+ docker-release(tag) + dependabot
 - lint 门禁**仅 PR、仅改动文件**用 `biome lint --changed`（非 `biome ci`——全仓历史未 biome 格式化；对齐团队 `turbo lint` 约定）；typecheck/test/build 全仓 push+PR 双跑
 - typecheck job 必须先 `pnpm --filter @repo/web exec fumadocs-mdx` 生成 `.source`（gitignore 忽略、独立 tsc 不自生成），否则连锁 any 报错

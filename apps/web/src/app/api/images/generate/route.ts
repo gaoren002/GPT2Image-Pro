@@ -49,7 +49,7 @@ const generateImageSchema = z.object({
   thinking: z.enum(["none", "low", "medium", "high", "xhigh"]).optional(),
   stream: z.boolean().optional(),
   count: z.number().int().min(1).max(10_000).optional(),
-  quality: z.enum(["auto", "low", "medium", "high"]).optional(),
+  quality: z.enum(["auto", "low", "medium", "high", "xhigh", "max"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   output_format: z.enum(["png", "jpeg", "webp"]).optional(),
   outputFormat: z.enum(["png", "jpeg", "webp"]).optional(),

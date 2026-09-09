@@ -39,6 +39,11 @@ describe("gptImageDetailLevelFromQuality", () => {
     expect(gptImageDetailLevelFromQuality("high")).toBe(5);
     expect(gptImageDetailLevelFromQuality(null)).toBe(1);
   });
+
+  it("gpt-image-2.5 新档位 xhigh/max 取最高 detailLevel", () => {
+    expect(gptImageDetailLevelFromQuality("xhigh")).toBe(5);
+    expect(gptImageDetailLevelFromQuality("max")).toBe(5);
+  });
 });
 
 describe("buildFireflyImagePayloadCandidates", () => {

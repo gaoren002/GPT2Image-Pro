@@ -560,7 +560,7 @@ type MaskPoint = {
   size: number;
 };
 
-type ImageQuality = "auto" | "low" | "medium" | "high";
+type ImageQuality = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 type ImageModeration = "auto" | "low";
 type ImageOutputFormat = "png" | "jpeg" | "webp";
 type ImageBackground = "auto" | "opaque" | "transparent";
@@ -1053,6 +1053,9 @@ const QUALITY_OPTIONS: Array<{ value: ImageQuality; label: string }> = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  // gpt-image-2.5 系列（sunburst/flare）新增档位。
+  { value: "xhigh", label: "XHigh" },
+  { value: "max", label: "Max" },
 ];
 const MODERATION_OPTIONS: Array<{ value: ImageModeration; label: string }> = [
   { value: "auto", label: "Auto" },
@@ -2058,6 +2061,8 @@ export function CreatePageClient({
         high: "高",
         low: "低",
         medium: "中",
+        xhigh: "超高",
+        max: "极致",
       }[qualityValue]
     );
   const moderationLabel = (moderationValue: ImageModeration) =>

@@ -101,7 +101,7 @@ const responseSchema = z.object({
     .refine((value) => !value || validateImageSize(value).valid, {
       message: "Invalid image size",
     }),
-  quality: z.enum(["auto", "low", "medium", "high"]).optional(),
+  quality: z.enum(["auto", "low", "medium", "high", "xhigh", "max"]).optional(),
   moderation: z.enum(["auto", "low"]).optional(),
   output_format: z.enum(["png", "jpeg", "webp"]).optional(),
   output_compression: z.number().int().min(0).max(100).optional(),

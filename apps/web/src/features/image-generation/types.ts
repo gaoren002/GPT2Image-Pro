@@ -133,7 +133,7 @@ export interface ImageGenerationCallbacks {
   onAgentEvent?: (event: AgentRunEvent) => Promise<void> | void;
 }
 
-export type ImageQuality = "auto" | "low" | "medium" | "high";
+export type ImageQuality = "auto" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ImageModeration = "auto" | "low";
 export type ImageOutputFormat = "png" | "jpeg" | "webp";
 export type ImageBackground = "transparent" | "opaque" | "auto";

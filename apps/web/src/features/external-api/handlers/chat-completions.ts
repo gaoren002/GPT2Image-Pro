@@ -87,7 +87,7 @@ const chatCompletionSchema = z
       .refine((value) => !value || validateImageSize(value).valid, {
         message: "Invalid image size",
       }),
-    quality: z.enum(["auto", "low", "medium", "high"]).optional(),
+    quality: z.enum(["auto", "low", "medium", "high", "xhigh", "max"]).optional(),
     moderation: z.enum(["auto", "low"]).optional(),
     response_format: z
       .union([

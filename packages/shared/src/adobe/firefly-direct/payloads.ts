@@ -142,7 +142,8 @@ export function gptImageDetailLevelFromQuality(
   const quality = String(qualityLevel || "low")
     .trim()
     .toLowerCase();
-  if (quality === "high") return 5;
+  // xhigh/max 是 gpt-image-2.5 新增档位；Firefly 上游只理解 1-5，取最高档。
+  if (quality === "high" || quality === "xhigh" || quality === "max") return 5;
   if (quality === "medium") return 3;
   return 1;
 }

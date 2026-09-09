@@ -132,6 +132,9 @@ const VALID_QUALITIES = new Set<ImageQuality>([
   "low",
   "medium",
   "high",
+  // gpt-image-2.5（sunburst/flare）新增档位。
+  "xhigh",
+  "max",
 ]);
 const VALID_MODERATION = new Set<ImageModeration>(["auto", "low"]);
 const DEFAULT_RESPONSES_MODEL = GPT54_CHAT_MODEL;

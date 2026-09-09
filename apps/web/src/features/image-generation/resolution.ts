@@ -84,6 +84,9 @@ export const QUALITY_MULTIPLIER: Record<string, number> = {
   medium: 1.0,
   high: 1.0,
   auto: 1.0,
+  // gpt-image-2.5（sunburst/flare）新增档位；质量不参与本站计费，维持 1.0。
+  xhigh: 1.0,
+  max: 1.0,
 } as const;
 
 /**
@@ -98,7 +101,13 @@ export const THINKING_MULTIPLIER: Record<string, number> = {
   xhigh: 1.0,
 } as const;
 
-export type ImageQualityLevel = "low" | "medium" | "high" | "auto";
+export type ImageQualityLevel =
+  | "low"
+  | "medium"
+  | "high"
+  | "auto"
+  | "xhigh"
+  | "max";
 export type ImageThinkingLevel =
   | "none"
   | "minimal"

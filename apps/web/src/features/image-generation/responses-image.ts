@@ -171,7 +171,10 @@ function normalizeQuality(quality?: string): ImageQuality | undefined {
     quality === "low" ||
     quality === "medium" ||
     quality === "high" ||
-    quality === "auto"
+    quality === "auto" ||
+    // gpt-image-2.5（sunburst/flare）新增档位。
+    quality === "xhigh" ||
+    quality === "max"
   ) {
     return quality;
   }

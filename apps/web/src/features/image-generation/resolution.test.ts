@@ -179,6 +179,8 @@ describe("image resolution credit pricing", () => {
     expect(QUALITY_MULTIPLIER.medium).toBe(1.0);
     expect(QUALITY_MULTIPLIER.high).toBe(1.0);
     expect(QUALITY_MULTIPLIER.auto).toBe(1.0);
+    expect(QUALITY_MULTIPLIER.xhigh).toBe(1.0);
+    expect(QUALITY_MULTIPLIER.max).toBe(1.0);
 
     expect(THINKING_MULTIPLIER.none).toBe(1.0);
     expect(THINKING_MULTIPLIER.minimal).toBe(1.0);

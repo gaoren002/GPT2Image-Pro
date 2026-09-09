@@ -423,6 +423,20 @@ html[data-cinema="film"] [data-film-fallback] {
   }
 }
 
+@layer utilities {
+  .animate-fade-up {
+    animation: enter-fade-up 0.55s var(--ease-ink) both;
+  }
+  .animate-fade-up-sm {
+    animation: enter-fade-up-sm 0.45s var(--ease-ink) both;
+  }
+  .animate-fade-in {
+    animation: enter-fade 0.4s var(--ease-ink) both;
+  }
+  .animate-ink-sweep {
+    animation: ink-sweep-down 0.55s var(--ease-ink) both;
+  }
+
   /* 骨架屏微光:muted 底上一道前景微光横向扫过。 */
   @keyframes skeleton-shimmer-sweep {
     from {

@@ -1,10 +1,11 @@
+/** 图像与对话上游服务，供统一生成操作调用；负责模型校验、后端切换和协议构造。 */
 import { db } from "@repo/database";
 import { userApiConfig } from "@repo/database/schema";
 import {
-  GPT52_CHAT_MODEL,
-  GPT54_CHAT_MODEL,
-  GPT54_MINI_CHAT_MODEL,
   GPT55_CHAT_MODEL,
+  GPT6_ASTRA_CHAT_MODEL,
+  isPremiumChatModel,
+  isResponsesImageModel,
   RESPONSES_IMAGE_MODELS,
 } from "@repo/shared/config/subscription-plan";
 import {
@@ -77,6 +78,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_SIZE,
   getImageModel,
+  getUpstreamImageModel,
   isImageModel,
   normalizeImageModel,
   parseImageSize,
@@ -110,6 +112,10 @@ import {
 } from "./responses-request-normalizer";
 import { extractResponsesTokenUsage } from "./responses-usage";
 import { getCodexRetryAfterSeconds } from "./retry-metadata";
+import {
+  supportsWebImageModel,
+  unsupportedWebImageModelError,
+} from "./web-image-models";
 import type {
   AgentRunEvent,
   AgentRunEventStatus,
@@ -137,7 +143,7 @@ const VALID_QUALITIES = new Set<ImageQuality>([
   "max",
 ]);
 const VALID_MODERATION = new Set<ImageModeration>(["auto", "low"]);
-const DEFAULT_RESPONSES_MODEL = GPT54_CHAT_MODEL;
+const DEFAULT_RESPONSES_MODEL = GPT55_CHAT_MODEL;
 const DEFAULT_CHAT_RESPONSES_IMAGE_INSTRUCTIONS =
   "You are a multimodal chat assistant. Use image_generation when the user asks for an image, edit, or visual output. Keep replies concise and preserve the conversation context.";
 const ORIGINAL_PROMPT_CHAT_RESPONSES_IMAGE_INSTRUCTIONS =
@@ -232,7 +238,7 @@ function getModel(config: ApiConfig, model?: string) {
       "Unsupported model for image generation. Use a gpt-image-* model."
     );
   }
-  return imageModel;
+  return getUpstreamImageModel(imageModel);
 }
 
 function getHeaders(
@@ -246,14 +252,15 @@ function getHeaders(
   };
 }
 
+/** 校验文本模型目录和旗舰权限；隐式旧配置回落，显式非法选择抛出可读错误。 */
 function normalizeResponsesModel(
   model: string,
-  options?: { allowGpt55?: boolean },
+  options?: { allowPremiumModels?: boolean },
   explicit = false
 ) {
   const requested = model.trim();
   if (!requested) return null;
-  if (isImageModel(requested)) {
+  if (!isResponsesImageModel(requested)) {
     if (explicit) {
       throw new Error(
         `Unsupported chat model. Use ${RESPONSES_IMAGE_MODELS.join(", ")}.`
@@ -261,30 +268,13 @@ function normalizeResponsesModel(
     }
     return null;
   }
-
-  if (requested === GPT55_CHAT_MODEL && !options?.allowGpt55) {
+  if (isPremiumChatModel(requested) && !options?.allowPremiumModels) {
     if (explicit) {
-      throw new Error("GPT-5.5 chat model requires Ultra plan.");
+      throw new Error("Premium chat models require Ultra plan.");
     }
     return null;
   }
-
-  if (
-    requested === GPT54_CHAT_MODEL ||
-    requested === GPT54_MINI_CHAT_MODEL ||
-    requested === GPT52_CHAT_MODEL ||
-    requested === GPT55_CHAT_MODEL
-  ) {
-    return requested;
-  }
-
-  if (explicit) {
-    throw new Error(
-      `Unsupported chat model. Use ${RESPONSES_IMAGE_MODELS.join(", ")}.`
-    );
-  }
-
-  return null;
+  return requested;
 }
 
 function isPoolApiResponsesBackend(config: ApiConfig) {
@@ -299,53 +289,41 @@ function isPoolApiResponsesBackend(config: ApiConfig) {
   );
 }
 
+/** 解析 Responses 文本模型；所有后端先校验用户显式选择，再读取可用默认配置。 */
 export async function getResponsesModel(
   config: ApiConfig,
   model?: string,
-  options?: { allowGpt55?: boolean }
+  options?: { allowPremiumModels?: boolean }
 ) {
   const requested = model?.trim();
   const poolApiResponsesBackend = isPoolApiResponsesBackend(config);
-  if (requested) {
-    if (poolApiResponsesBackend) {
-      if (!isImageModel(requested)) return requested;
-      const configured = config.model?.trim();
-      if (configured && !isImageModel(configured)) return configured;
-    } else {
-      const normalized = normalizeResponsesModel(requested, options, true);
-      if (normalized) return normalized;
-    }
-  }
-
-  const configured = config.model?.trim();
-  if (configured && poolApiResponsesBackend && !isImageModel(configured)) {
-    return configured;
-  }
-
-  if (configured) {
-    const normalized = normalizeResponsesModel(configured, options);
+  if (requested && !(poolApiResponsesBackend && isImageModel(requested))) {
+    const normalized = normalizeResponsesModel(requested, options, true);
     if (normalized) return normalized;
   }
 
-  if (options?.allowGpt55) {
-    return GPT55_CHAT_MODEL;
+  const configured = config.model?.trim();
+  if (configured) {
+    const normalized = normalizeResponsesModel(configured, options);
+    if (normalized) return normalized;
+    // 管理员的自定义 API 别名仍可作为后端默认；GPT 旧版和受限新版不能从此绕过权限。
+    if (poolApiResponsesBackend && !configured.startsWith("gpt-")) {
+      return configured;
+    }
   }
 
   const fallbackModel =
     (await getRuntimeSettingString("PLATFORM_RESPONSES_MODEL")) ||
-    (await getRuntimeSettingString("PLATFORM_CHAT_MODEL")) ||
-    DEFAULT_RESPONSES_MODEL;
-
+    (await getRuntimeSettingString("PLATFORM_CHAT_MODEL"));
   return (
-    normalizeResponsesModel(fallbackModel, {
-      allowGpt55: options?.allowGpt55,
-    }) || DEFAULT_RESPONSES_MODEL
+    normalizeResponsesModel(fallbackModel || "", options) ||
+    DEFAULT_RESPONSES_MODEL
   );
 }
 
 async function getDefaultImageGptModel(
   config: ApiConfig,
-  options?: { allowGpt55?: boolean }
+  options?: { allowPremiumModels?: boolean }
 ) {
   if (
     config.backend?.type !== "pool-account" &&
@@ -686,7 +664,16 @@ function normalizeModeration(moderation?: string): ImageModeration | undefined {
     : undefined;
 }
 
-function normalizeThinking(thinking?: string): ThinkingLevel | undefined {
+function normalizeThinking(
+  thinking?: string,
+  model?: string
+): ThinkingLevel | undefined {
+  if (
+    model === GPT6_ASTRA_CHAT_MODEL &&
+    (thinking === "none" || thinking === "minimal")
+  ) {
+    return "low";
+  }
   if (
     thinking === "minimal" ||
     thinking === "none" ||
@@ -1081,6 +1068,7 @@ async function retryPoolBackendResult(
     accountBackendPreference?: ImageBackendAccountBackend;
     accountBackendPreferenceMode?: ImageBackendPreferenceMode;
     allowAnyResponsesBackend?: boolean;
+    imageModel?: string;
   }
 ) {
   // 仅"不需要上报"的后端直接跑一次返回。pool-adobe 等带 reportResult 的池后端必须进入
@@ -1166,6 +1154,40 @@ async function retryPoolBackendResult(
       throw fallbackError;
     }
   };
+
+  // 版本不兼容是路由条件，不是账号故障；在计入尝试和上报前释放并跳过 Web。
+  if (
+    options?.imageModel &&
+    !supportsWebImageModel(options.imageModel) &&
+    isPoolAccountBackend(candidate, "web")
+  ) {
+    const backend = candidate.backend;
+    if (backend?.type === "pool-account" && backend.inflightLease) {
+      await releaseImageBackendInflightLease({
+        memberType: "account",
+        memberId: backend.id,
+        leaseId: backend.inflightLeaseId,
+        leasePersisted: backend.inflightLeasePersisted,
+      });
+      backend.inflightLease = false;
+    }
+    if (backend?.groupBackendType !== "mixed") {
+      return {
+        error:
+          unsupportedWebImageModelError(options.imageModel) ||
+          "Unsupported Web image model.",
+      };
+    }
+    const fallback = await resolveResponsesFallback();
+    if (!fallback?.config) {
+      return {
+        error:
+          unsupportedWebImageModelError(options.imageModel) ||
+          "No compatible image backend.",
+      };
+    }
+    candidate = fallback.config;
+  }
 
   while (true) {
     attempt += 1;
@@ -1446,6 +1468,7 @@ export async function repairModerationBlockedPromptWithResponses(
   params: {
     prompt: string;
     failureReason: string;
+    allowPremiumModels?: boolean;
     mode: "generate" | "edit" | "chat";
     size?: string;
     signal?: AbortSignal;
@@ -1458,7 +1481,7 @@ export async function repairModerationBlockedPromptWithResponses(
     config,
     async (candidate) => {
       const model = await getResponsesModel(candidate, undefined, {
-        allowGpt55: true,
+        allowPremiumModels: params.allowPremiumModels,
       });
       const input: ResponsesRequestInputItem[] = [
         {
@@ -1828,7 +1851,7 @@ async function generateChatImageWithChatCompletions(
     (configuredModel && !isImageModel(configuredModel)
       ? configuredModel
       : undefined) ||
-    GPT54_CHAT_MODEL;
+    GPT55_CHAT_MODEL;
   const stream = Boolean(params.stream || config.useStream);
   const rawBody =
     params.rawChatCompletionsBody &&
@@ -1847,6 +1870,11 @@ async function generateChatImageWithChatCompletions(
       ...(rawBody || {}),
       model,
       messages,
+      ...(model === GPT6_ASTRA_CHAT_MODEL &&
+      (rawBody?.reasoning_effort === "none" ||
+        rawBody?.reasoning_effort === "minimal")
+        ? { reasoning_effort: "low" }
+        : {}),
       prompt_cache_key:
         rawBody?.prompt_cache_key ||
         buildOpenAIPromptCacheKey(config, {
@@ -4134,12 +4162,17 @@ export async function generateImage(
       config,
       (candidate) => generateImage(candidate, params, callbacks),
       {
-        mixWebFirst: params.mixWebFirst,
-        accountBackendPreference: params.requiresResponsesBackend
-          ? "responses"
-          : params.forceWebBackend
-            ? "web"
-            : undefined,
+        mixWebFirst:
+          params.mixWebFirst &&
+          supportsWebImageModel(getModel(config, params.model)),
+        imageModel: getModel(config, params.model),
+        accountBackendPreference:
+          params.requiresResponsesBackend ||
+          !supportsWebImageModel(getModel(config, params.model))
+            ? "responses"
+            : params.forceWebBackend
+              ? "web"
+              : undefined,
         accountBackendPreferenceMode: params.forceWebBackend
           ? "mixed-only"
           : undefined,
@@ -4194,7 +4227,7 @@ export async function generateImage(
               gptModel:
                 params.gptModel ||
                 (await getDefaultImageGptModel(config, {
-                  allowGpt55: true,
+                  allowPremiumModels: params.allowPremiumModels,
                 })),
             }),
             { signal: params.signal },
@@ -4295,12 +4328,17 @@ export async function editImage(
       config,
       (candidate) => editImage(candidate, params, callbacks),
       {
-        mixWebFirst: params.mixWebFirst,
-        accountBackendPreference: params.requiresResponsesBackend
-          ? "responses"
-          : params.forceWebBackend
-            ? "web"
-            : undefined,
+        mixWebFirst:
+          params.mixWebFirst &&
+          supportsWebImageModel(getModel(config, params.model)),
+        imageModel: getModel(config, params.model),
+        accountBackendPreference:
+          params.requiresResponsesBackend ||
+          !supportsWebImageModel(getModel(config, params.model))
+            ? "responses"
+            : params.forceWebBackend
+              ? "web"
+              : undefined,
         accountBackendPreferenceMode: params.forceWebBackend
           ? "mixed-only"
           : undefined,
@@ -4436,7 +4474,9 @@ export async function editImage(
     try {
       const gptModel =
         params.gptModel ||
-        (await getDefaultImageGptModel(config, { allowGpt55: true }));
+        (await getDefaultImageGptModel(config, {
+          allowPremiumModels: params.allowPremiumModels,
+        }));
       // 单次转发：按 forceBase64 重建请求并提交。
       const attempt = (forceBase64: boolean) =>
         postResponsesImageRequestWithToolChoiceFallback(
@@ -4551,10 +4591,17 @@ export async function generateChatImage(
       config,
       (candidate) => generateChatImage(candidate, params, callbacks),
       {
-        mixWebFirst: params.mixWebFirst,
-        accountBackendPreference: params.requiresResponsesBackend
-          ? "responses"
-          : undefined,
+        mixWebFirst:
+          params.mixWebFirst &&
+          (params.webChat || supportsWebImageModel(params.imageModel)),
+        imageModel: params.webChat
+          ? undefined
+          : getImageModel(params.imageModel) || DEFAULT_IMAGE_MODEL,
+        accountBackendPreference:
+          params.requiresResponsesBackend ||
+          (!params.webChat && !supportsWebImageModel(params.imageModel))
+            ? "responses"
+            : undefined,
       }
     );
   }
@@ -4581,13 +4628,16 @@ export async function generateChatImage(
     params.signal
   );
 
-  if (useImagesChatUpstream) {
-    return await generateChatImageWithImages(config, params, callbacks);
-  }
-
   const model = await getResponsesModel(config, params.model, {
-    allowGpt55: params.allowGpt55,
+    allowPremiumModels: params.allowPremiumModels,
   });
+  if (useImagesChatUpstream) {
+    return await generateChatImageWithImages(
+      config,
+      { ...params, model },
+      callbacks
+    );
+  }
   if (isPoolAccountBackend(config, "web")) {
     const webPrompt =
       params.fileContext && params.promptOptimization === false
@@ -4632,7 +4682,7 @@ export async function generateChatImage(
   ) {
     return await generateChatImageWithChatCompletions(
       config,
-      params,
+      { ...params, model },
       callbacks
     );
   }
@@ -4736,7 +4786,9 @@ export async function generateChatImage(
         partial_images: 2,
       };
 
-      const toolModel = getImageModel(params.imageModel) || DEFAULT_IMAGE_MODEL;
+      const toolModel = getUpstreamImageModel(
+        getImageModel(params.imageModel) || DEFAULT_IMAGE_MODEL
+      );
       if (toolModel) {
         tool.model = toolModel;
       }
@@ -4758,7 +4810,7 @@ export async function generateChatImage(
       const background = normalizeImageBackground(params.background);
       if (background) tool.background = background;
 
-      const thinking = normalizeThinking(params.thinking);
+      const thinking = normalizeThinking(params.thinking, model);
       const reasoning: ReasoningConfig | undefined = thinking
         ? { effort: thinking, summary: "concise" }
         : undefined;
@@ -4782,6 +4834,7 @@ export async function generateChatImage(
       const requestBody: ResponsesStreamRequestBody =
         params.rawResponsesBody && isPlainRecord(params.rawResponsesBody)
           ? normalizeResponsesImageRequestBody(params.rawResponsesBody, {
+              model,
               fallbackTool: tool,
               additionalTools: defaultAdditionalTools,
               instructions,

@@ -313,7 +313,7 @@ export function ApiConfigForm() {
             </Label>
             <Input
               id="api-model"
-              placeholder="gpt-image-2"
+              placeholder="gpt-image-2.5"
               value={model}
               onChange={(e) => setModel(e.target.value)}
               disabled={!customApiAllowed}

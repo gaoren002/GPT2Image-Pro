@@ -1,11 +1,48 @@
+/**
+ * 验证 ChatGPT Web 的图像、会话和附件协议；使用模拟设置与网络隔离，避免访问真实账号。
+ */
 import { describe, expect, it, vi } from "vitest";
-import { __testing__ } from "./chatgpt-web";
+import {
+  __testing__,
+  editImageWithChatGptWeb,
+  generateImageWithChatGptWeb,
+} from "./chatgpt-web";
 
 vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingString: vi.fn(async () => undefined),
 }));
 
 describe("ChatGPT Web image choices", () => {
+  it.each([
+    "gpt-image-2.5",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst.web",
+  ])("生成和编辑 %s 在上传或请求之前明确拒绝，避免静默出旧版图", async (model) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("unexpected upstream request", { status: 400 })
+    );
+    try {
+      const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
+      const results = await Promise.all([
+        generateImageWithChatGptWeb(config, { prompt: "画一只猫", model }),
+        editImageWithChatGptWeb(config, {
+          prompt: "换成蓝色背景",
+          model,
+          images: [
+            { data: Buffer.from("test"), name: "reference.png", type: "image/png" },
+          ],
+        }),
+      ]);
+      for (const result of results) {
+        expect(result.error).toContain("WEB_IMAGE_MODEL_UNAVAILABLE");
+        expect(result.imageBase64).toBeUndefined();
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("treats a missing image_gen limit as zero quota", () => {
     expect(
       __testing__.extractQuotaAndRestoreAt([
@@ -413,6 +450,22 @@ describe("ChatGPT Web editable file (ppt/psd)", () => {
 });
 
 describe("ChatGPT Web chat (text answer extraction)", () => {
+  it("缺省与普通用户 GPT-5.5 使用已有的 Web thinking 模型标识", () => {
+    expect(__testing__.webGptModelSlug()).toBe("gpt-5-5-thinking");
+    expect(__testing__.webGptModelSlug(" gpt-5.5 ")).toBe(
+      "gpt-5-5-thinking"
+    );
+  });
+
+  it.each([
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ])("新型号 %s 保留明确请求标识，由上游验证可用性，不回退旧模型", (model) => {
+    expect(__testing__.webGptModelSlug(model)).toBe(model);
+  });
+
   it("extracts the finalized assistant text and marks the turn complete", () => {
     const conversation = {
       current_node: "answer_1",

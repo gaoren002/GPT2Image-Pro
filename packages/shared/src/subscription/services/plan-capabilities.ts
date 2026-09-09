@@ -1,3 +1,4 @@
+/** 套餐能力矩阵：供 UOL、服务端鉴权与前端展示使用，兼容已有后台设置。 */
 import {
   MODERATION_BLOCK_RISK_LEVELS,
   PLAN_PRIVILEGES,
@@ -48,7 +49,7 @@ export const PLAN_CAPABILITY_KEYS = [
   "export.ppt",
   "export.psd",
   "promptOptimization.control",
-  "models.gpt55",
+  "models.premium",
   "customApi.configure",
   "backendGroups.select",
   "externalApi.keys.manage",
@@ -121,7 +122,7 @@ export const DEFAULT_PLAN_CAPABILITY_MATRIX: PlanCapabilityMatrix = {
     "export.ppt": "free",
     "export.psd": "free",
     "promptOptimization.control": "pro",
-    "models.gpt55": "ultra",
+    "models.premium": "ultra",
     "customApi.configure": "starter",
     "backendGroups.select": "free",
     "externalApi.keys.manage": "starter",
@@ -298,6 +299,14 @@ function minModerationLevel(
 function normalizeFeatureMinimums(value: unknown) {
   const features = { ...DEFAULT_PLAN_CAPABILITY_MATRIX.features };
   if (!isRecord(value)) return features;
+
+  // 旧设置将 GPT-5.5 视为旗舰；保留原门槛给新的旗舰模型组，GPT-5.5 改为基础模型。
+  if (
+    !isSubscriptionPlan(value["models.premium"]) &&
+    isSubscriptionPlan(value["models.gpt55"])
+  ) {
+    features["models.premium"] = value["models.gpt55"];
+  }
 
   for (const key of PLAN_CAPABILITY_KEYS) {
     const minPlan = value[key];

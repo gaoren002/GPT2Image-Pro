@@ -115,6 +115,22 @@ describe("plan capability matrix defaults", () => {
     );
   });
 
+  it("migrates the old flagship threshold and lets explicit premium settings win", () => {
+    expect(
+      normalizePlanCapabilityMatrix({
+        features: { "models.gpt55": "enterprise" },
+      }).features["models.premium"]
+    ).toBe("enterprise");
+    expect(
+      normalizePlanCapabilityMatrix({
+        features: { "models.gpt55": "enterprise", "models.premium": "ultra" },
+      }).features["models.premium"]
+    ).toBe("ultra");
+    expect(DEFAULT_PLAN_CAPABILITY_MATRIX.features["models.premium"]).toBe(
+      "ultra"
+    );
+  });
+
   it("merges partial limits with defaults and preserves Ultra-specific settings", () => {
     const matrix = normalizePlanCapabilityMatrix({
       limits: {
@@ -446,7 +462,7 @@ describe("plan capability matrix runtime accessors", () => {
     const snapshot = await getPlanCapabilitySnapshot("ultra");
     expect(snapshot.features["externalApi.streaming"]).toBe(true);
     expect(snapshot.features["externalApi.agent"]).toBe(true);
-    expect(snapshot.features["models.gpt55"]).toBe(true);
+    expect(snapshot.features["models.premium"]).toBe(true);
     expect(snapshot.limits.maxFileSizeBytes).toBe(megabytesToBytes(150));
     expect(snapshot.limits.maxUploadBytes).toBe(megabytesToBytes(180));
     expect(snapshot.billing).toEqual({

@@ -117,6 +117,29 @@ describe("image generation billing preview", () => {
     ).toBe(false);
   });
 
+  it.each([
+    "gpt-image-2.5",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-flare",
+  ])("quotes the Responses child rate when %s cannot use Web", (imageModel) => {
+    const preferWeb = shouldPreferWebImageRoute({
+      size: "1024x1024",
+      webFirst: true,
+      imageModel,
+      pixelRange: DEFAULT_PIXEL_RANGE,
+    });
+    expect(preferWeb).toBe(false);
+    const route = predictImageBillingRoute({
+      selectedGroup: MIXED_GROUP,
+      groups: MIXED_GROUPS,
+      preferredBackendType: preferWeb ? "web" : "responses",
+    });
+    expect(route.groupId).toBe(RESPONSES_GROUP.id);
+    expect(route.billingMultiplier).toBe(
+      MIXED_GROUP.billingMultiplier * RESPONSES_GROUP.billingMultiplier
+    );
+  });
+
   it("multiplies parent and predicted child group rates", () => {
     const parentGroup = { ...MIXED_GROUP, billingMultiplier: 1.5 };
     const groups = [parentGroup, WEB_GROUP, RESPONSES_GROUP];

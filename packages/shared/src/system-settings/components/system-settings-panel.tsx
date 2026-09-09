@@ -127,9 +127,9 @@ const FEATURE_ROWS = [
     description: "允许用户控制 prompt_optimization",
   },
   {
-    key: "models.gpt55",
-    label: "GPT-5.5",
-    description: "允许选择旗舰模型",
+    key: "models.premium",
+    label: "旗舰文本模型",
+    description: "允许选择 GPT-6 Astra、GPT-5.6 Sol、Terra 和 Luna",
   },
   {
     key: "customApi.configure",

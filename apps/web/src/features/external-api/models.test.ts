@@ -1,34 +1,45 @@
-import { describe, expect, it, vi } from "vitest";
+/** 套餐模型目录的权限、覆盖配置和 /v1/models 响应回归测试。 */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  getUserPlan: vi.fn(),
+  getPlanCapabilitySnapshot: vi.fn(),
+}));
+
+vi.mock("@repo/shared/subscription/services/user-plan", () => ({
+  getUserPlan: mocks.getUserPlan,
+}));
+vi.mock("@repo/shared/subscription/services/plan-capabilities", () => ({
+  getPlanCapabilitySnapshot: mocks.getPlanCapabilitySnapshot,
+}));
 
 import type { SubscriptionPlan } from "@repo/shared/config/subscription-plan";
 
-// models.ts 经 plan-capabilities → system-settings 间接 import @repo/database，
-// 后者在模块加载时要求 DATABASE_URL；先注入占位再动态 import（不会真正连库）。
+/** 加载真实目录实现，用户套餐和能力读取由 mock 隔离，不连接数据库。 */
 async function loadModels() {
-  process.env.DATABASE_URL ||=
-    "postgres://test:test@127.0.0.1:5432/gpt2image_test";
   const [models, config] = await Promise.all([
     import("./models"),
     import("@repo/shared/config/subscription-plan"),
   ]);
-  return { ...models, GPT55_CHAT_MODEL: config.GPT55_CHAT_MODEL };
+  return {
+    ...models,
+    GPT55_CHAT_MODEL: config.GPT55_CHAT_MODEL,
+    PREMIUM_CHAT_MODELS: config.PREMIUM_CHAT_MODELS,
+  };
 }
 
-// getExternalModelsForUser 依赖 getUserPlan(查库)与能力快照;mock 掉以纯测列表组装。
-vi.mock("@repo/shared/subscription/services/user-plan", () => ({
-  getUserPlan: vi.fn(async () => ({ plan: "ultra" })),
-}));
-vi.mock(
-  "@repo/shared/subscription/services/plan-capabilities",
-  () => ({
-    getPlanCapabilitySnapshot: vi.fn(async () => ({
-      features: new Proxy(
-        {},
-        { get: () => true }
-      ) as unknown as Record<string, boolean>,
-    })),
-  })
-);
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.getUserPlan.mockResolvedValue({ plan: "pro" });
+  mocks.getPlanCapabilitySnapshot.mockResolvedValue({
+    features: {
+      "externalApi.images.generate": true,
+      "externalApi.chat.completions": true,
+      "externalApi.responses": true,
+      "models.premium": false,
+    },
+  });
+});
 
 describe("getExternalResponsesImageModels", () => {
   it("returns an empty list when the responses capability is disabled", async () => {
@@ -38,28 +49,35 @@ describe("getExternalResponsesImageModels", () => {
     ).toEqual([]);
   });
 
-  it("includes gpt-5.5 only for ultra and above by default", async () => {
-    const { getExternalResponsesImageModels, GPT55_CHAT_MODEL } =
-      await loadModels();
+  it("exposes only GPT-5.5 to ordinary plans and adds all four premium models to Ultra", async () => {
+    const {
+      getExternalResponsesImageModels,
+      GPT55_CHAT_MODEL,
+      PREMIUM_CHAT_MODELS,
+    } = await loadModels();
     for (const plan of ["free", "starter", "pro"] as SubscriptionPlan[]) {
-      expect(getExternalResponsesImageModels(plan)).not.toContain(
-        GPT55_CHAT_MODEL
-      );
+      expect(getExternalResponsesImageModels(plan)).toEqual([GPT55_CHAT_MODEL]);
     }
     for (const plan of ["ultra", "enterprise"] as SubscriptionPlan[]) {
-      expect(getExternalResponsesImageModels(plan)).toContain(GPT55_CHAT_MODEL);
+      expect(getExternalResponsesImageModels(plan)).toEqual([
+        GPT55_CHAT_MODEL,
+        ...PREMIUM_CHAT_MODELS,
+      ]);
     }
   });
 
-  it("honors an explicit gpt55Allowed override", async () => {
-    const { getExternalResponsesImageModels, GPT55_CHAT_MODEL } =
-      await loadModels();
+  it("honors a premium capability override without removing GPT-5.5", async () => {
+    const {
+      getExternalResponsesImageModels,
+      GPT55_CHAT_MODEL,
+      PREMIUM_CHAT_MODELS,
+    } = await loadModels();
     expect(
-      getExternalResponsesImageModels("pro", { gpt55Allowed: true })
-    ).toContain(GPT55_CHAT_MODEL);
+      getExternalResponsesImageModels("pro", { premiumModelsAllowed: true })
+    ).toEqual([GPT55_CHAT_MODEL, ...PREMIUM_CHAT_MODELS]);
     expect(
-      getExternalResponsesImageModels("ultra", { gpt55Allowed: false })
-    ).not.toContain(GPT55_CHAT_MODEL);
+      getExternalResponsesImageModels("ultra", { premiumModelsAllowed: false })
+    ).toEqual([GPT55_CHAT_MODEL]);
   });
 });
 
@@ -118,12 +136,75 @@ describe("getExternalChatCompletionModels", () => {
     const { getExternalChatCompletionModels, getExternalResponsesImageModels } =
       await loadModels();
     expect(
-      getExternalChatCompletionModels("ultra", { gpt55Allowed: true })
+      getExternalChatCompletionModels("ultra", { premiumModelsAllowed: true })
     ).toEqual(
       getExternalResponsesImageModels("ultra", {
         responsesAllowed: true,
-        gpt55Allowed: true,
+        premiumModelsAllowed: true,
       })
+    );
+  });
+});
+
+describe("external model access and listing", () => {
+  it("lists all 2.5 options, preserves Image 2, and hides premium text models", async () => {
+    const { getExternalModelsForUser, PREMIUM_CHAT_MODELS } =
+      await loadModels();
+    const result = await getExternalModelsForUser("user_1");
+    const ids = result.data.map((model) => model.id);
+    expect(result.object).toBe("list");
+    expect(ids.slice(0, 4)).toEqual([
+      "gpt-image-2.5",
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2",
+    ]);
+    expect(ids).toContain("gpt-5.5");
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const model of [...PREMIUM_CHAT_MODELS, "gpt-5.4", "gpt-5.4-mini"]) {
+      expect(ids).not.toContain(model);
+    }
+  });
+
+  it("checks current capabilities when authorizing Responses models", async () => {
+    const { isExternalResponsesImageModelAllowed, PREMIUM_CHAT_MODELS } =
+      await loadModels();
+    expect(await isExternalResponsesImageModelAllowed("gpt-5.5", "pro")).toBe(
+      true
+    );
+    expect(await isExternalResponsesImageModelAllowed(undefined, "pro")).toBe(
+      true
+    );
+    expect(await isExternalResponsesImageModelAllowed("gpt-5.4", "pro")).toBe(
+      false
+    );
+    for (const model of PREMIUM_CHAT_MODELS) {
+      expect(await isExternalResponsesImageModelAllowed(model, "pro")).toBe(
+        false
+      );
+    }
+    mocks.getPlanCapabilitySnapshot.mockResolvedValue({
+      features: {
+        "externalApi.responses": true,
+        "models.premium": true,
+      },
+    });
+    for (const model of PREMIUM_CHAT_MODELS) {
+      expect(await isExternalResponsesImageModelAllowed(model, "ultra")).toBe(
+        true
+      );
+    }
+    mocks.getPlanCapabilitySnapshot.mockResolvedValue({
+      features: {
+        "externalApi.responses": false,
+        "models.premium": true,
+      },
+    });
+    expect(await isExternalResponsesImageModelAllowed(undefined, "ultra")).toBe(
+      false
+    );
+    expect(await isExternalResponsesImageModelAllowed("gpt-5.5", "ultra")).toBe(
+      false
     );
   });
 });

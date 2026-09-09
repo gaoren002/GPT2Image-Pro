@@ -1,12 +1,19 @@
-export const DEFAULT_IMAGE_MODEL = "gpt-image-2";
-// gpt-image-2.5 旗舰双档(sunburst=精确编辑优先,flare=快速日常生成)。
-// 页面模型下拉、/v1/models 与营销文案以 2.5 为门面;DEFAULT_IMAGE_MODEL 保留
-// gpt-image-2 作为"Default"兜底(未显式选模型时的上游兼容锚点,不在页面展示)。
+/**
+ * 图像模型解析、尺寸约束与积分换算，供创作页和统一图像管线共用。
+ * 站内 2.5 简称在出站时解析为正式模型 ID，历史模型保持原样。
+ */
+export const DEFAULT_IMAGE_MODEL = "gpt-image-2.5";
 export const GPT_IMAGE_25_SUNBURST_MODEL = "gpt-image-2.5-sunburst";
 export const GPT_IMAGE_25_FLARE_MODEL = "gpt-image-2.5-flare";
 export const GPT_IMAGE_25_MODELS = [
   GPT_IMAGE_25_SUNBURST_MODEL,
   GPT_IMAGE_25_FLARE_MODEL,
+] as const;
+export const DEFAULT_UPSTREAM_IMAGE_MODEL = GPT_IMAGE_25_SUNBURST_MODEL;
+export const IMAGE_MODEL_IDS = [
+  DEFAULT_IMAGE_MODEL,
+  ...GPT_IMAGE_25_MODELS,
+  "gpt-image-2",
 ] as const;
 export const LEGACY_IMAGE_MODEL = "gpt-image-1";
 export const IMAGE_MODEL_PREFIX = "gpt-image-";
@@ -72,6 +79,14 @@ export function getImageModel(model?: string | null, fallback?: string | null) {
   if (fallbackModel && isImageModel(fallbackModel)) return fallbackModel;
 
   return DEFAULT_IMAGE_MODEL;
+}
+
+/** 将站内默认简称解析为上游正式 ID；显式模型和后端自定义名称不变。 */
+export function getUpstreamImageModel(model: string): string {
+  const requested = model.trim();
+  return requested.toLowerCase() === DEFAULT_IMAGE_MODEL
+    ? DEFAULT_UPSTREAM_IMAGE_MODEL
+    : requested;
 }
 
 export const IMAGE_RESOLUTION_PRESETS = [

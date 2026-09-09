@@ -219,7 +219,7 @@ export function getPricingPlansFromConfig(config: PaymentConfig): Plan[] {
     plans.push({
       ...config.plans.pro,
       name: "Pro",
-      description: "Adds chat-to-image and Responses image API",
+      description: "Adds GPT-5.5 chat-to-image and Responses image API",
       features: [
         "20,000 credits / month",
         "Text-to-image and image editing",
@@ -243,13 +243,13 @@ export function getPricingPlansFromConfig(config: PaymentConfig): Plan[] {
       ...config.plans.ultra,
       name: "Ultra",
       description:
-        "For high-volume creation with GPT-5.5, top priority, and safer review costs",
+        "For high-volume creation with GPT-6 Astra and the GPT-5.6 series, top priority, and safer review costs",
       features: [
         "80,000 credits / month",
         "Text-to-image and image editing",
         "Up to 10 images per batch",
         "Uploads up to 100MB per image, 100MB total",
-        "Chat-to-image supports GPT-5.5",
+        "Chat-to-image supports GPT-6 Astra, GPT-5.6 Sol, Terra, and Luna",
         "Moderation failures only charge review credits",
         "Highest priority queue, up to 50 concurrent generations",
         "Download & share",
@@ -274,7 +274,7 @@ export function getPricingPlansFromConfig(config: PaymentConfig): Plan[] {
         "Text-to-image and image editing",
         "Up to 10 images per batch",
         "Uploads up to 200MB per image, 200MB total",
-        "Chat-to-image supports GPT-5.5",
+        "Chat-to-image supports GPT-6 Astra, GPT-5.6 Sol, Terra, and Luna",
         "Moderation failures only charge review credits",
         "Highest priority queue, up to 100 concurrent generations",
         "Enterprise resource packs: 5,000 credits per pack",

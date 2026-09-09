@@ -1,23 +1,20 @@
+/**
+ * 按套餐能力生成 OpenAI 兼容模型列表，供 /v1/models 和 Responses 权限校验共用。
+ * 图像目录与图像管线共用，文本目录与站内订阅能力共用。
+ */
 import {
   FIREFLY_IMAGE_FAMILY_MODEL_IDS,
   FIREFLY_VIDEO_MODEL_CATALOG,
 } from "@repo/shared/adobe/firefly-direct";
 import {
-  GPT52_CHAT_MODEL,
-  GPT53_CODEX_CHAT_MODEL,
-  GPT53_CODEX_SPARK_CHAT_MODEL,
-  GPT54_CHAT_MODEL,
-  GPT54_MINI_CHAT_MODEL,
   GPT55_CHAT_MODEL,
+  PREMIUM_CHAT_MODELS,
   isPlanAtLeast,
   type SubscriptionPlan,
 } from "@repo/shared/config/subscription-plan";
 import { getPlanCapabilitySnapshot } from "@repo/shared/subscription/services/plan-capabilities";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
-import {
-  DEFAULT_IMAGE_MODEL,
-  GPT_IMAGE_25_MODELS,
-} from "@/features/image-generation/resolution";
+import { IMAGE_MODEL_IDS } from "@/features/image-generation/resolution";
 
 const DEFAULT_MODEL_OWNER = "gpt2image";
 
@@ -33,30 +30,26 @@ export type OpenAIModelList = {
   data: OpenAIModel[];
 };
 
+/** 返回当前套餐可使用的 Responses 文本模型；关闭接口时不暴露任何模型。 */
 export function getExternalResponsesImageModels(
   plan: SubscriptionPlan,
-  options?: { responsesAllowed?: boolean; gpt55Allowed?: boolean }
+  options?: { responsesAllowed?: boolean; premiumModelsAllowed?: boolean }
 ) {
   if (options?.responsesAllowed === false) {
     return [];
   }
 
-  const models: string[] = [
-    GPT54_CHAT_MODEL,
-    GPT54_MINI_CHAT_MODEL,
-    GPT52_CHAT_MODEL,
-    GPT53_CODEX_CHAT_MODEL,
-    GPT53_CODEX_SPARK_CHAT_MODEL,
-  ];
-  if (options?.gpt55Allowed ?? isPlanAtLeast(plan, "ultra")) {
-    models.push(GPT55_CHAT_MODEL);
+  const models: string[] = [GPT55_CHAT_MODEL];
+  if (options?.premiumModelsAllowed ?? isPlanAtLeast(plan, "ultra")) {
+    models.push(...PREMIUM_CHAT_MODELS);
   }
   return models;
 }
 
+/** Chat Completions 与 Responses 共用文本目录，分别遵守各自接口能力开关。 */
 export function getExternalChatCompletionModels(
   plan: SubscriptionPlan,
-  options?: { chatCompletionsAllowed?: boolean; gpt55Allowed?: boolean }
+  options?: { chatCompletionsAllowed?: boolean; premiumModelsAllowed?: boolean }
 ) {
   if (options?.chatCompletionsAllowed === false) {
     return [];
@@ -64,10 +57,11 @@ export function getExternalChatCompletionModels(
 
   return getExternalResponsesImageModels(plan, {
     responsesAllowed: true,
-    gpt55Allowed: options?.gpt55Allowed,
+    premiumModelsAllowed: options?.premiumModelsAllowed,
   });
 }
 
+/** 读取当前能力配置校验模型；未指定模型时允许管线选择套餐默认值。 */
 export async function isExternalResponsesImageModelAllowed(
   model: string | undefined,
   plan: SubscriptionPlan
@@ -77,7 +71,7 @@ export async function isExternalResponsesImageModelAllowed(
   if (!model) return true;
   return getExternalResponsesImageModels(plan, {
     responsesAllowed: capabilities.features["externalApi.responses"],
-    gpt55Allowed: capabilities.features["models.gpt55"],
+    premiumModelsAllowed: capabilities.features["models.premium"],
   }).includes(model.trim());
 }
 
@@ -96,6 +90,7 @@ export function getExternalFireflyModels(options?: {
   ];
 }
 
+/** 将站内模型 ID 编码为 OpenAI 模型目录条目，不虚构上游创建时间。 */
 function toOpenAIModel(id: string): OpenAIModel {
   return {
     id,
@@ -105,24 +100,24 @@ function toOpenAIModel(id: string): OpenAIModel {
   };
 }
 
+/** 根据用户套餐合并图像、Firefly 和文本目录；共享模型只返回一次。 */
 export async function getExternalModelsForUser(
   userId: string
 ): Promise<OpenAIModelList> {
   const plan = await getUserPlan(userId);
   const capabilities = await getPlanCapabilitySnapshot(plan.plan);
-  // 2.5 旗舰双档在前,/v1/models 让 API 用户优先发现当前旗舰;DEFAULT 兜底仍暴露。
-  const imageModels = [...GPT_IMAGE_25_MODELS, DEFAULT_IMAGE_MODEL];
+  const imageModels = [...IMAGE_MODEL_IDS];
   const fireflyModels = getExternalFireflyModels({
     imageGenerateAllowed: capabilities.features["externalApi.images.generate"],
   });
   const chatModels = getExternalChatCompletionModels(plan.plan, {
     chatCompletionsAllowed:
       capabilities.features["externalApi.chat.completions"],
-    gpt55Allowed: capabilities.features["models.gpt55"],
+    premiumModelsAllowed: capabilities.features["models.premium"],
   });
   const responsesModels = getExternalResponsesImageModels(plan.plan, {
     responsesAllowed: capabilities.features["externalApi.responses"],
-    gpt55Allowed: capabilities.features["models.gpt55"],
+    premiumModelsAllowed: capabilities.features["models.premium"],
   });
   const modelIds = Array.from(
     new Set([

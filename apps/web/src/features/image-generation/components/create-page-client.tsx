@@ -1,12 +1,13 @@
 "use client";
 
 import {
-  GPT52_CHAT_MODEL,
-  GPT53_CODEX_CHAT_MODEL,
-  GPT53_CODEX_SPARK_CHAT_MODEL,
-  GPT54_CHAT_MODEL,
-  GPT54_MINI_CHAT_MODEL,
   GPT55_CHAT_MODEL,
+  GPT6_ASTRA_CHAT_MODEL,
+  GPT56_SOL_CHAT_MODEL,
+  GPT56_TERRA_CHAT_MODEL,
+  GPT56_LUNA_CHAT_MODEL,
+  isPremiumChatModel,
+  isResponsesImageModel,
   type RESPONSES_IMAGE_MODELS,
   type SubscriptionPlan,
 } from "@repo/shared/config/subscription-plan";
@@ -1030,6 +1031,7 @@ const FIREFLY_MODEL_OPTIONS = [
 ] as const;
 const TEXT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
+  { value: "gpt-image-2.5", label: "GPT Image 2.5" },
   { value: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst" },
   { value: "gpt-image-2.5-flare", label: "GPT Image 2.5 Flare" },
   { value: "gpt-image-2", label: "GPT Image 2" },
@@ -1044,6 +1046,7 @@ const CHAT_IMAGE_MODEL_OPTIONS = TEXT_MODEL_OPTIONS.filter(
 );
 const EDIT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
+  { value: "gpt-image-2.5", label: "GPT Image 2.5" },
   { value: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst" },
   { value: "gpt-image-2.5-flare", label: "GPT Image 2.5 Flare" },
   { value: "gpt-image-2", label: "GPT Image 2" },
@@ -1167,12 +1170,11 @@ const CHAT_MODEL_OPTIONS: Array<{
   label: string;
   ultraOnly?: boolean;
 }> = [
-  { value: GPT54_CHAT_MODEL, label: "GPT-5.4" },
-  { value: GPT54_MINI_CHAT_MODEL, label: "GPT-5.4 Mini" },
-  { value: GPT52_CHAT_MODEL, label: "GPT-5.2" },
-  { value: GPT53_CODEX_CHAT_MODEL, label: "GPT-5.3 Codex" },
-  { value: GPT53_CODEX_SPARK_CHAT_MODEL, label: "GPT-5.3 Codex Spark" },
-  { value: GPT55_CHAT_MODEL, label: "GPT-5.5", ultraOnly: true },
+  { value: GPT55_CHAT_MODEL, label: "GPT-5.5" },
+  { value: GPT6_ASTRA_CHAT_MODEL, label: "GPT-6 Astra", ultraOnly: true },
+  { value: GPT56_SOL_CHAT_MODEL, label: "GPT-5.6 Sol", ultraOnly: true },
+  { value: GPT56_TERRA_CHAT_MODEL, label: "GPT-5.6 Terra", ultraOnly: true },
+  { value: GPT56_LUNA_CHAT_MODEL, label: "GPT-5.6 Luna", ultraOnly: true },
 ];
 const CHAT_THINKING_OPTIONS: Array<{
   value: ChatThinkingLevel;
@@ -2176,7 +2178,7 @@ export function CreatePageClient({
     capabilities.features["imageGeneration.agent"] ?? chatAllowed;
   const waterfallAllowed =
     capabilities.features["imageGeneration.waterfall"] ?? chatAllowed;
-  const gpt55ChatAllowed = capabilities.features["models.gpt55"];
+  const premiumChatAllowed = capabilities.features["models.premium"];
   const promptOptimizationAllowed =
     capabilities.features["promptOptimization.control"];
   const maxEditImages = capabilities.limits.maxEditImages;
@@ -2336,7 +2338,7 @@ export function CreatePageClient({
   );
   const [chatModel, setChatModel] = useCreateRuntimeState<ChatModel>(
     "chatModel",
-    GPT54_CHAT_MODEL
+    GPT55_CHAT_MODEL
   );
   const [chatThinking, setChatThinking] =
     useCreateRuntimeState<ChatThinkingLevel>("chatThinking", "low");
@@ -2955,6 +2957,7 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size,
       webFirst: textMixWebFirst,
+      imageModel: textModel === "default" ? DEFAULT_IMAGE_MODEL : textModel,
       pixelRange: forceWebPixelRange,
     });
   const editMixWebFirstActive =
@@ -2964,6 +2967,7 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size: effectiveEditSize,
       webFirst: editMixWebFirst,
+      imageModel: editModel === "default" ? DEFAULT_IMAGE_MODEL : editModel,
       requiresResponsesBackend: editHasImageReference,
       pixelRange: forceWebPixelRange,
     });
@@ -2975,6 +2979,12 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size: batchFallbackSize,
       webFirst: activeMode === "chat-web" ? true : chatMixWebFirst,
+      imageModel:
+        activeMode === "chat-web"
+          ? undefined
+          : chatImageModel === "default"
+            ? DEFAULT_IMAGE_MODEL
+            : chatImageModel,
       requiresResponsesBackend: chatRequiresResponsesBackend,
       pixelRange: forceWebPixelRange,
     });
@@ -3376,10 +3386,10 @@ export function CreatePageClient({
             <SelectItem
               key={option.value}
               value={option.value}
-              disabled={option.ultraOnly && !gpt55ChatAllowed}
+              disabled={option.ultraOnly && !premiumChatAllowed}
             >
               {option.label}
-              {option.ultraOnly && !gpt55ChatAllowed
+              {option.ultraOnly && !premiumChatAllowed
                 ? ` · ${copy("Ultra", "Ultra")}`
                 : ""}
             </SelectItem>
@@ -4544,13 +4554,20 @@ export function CreatePageClient({
   }, []);
 
   useEffect(() => {
-    if (!gpt55ChatAllowed && chatModel === GPT55_CHAT_MODEL) {
-      setChatModel(GPT54_CHAT_MODEL);
+    if (
+      !isResponsesImageModel(chatModel) ||
+      (!premiumChatAllowed && isPremiumChatModel(chatModel))
+    ) {
+      setChatModel(GPT55_CHAT_MODEL);
     }
-    if (!gpt55ChatAllowed && imageGptModel === GPT55_CHAT_MODEL) {
+    if (
+      imageGptModel !== "default" &&
+      (!isResponsesImageModel(imageGptModel) ||
+        (!premiumChatAllowed && isPremiumChatModel(imageGptModel)))
+    ) {
       setImageGptModel("default");
     }
-  }, [chatModel, gpt55ChatAllowed, imageGptModel]);
+  }, [chatModel, premiumChatAllowed, imageGptModel]);
 
   useEffect(() => {
     if (!firstPreviewUrl) {
@@ -8072,9 +8089,9 @@ export function CreatePageClient({
           >
             <Wand2 className="h-4 w-4" />
             {copy("Agent", "Agent")}
-            {gpt55ChatAllowed && (
+            {premiumChatAllowed && (
               <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                GPT-5.5
+                GPT-6 Astra
               </span>
             )}
             {!agentAllowed ? (

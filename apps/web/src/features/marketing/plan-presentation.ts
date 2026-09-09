@@ -63,7 +63,7 @@ export function buildPlanPresentation({
     if (canUse("imageGeneration.agent")) {
       highlights.push(copy("Agent iteration", "Agent 迭代"));
     }
-    if (canUse("models.gpt55")) highlights.push("GPT-5.5");
+    if (canUse("models.premium")) highlights.push("GPT-6 Astra / GPT-5.6");
     description = highlights.join(copy(", ", "，"));
   }
 
@@ -164,11 +164,11 @@ export function buildPlanPresentation({
   if (canUse("promptOptimization.control")) {
     features.push(copy("Can minimize prompt changes", "可尽量减少提示词改动"));
   }
-  if (canUse("models.gpt55")) {
+  if (canUse("models.premium")) {
     features.push(
       copy(
-        "GPT-5.5 available for supported chat backends",
-        "支持后端可使用 GPT-5.5"
+        "GPT-6 Astra and GPT-5.6 Sol / Terra / Luna available",
+        "可使用 GPT-6 Astra 和 GPT-5.6 Sol / Terra / Luna"
       )
     );
   }

@@ -9,6 +9,8 @@ export interface GenerateImageParams {
   height?: number;
   model?: string;
   gptModel?: string;
+  /** 服务端套餐快照授予的旗舰文本模型权限，不从客户端请求读取。 */
+  allowPremiumModels?: boolean;
   thinking?: ThinkingLevel;
   n?: number;
   quality?: ImageQuality;
@@ -176,6 +178,8 @@ export interface EditImageParams {
   size?: string;
   model?: string;
   gptModel?: string;
+  /** 服务端套餐快照授予的旗舰文本模型权限，不从客户端请求读取。 */
+  allowPremiumModels?: boolean;
   thinking?: ThinkingLevel;
   quality?: ImageQuality;
   n?: number;
@@ -209,7 +213,7 @@ export interface ChatImageParams {
   size?: string;
   model?: string;
   imageModel?: string;
-  allowGpt55?: boolean;
+  allowPremiumModels?: boolean;
   quality?: ImageQuality;
   n?: number;
   moderation?: ImageModeration;

@@ -1,8 +1,12 @@
+/**
+ * 实现 ChatGPT Web 图像、文字与可编辑文件协议，供统一生成服务调用；依赖账号凭据与 Web 代理。
+ */
 import { createHash, randomUUID } from "node:crypto";
 import { logError } from "@repo/shared/logger";
 import { getRuntimeSettingString } from "@repo/shared/system-settings";
 import { parseImageSize } from "./resolution";
 import { isContentSafetyRejection } from "./sla-classification";
+import { unsupportedWebImageModelError } from "./web-image-models";
 import {
   buildWebHistoryTranscript,
   downloadWebHistoryImageReference,
@@ -779,10 +783,18 @@ async function uploadAttachment(
   } satisfies UploadedAttachment;
 }
 
-const DEFAULT_WEB_GPT_MODEL_SLUG = "gpt-5-3";
+const DEFAULT_WEB_GPT_MODEL_SLUG = "gpt-5-5-thinking";
 
+/**
+ * 普通默认模型沿用本模块可编辑文件路径已使用的 GPT-5.5 Web 标识。
+ * 新型号缺少可验证的 Web 别名时原样透传，由上游判定可用性，不猜别名或降级。
+ */
 function webGptModelSlug(gptModel?: string) {
-  return gptModel?.trim() || DEFAULT_WEB_GPT_MODEL_SLUG;
+  const requestedModel = gptModel?.trim();
+  if (!requestedModel || requestedModel.toLowerCase() === "gpt-5.5") {
+    return DEFAULT_WEB_GPT_MODEL_SLUG;
+  }
+  return requestedModel;
 }
 
 function webThinkingValue(
@@ -2019,6 +2031,9 @@ async function runWebImage(
   params: WebImageParams,
   images: ImageInputFile[]
 ): Promise<GenerateImageResult> {
+  // 协议不支持的版本必须在上传、账号请求及会话占用前拒绝，不能只改展示模型后沿用 picture_v2。
+  const modelError = unsupportedWebImageModelError(params.model ?? config.model);
+  if (modelError) return { error: modelError };
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), 20 * 60 * 1000);
   const abortFromParent = () => abortController.abort(params.signal?.reason);
@@ -2256,6 +2271,7 @@ export async function editImageWithChatGptWeb(
 // 这里不注入 picture_v2,发用户原始消息,轮询会话抽 assistant 最终文字答复;若模型自发出图
 // 则一并抽图下载。返回 { responseText?, imageBase64?, imageOutputs?, webConversation }。
 // 复用图像路径的 PoW/Sentinel/上传/续接/下载链路,仅 system_hints 与结果抽取不同。
+// 此处的按需出图版本由 ChatGPT 自动选择；文字对话不保证使用 params.model 指定的图像版本。
 
 const WEB_CHAT_POLL_TIMEOUT_MS = 180_000;
 const WEB_CHAT_STALL_MS = 45_000;
@@ -3021,6 +3037,7 @@ export async function generateFileWithChatGptWeb(params: {
 }
 
 export const __testing__ = {
+  webGptModelSlug,
   extractQuotaAndRestoreAt,
   extractWebErrorPayloadMessage,
   extractWebStreamError,

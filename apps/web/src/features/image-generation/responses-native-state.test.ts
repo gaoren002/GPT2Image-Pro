@@ -287,7 +287,7 @@ describe("Responses native state request planning", () => {
     );
     const request = buildPreviousResponseFallbackRequestBody(
       {
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         input: [
           { role: "user", content: [{ type: "input_text", text: "retry" }] },
         ],
@@ -367,7 +367,7 @@ describe("Responses native state cache observation", () => {
     const config = responsesConfig();
     const first = await generateChatImage(config, {
       prompt: "生成一张蓝色海报",
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       history: [],
     });
     expect(first.responsesPreviousResponse?.responseId).toBe("resp_first");
@@ -375,7 +375,7 @@ describe("Responses native state cache observation", () => {
 
     const second = await generateChatImage(config, {
       prompt: "沿用上一轮风格，改成红色",
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       history: [
         {
           role: "assistant",
@@ -438,7 +438,7 @@ describe("Responses native state cache observation", () => {
 
     await generateChatImage(responsesConfig(), {
       prompt: "生成一张产品海报",
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       history: [],
     });
     await generateChatImage(
@@ -452,7 +452,7 @@ describe("Responses native state cache observation", () => {
       },
       {
         prompt: "生成一张产品海报",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         history: [],
       }
     );
@@ -512,7 +512,7 @@ describe("Responses native state cache observation", () => {
 
     const result = await generateChatImage(responsesConfig(), {
       prompt: "继续上一版做一张海报",
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       history: [assistantWithNativeState],
       agentMode: true,
     });
@@ -1089,7 +1089,7 @@ describe("backend isolation", () => {
   it("keeps external raw Responses pass-through store disabled", () => {
     const body = normalizeResponsesImageRequestBody(
       {
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         input: "draw",
         previous_response_id: "resp_external",
         prompt_cache_key: "caller-cache-key",
@@ -1098,6 +1098,7 @@ describe("backend isolation", () => {
         size: "1024x1024",
       },
       {
+        model: "gpt-5.5",
         fallbackTool: { type: "image_generation", model: "gpt-image-2" },
         instructions: "test",
         stream: false,
@@ -1119,12 +1120,13 @@ describe("backend isolation", () => {
   it("does not let raw Responses stream override the selected upstream mode", () => {
     const body = normalizeResponsesImageRequestBody(
       {
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         input: "draw",
         stream: true,
         tools: [],
       },
       {
+        model: "gpt-5.5",
         fallbackTool: { type: "image_generation", model: "gpt-image-2" },
         instructions: "test",
         stream: false,
@@ -1132,6 +1134,31 @@ describe("backend isolation", () => {
     );
 
     expect(body.stream).toBe(false);
+  });
+
+  it.each([
+    "none",
+    "minimal",
+  ] as const)("normalizes Astra %s reasoning for generation and editing", (thinking) => {
+    const config = responsesConfig();
+    const generation = buildResponsesImageGenerationRequest(config, {
+      prompt: "draw",
+      model: "gpt-image-2.5",
+      gptModel: "gpt-6-astra",
+      thinking,
+    });
+    const edit = buildResponsesImageEditRequest(config, {
+      prompt: "edit",
+      images: [testImage],
+      model: "gpt-image-2.5",
+      gptModel: "gpt-6-astra",
+      thinking,
+    });
+    for (const request of [generation, edit]) {
+      expect(request.reasoning.effort).toBe("low");
+      expect(request.model).toBe("gpt-6-astra");
+      expect(request.tools[0]?.model).toBe("gpt-image-2.5-sunburst");
+    }
   });
 
   it("keeps ordinary single image generation store disabled", () => {
@@ -1176,13 +1203,13 @@ describe("backend isolation", () => {
 
     expect(
       buildResponsesStoreFalseFallbackRequestBody({
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         input: "draw",
         store: true,
         previous_response_id: "resp_previous",
       })
     ).toMatchObject({
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       input: "draw",
       store: false,
       previous_response_id: undefined,

@@ -1,8 +1,9 @@
+/** 统一图像生成管线：校验套餐和模型、选择后端并完成队列、扣费与结果保存。 */
+import { supportsWebImageModel } from "./web-image-models";
 import { db } from "@repo/database";
 import { generation, user } from "@repo/database/schema";
 import { resolveImageModelMultiplier } from "@repo/shared/adobe";
 import { consumeCredits } from "@repo/shared/credits/core";
-import { GPT55_CHAT_MODEL } from "@repo/shared/config/subscription-plan";
 import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
   refundGenerationCredits,
@@ -63,6 +64,7 @@ import { getRuntimeImageBaseCreditPricing } from "./pricing-settings";
 import { withImageGenerationQueue } from "./queue";
 import {
   alignImageSizeToStep,
+  DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_SIZE,
   getImageCreditCostBreakdown,
   getImageModel,
@@ -195,6 +197,12 @@ function shouldForceWebBackend(
     size,
     webFirst: input.forceWebBackend ?? input.mixWebFirst ?? true,
     requiresResponsesBackend,
+    imageModel:
+      input.mode === "chat" && input.webChat
+        ? undefined
+        : getImageModel(
+            input.mode === "chat" ? input.imageModel : input.model
+          ) || DEFAULT_IMAGE_MODEL,
     pixelRange: range,
   });
 }
@@ -1063,35 +1071,14 @@ async function releasePoolBackendConfigLease(config?: ApiConfig | null) {
   backend.inflightLease = false;
 }
 
-function usesPoolAccountBackend(config: ApiConfig) {
-  return config.backend?.type === "pool-account";
-}
-
+/** 统一解析图像任务附带的文本模型，所有后端都执行相同套餐校验。 */
 async function resolveRequestedPoolGptModel(params: {
   config: ApiConfig;
   model?: string;
-  allowGpt55: boolean;
+  allowPremiumModels: boolean;
 }) {
-  const requested = params.model?.trim();
-  if (!usesPoolAccountBackend(params.config)) return undefined;
-  if (params.config.backend?.accountBackend === "web") {
-    if (!requested) {
-      const configured = params.config.model?.trim();
-      if (configured === GPT55_CHAT_MODEL && !params.allowGpt55) {
-        return undefined;
-      }
-      return configured || undefined;
-    }
-    if (requested.startsWith("gpt-image-")) {
-      throw new Error("Unsupported GPT model. Use a non-image model.");
-    }
-    if (requested === GPT55_CHAT_MODEL && !params.allowGpt55) {
-      throw new Error("GPT-5.5 chat model requires Ultra plan.");
-    }
-    return requested;
-  }
-  return await getResponsesModel(params.config, requested, {
-    allowGpt55: params.allowGpt55,
+  return await getResponsesModel(params.config, params.model, {
+    allowPremiumModels: params.allowPremiumModels,
   });
 }
 
@@ -1143,6 +1130,13 @@ export async function runImageGenerationForUser(
   const requiresResponsesBackend = Boolean(
     input.requiresResponsesBackend || (input.mode === "chat" && input.agentMode)
   );
+  const imageModelRequiresResponses =
+    !(input.mode === "chat" && input.webChat) &&
+    !input.forceFirefly &&
+    !isFireflyModel(input.mode === "chat" ? input.imageModel : input.model) &&
+    !supportsWebImageModel(
+      input.mode === "chat" ? input.imageModel : input.model
+    );
   const forceWebPixelRange = await getForceWebPixelRange();
   // 统一的 Web-first 偏好(默认开启,详见 shouldForceWebBackend)。两个变量同值,
   // 分别供 gen/edit 路径(forceWebBackend)与 chat 路径(mixWebFirst)透传到 service 层;
@@ -1151,6 +1145,7 @@ export async function runImageGenerationForUser(
   // 导向 web/codex 账号 → "分组无可用后端"。force_firefly 强制走 adobe 同理。故二者一律
   // 关闭 Web-first 偏好,确保 firefly 路径不被 Web-first 覆盖。
   const preferWebFirst =
+    !imageModelRequiresResponses &&
     !isFireflyModel(input.model) &&
     !input.forceFirefly &&
     shouldForceWebBackend(input, size, forceWebPixelRange);
@@ -1325,14 +1320,17 @@ export async function runImageGenerationForUser(
                 preferredMemberType: input.preferredBackendMemberType,
                 stickyPreviousResponseId: input.stickyPreviousResponseId,
                 stickySessionKey: input.stickySessionKey,
-                accountBackendPreference: requiresResponsesBackend
-                  ? "responses"
-                  : preferWebWithFallback
-                    ? "web"
+                accountBackendPreference:
+                  requiresResponsesBackend || imageModelRequiresResponses
+                    ? "responses"
+                    : preferWebWithFallback
+                      ? "web"
+                      : undefined,
+                accountBackendPreferenceMode:
+                  forceWebBackend ||
+                  (imageModelRequiresResponses && !requiresResponsesBackend)
+                    ? "mixed-only"
                     : undefined,
-                accountBackendPreferenceMode: forceWebBackend
-                  ? "mixed-only"
-                  : undefined,
                 forceFirefly: input.forceFirefly,
                 ignoreUserConfig: requiresResponsesBackend,
               });
@@ -1451,11 +1449,13 @@ export async function runImageGenerationForUser(
                 gptModel = await resolveRequestedPoolGptModel({
                   config,
                   model: input.model,
-                  allowGpt55: planCapabilities.features["models.gpt55"],
+                  allowPremiumModels:
+                    planCapabilities.features["models.premium"],
                 });
               } else {
                 gptModel = await getResponsesModel(config, input.model, {
-                  allowGpt55: planCapabilities.features["models.gpt55"],
+                  allowPremiumModels:
+                    planCapabilities.features["models.premium"],
                 });
               }
               const requestedImageModel = getImageModel(
@@ -1483,7 +1483,7 @@ export async function runImageGenerationForUser(
               gptModel = await resolveRequestedPoolGptModel({
                 config,
                 model: input.gptModel,
-                allowGpt55: planCapabilities.features["models.gpt55"],
+                allowPremiumModels: planCapabilities.features["models.premium"],
               });
               recordModel = imageModel;
             }
@@ -1527,7 +1527,7 @@ export async function runImageGenerationForUser(
             imageModel,
             gptModel,
             recordModel,
-            allowGpt55: planCapabilities.features["models.gpt55"],
+            allowPremiumModels: planCapabilities.features["models.premium"],
             moderationEnabled,
             mixWebFirst,
             forceWebBackend,
@@ -1577,7 +1577,7 @@ async function runQueuedImageGenerationForUser({
   imageModel,
   gptModel,
   recordModel,
-  allowGpt55,
+  allowPremiumModels,
   moderationEnabled,
   mixWebFirst,
   forceWebBackend,
@@ -1607,7 +1607,7 @@ async function runQueuedImageGenerationForUser({
   imageModel: string;
   gptModel?: string;
   recordModel: string;
-  allowGpt55: boolean;
+  allowPremiumModels: boolean;
   moderationEnabled: boolean;
   mixWebFirst: boolean;
   forceWebBackend: boolean;
@@ -2014,6 +2014,7 @@ async function runQueuedImageGenerationForUser({
           failureReason: reason,
           mode: input.mode,
           size,
+          allowPremiumModels,
           signal: generationSignal,
         }
       );
@@ -2064,6 +2065,7 @@ async function runQueuedImageGenerationForUser({
             size,
             model: imageModel,
             gptModel,
+            allowPremiumModels,
             thinking: input.thinking,
             quality: input.quality,
             n: input.n,
@@ -2092,7 +2094,7 @@ async function runQueuedImageGenerationForUser({
               size,
               model: gptModel,
               imageModel,
-              allowGpt55,
+              allowPremiumModels,
               quality: input.quality,
               n: input.n,
               moderation: input.moderation,
@@ -2121,6 +2123,7 @@ async function runQueuedImageGenerationForUser({
               size,
               model: imageModel,
               gptModel,
+              allowPremiumModels,
               thinking: input.thinking,
               n: input.n,
               quality: input.quality,

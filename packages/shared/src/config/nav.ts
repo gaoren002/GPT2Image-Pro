@@ -91,7 +91,7 @@ export const productsNav: ProductNavGroup[] = [
     title: "Platform",
     items: [
       {
-        title: "GPT Image 2",
+        title: "GPT Image 2.5",
         href: "/#features",
         description: "Next-generation image model with stunning quality",
         icon: Bot,

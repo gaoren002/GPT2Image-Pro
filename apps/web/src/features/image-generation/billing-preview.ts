@@ -11,6 +11,7 @@ import type {
 } from "@/features/image-backend-pool/types";
 import { normalizeGroupBillingMultiplier } from "@/features/image-backend-pool/group-billing";
 import { getImageSizePixels, roundUpCreditAmount } from "./resolution";
+import { supportsWebImageModel } from "./web-image-models";
 
 export type ImageBillingPixelRange = {
   minPixels: number;
@@ -45,9 +46,15 @@ export function shouldPreferWebImageRoute(input: {
   size?: string | null;
   webFirst: boolean;
   requiresResponsesBackend?: boolean;
+  imageModel?: string;
   pixelRange: ImageBillingPixelRange;
 }) {
   if (input.requiresResponsesBackend || !input.webFirst) return false;
+  if (
+    input.imageModel !== undefined &&
+    !supportsWebImageModel(input.imageModel)
+  )
+    return false;
 
   const pixels = getImageSizePixels(input.size);
   if (pixels === null) return true;

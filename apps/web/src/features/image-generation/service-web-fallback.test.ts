@@ -49,6 +49,82 @@ describe("image service Web-first fallback", () => {
     vi.clearAllMocks();
   });
 
+  it.each([
+    "mixed",
+    "web",
+  ] as const)("does not report a Web account failure for unsupported 2.5 in a %s group", async (groupBackendType) => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { generateImage } = await import("./service");
+    const { generateImageWithChatGptWeb } = await import("./chatgpt-web");
+    const imageBase64 = Buffer.from("new-model-image").toString("base64");
+    const fetchMock = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(JSON.stringify({ data: [{ b64_json: imageBase64 }] }), {
+          headers: { "Content-Type": "application/json" },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    if (groupBackendType === "mixed") {
+      backendPoolMock.resolveImageBackendPoolConfig.mockResolvedValueOnce({
+        config: {
+          baseUrl: "https://api.example.test/v1",
+          apiKey: "codex-key",
+          backend: {
+            type: "pool-account",
+            id: "codex-1",
+            groupId: "group-1",
+            userId: "user-1",
+            requestKind: "image_generation",
+            accountBackend: "responses",
+            reportResult: true,
+          },
+        },
+      });
+    }
+    const result = await generateImage(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key",
+        backend: {
+          type: "pool-account",
+          id: "web-1",
+          groupId: "group-1",
+          userId: "user-1",
+          requestKind: "image_generation",
+          accountBackend: "web",
+          groupBackendType,
+          inflightLease: true,
+          reportResult: true,
+        },
+      },
+      { prompt: "draw", model: "gpt-image-2.5", mixWebFirst: true }
+    );
+    expect(generateImageWithChatGptWeb).not.toHaveBeenCalled();
+    expect(
+      backendPoolMock.releaseImageBackendInflightLease
+    ).toHaveBeenCalledWith(expect.objectContaining({ memberId: "web-1" }));
+    expect(backendPoolMock.reportImageBackendResult).not.toHaveBeenCalledWith(
+      expect.objectContaining({ memberId: "web-1" })
+    );
+    if (groupBackendType === "mixed") {
+      expect(result.imageBase64).toBe(imageBase64);
+      expect(
+        backendPoolMock.resolveImageBackendPoolConfig
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ accountBackendPreference: "responses" })
+      );
+      const requestBody = JSON.parse(
+        String(fetchMock.mock.calls[0]?.[1]?.body)
+      );
+      expect(requestBody.model).toBe("gpt-image-2.5-sunburst");
+    } else {
+      expect(result.error).toContain("WEB_IMAGE_MODEL_UNAVAILABLE");
+      expect(
+        backendPoolMock.resolveImageBackendPoolConfig
+      ).not.toHaveBeenCalled();
+    }
+  });
+
   it("falls back to Responses when force Web exhausts Web candidates", async () => {
     process.env.DATABASE_URL =
       process.env.DATABASE_URL || "postgresql://test:test@127.0.0.1:5432/test";
@@ -73,7 +149,7 @@ describe("image service Web-first fallback", () => {
         config: {
           baseUrl: "https://api.example.test/v1",
           apiKey: "codex-key",
-          model: "gpt-5.4",
+          model: "gpt-5.5",
           backend: {
             type: "pool-account",
             id: "codex-1",
@@ -209,7 +285,7 @@ describe("image service Web-first fallback", () => {
       config: {
         baseUrl: "https://api.example.test/v1",
         apiKey: "codex-key-2",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         backend: {
           type: "pool-account",
           id: "codex-2",
@@ -226,7 +302,7 @@ describe("image service Web-first fallback", () => {
       {
         baseUrl: "https://api.example.test/v1",
         apiKey: "codex-key-1",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         backend: {
           type: "pool-account",
           id: "codex-1",
@@ -294,7 +370,7 @@ describe("image service Web-first fallback", () => {
           config: {
             baseUrl: "https://api.example.test/v1",
             apiKey: `codex-key-${index + 1}`,
-            model: "gpt-5.4",
+            model: "gpt-5.5",
             backend: {
               type: "pool-account",
               id: `codex-${index + 1}`,
@@ -313,7 +389,7 @@ describe("image service Web-first fallback", () => {
       {
         baseUrl: "https://api.example.test/v1",
         apiKey: "codex-key-1",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         backend: {
           type: "pool-account",
           id: "codex-1",

@@ -1,3 +1,8 @@
+/** Responses 图像请求构造器，供生成服务使用；映射图像别名并校准模型推理参数。 */
+import {
+  GPT55_CHAT_MODEL,
+  GPT6_ASTRA_CHAT_MODEL,
+} from "@repo/shared/config/subscription-plan";
 import {
   normalizeImageBackground,
   normalizeOutputCompression,
@@ -12,6 +17,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_SIZE,
   getImageModel,
+  getUpstreamImageModel,
 } from "./resolution";
 import {
   resolvePromptImageReferences,
@@ -131,11 +137,13 @@ function getResponsesModel(config: ApiConfig, model?: string) {
   if (configured && !configured.startsWith("gpt-image-")) {
     return configured;
   }
-  return "gpt-5.4-mini";
+  return GPT55_CHAT_MODEL;
 }
 
 function getToolModel(config: ApiConfig, model?: string) {
-  return getImageModel(model, config.model) || DEFAULT_IMAGE_MODEL;
+  return getUpstreamImageModel(
+    getImageModel(model, config.model) || DEFAULT_IMAGE_MODEL
+  );
 }
 
 function getPrompt(params: GenerateImageParams | EditImageParams) {
@@ -186,7 +194,13 @@ function normalizeModeration(moderation?: string): ImageModeration | undefined {
   return undefined;
 }
 
-function normalizeThinking(thinking?: string): ThinkingLevel {
+function normalizeThinking(thinking?: string, model?: string): ThinkingLevel {
+  if (
+    model === GPT6_ASTRA_CHAT_MODEL &&
+    (thinking === "none" || thinking === "minimal")
+  ) {
+    return "low";
+  }
   if (
     thinking === "minimal" ||
     thinking === "none" ||
@@ -252,7 +266,10 @@ export function buildResponsesImageGenerationRequest(
     stream: true,
     store: false,
     parallel_tool_calls: true,
-    reasoning: { effort: normalizeThinking(params.thinking), summary: "auto" },
+    reasoning: {
+      effort: normalizeThinking(params.thinking, responseModel),
+      summary: "auto",
+    },
     include: ["reasoning.encrypted_content"],
     instructions,
     prompt_cache_key: buildOpenAIPromptCacheKey(config, {
@@ -333,7 +350,10 @@ export function buildResponsesImageEditRequest(
     stream: true,
     store: false,
     parallel_tool_calls: true,
-    reasoning: { effort: normalizeThinking(params.thinking), summary: "auto" },
+    reasoning: {
+      effort: normalizeThinking(params.thinking, responseModel),
+      summary: "auto",
+    },
     include: ["reasoning.encrypted_content"],
     instructions,
     prompt_cache_key: buildOpenAIPromptCacheKey(config, {

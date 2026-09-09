@@ -28,7 +28,7 @@ const productsTitleMap: Record<string, string> = {
   "Chat to Image": "productsMenu.core.chatToImage",
   Gallery: "productsMenu.core.gallery",
   "Batch Generation": "productsMenu.core.batch",
-  "GPT Image 2": "productsMenu.platform.api",
+  "GPT Image 2.5": "productsMenu.platform.api",
   "Multi-model Support": "productsMenu.platform.multiModel",
   "Credits System": "productsMenu.platform.credits",
 };

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   alignImageSizeToStep,
   DEFAULT_IMAGE_MODEL,
+  DEFAULT_UPSTREAM_IMAGE_MODEL,
   fitImageDimensionsToValidSize,
   getImageBaseCredits,
   getImageCreditCostBreakdown,
@@ -12,6 +13,7 @@ import {
   GPT_IMAGE_25_FLARE_MODEL,
   GPT_IMAGE_25_MODELS,
   GPT_IMAGE_25_SUNBURST_MODEL,
+  getUpstreamImageModel,
   IMAGE_1024_BASE_PIXELS,
   IMAGE_DIMENSION_STEP,
   isImageModel,
@@ -226,6 +228,32 @@ describe("image resolution credit pricing", () => {
 });
 
 describe("image model resolution", () => {
+  it("defaults generation and edits to the 2.5 alias while preserving explicit models", () => {
+    expect(DEFAULT_IMAGE_MODEL).toBe("gpt-image-2.5");
+    expect(getImageModel()).toBe("gpt-image-2.5");
+    expect(getImageModel("gpt-image-2")).toBe("gpt-image-2");
+    expect(getImageModel(undefined, "gpt-image-2")).toBe("gpt-image-2");
+    expect(getImageModel("gpt-image-2.5", "gpt-image-2")).toBe("gpt-image-2.5");
+    expect(getUpstreamImageModel(getImageModel() ?? DEFAULT_IMAGE_MODEL)).toBe(
+      DEFAULT_UPSTREAM_IMAGE_MODEL
+    );
+  });
+
+  it("resolves only the exact 2.5 alias to Sunburst for upstream requests", () => {
+    expect(getUpstreamImageModel("gpt-image-2.5")).toBe(
+      "gpt-image-2.5-sunburst"
+    );
+    for (const model of [
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2.5-flare-2026-09-08",
+      "gpt-image-2",
+      "firefly-gpt-image-2",
+    ]) {
+      expect(getUpstreamImageModel(model)).toBe(model);
+    }
+  });
+
   it("normalizes legacy / blank models away", () => {
     expect(normalizeImageModel(undefined)).toBeUndefined();
     expect(normalizeImageModel("  ")).toBeUndefined();
@@ -310,7 +338,9 @@ describe("fitImageDimensionsToValidSize", () => {
       expect(fitted.height).toBeGreaterThanOrEqual(MIN_IMAGE_DIMENSION);
       expect(fitted.width).toBeLessThanOrEqual(MAX_IMAGE_DIMENSION);
       expect(fitted.height).toBeLessThanOrEqual(MAX_IMAGE_DIMENSION);
-      expect(fitted.width * fitted.height).toBeLessThanOrEqual(MAX_IMAGE_PIXELS);
+      expect(fitted.width * fitted.height).toBeLessThanOrEqual(
+        MAX_IMAGE_PIXELS
+      );
       expect(isValidImageDimension(fitted.width)).toBe(true);
       expect(isValidImageDimension(fitted.height)).toBe(true);
     }

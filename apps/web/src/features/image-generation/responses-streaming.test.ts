@@ -21,7 +21,7 @@ describe("Responses streaming parser", () => {
     vi.unstubAllGlobals();
   });
 
-  it("passes custom chat model names through for pool API responses backends", async () => {
+  it("rejects unlisted client chat model names for pool API responses backends", async () => {
     process.env.DATABASE_URL =
       process.env.DATABASE_URL || "postgresql://test:test@127.0.0.1:5432/test";
     const { getResponsesModel } = await import("./service");
@@ -41,7 +41,7 @@ describe("Responses streaming parser", () => {
 
     await expect(
       getResponsesModel(config, "platform-codex-model")
-    ).resolves.toBe("platform-codex-model");
+    ).rejects.toThrow("Unsupported chat model.");
   });
 
   it("ignores image model names as chat models for pool API responses backends", async () => {
@@ -63,37 +63,70 @@ describe("Responses streaming parser", () => {
     };
 
     await expect(getResponsesModel(config, "gpt-image-2")).resolves.toBe(
-      "gpt-5.4"
+      "gpt-5.5"
     );
   });
 
-  it("falls back from implicit GPT-5.5 defaults when the plan cannot use them", async () => {
-    process.env.DATABASE_URL =
-      process.env.DATABASE_URL || "postgresql://test:test@127.0.0.1:5432/test";
+  it.each([
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ])("enforces the premium gate for %s across account and API backends", async (model) => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { getResponsesModel } = await import("./service");
+    for (const type of ["pool-account", "pool-api"] as const) {
+      const config: ApiConfig = {
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "test-key",
+        model,
+        backend: {
+          type,
+          id: "backend_1",
+          groupId: "group_1",
+          accountBackend: "responses",
+          requestKind: "chat",
+          apiInterfaceMode: "mixed",
+          reportResult: false,
+        },
+      };
+      await expect(
+        getResponsesModel(config, undefined, { allowPremiumModels: false })
+      ).resolves.toBe("gpt-5.5");
+      await expect(
+        getResponsesModel(config, model, { allowPremiumModels: false })
+      ).rejects.toThrow("Premium chat models require Ultra plan.");
+      await expect(
+        getResponsesModel(config, model, { allowPremiumModels: true })
+      ).resolves.toBe(model);
+      await expect(
+        getResponsesModel(config, "gpt-5.5", { allowPremiumModels: false })
+      ).resolves.toBe("gpt-5.5");
+    }
+  });
+
+  it("replaces retired GPT defaults and keeps administrator API aliases", async () => {
     const { getResponsesModel } = await import("./service");
     const config: ApiConfig = {
       baseUrl: "https://api.example.test/v1",
       apiKey: "test-key",
-      model: "gpt-5.5",
+      model: "gpt-5.4",
       backend: {
-        type: "pool-account",
-        id: "account_1",
+        type: "pool-api",
+        id: "api_1",
         groupId: "group_1",
-        accountBackend: "responses",
         requestKind: "chat",
+        apiInterfaceMode: "mixed",
         reportResult: false,
       },
     };
-
+    await expect(getResponsesModel(config)).resolves.toBe("gpt-5.5");
+    await expect(getResponsesModel(config, "gpt-5.4")).rejects.toThrow(
+      "Unsupported chat model."
+    );
     await expect(
-      getResponsesModel(config, undefined, { allowGpt55: false })
-    ).resolves.toBe("gpt-5.4");
-    await expect(
-      getResponsesModel(config, "gpt-5.5", { allowGpt55: false })
-    ).rejects.toThrow("GPT-5.5 chat model requires Ultra plan.");
-    await expect(
-      getResponsesModel(config, undefined, { allowGpt55: true })
-    ).resolves.toBe("gpt-5.5");
+      getResponsesModel({ ...config, model: "platform-codex-model" })
+    ).resolves.toBe("platform-codex-model");
   });
 
   it("repairs moderation-blocked prompts through a text-only Responses request", async () => {
@@ -127,7 +160,7 @@ describe("Responses streaming parser", () => {
       {
         baseUrl: "https://api.example.test/v1",
         apiKey: "test-key",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
       },
       {
         prompt: "blocked portrait prompt",
@@ -185,7 +218,7 @@ describe("Responses streaming parser", () => {
       config,
       {
         prompt: "hello",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         stream: true,
       },
       {
@@ -512,7 +545,7 @@ describe("Responses streaming parser", () => {
       },
       {
         prompt: "make an image",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
       }
     );
 
@@ -529,7 +562,7 @@ describe("Responses streaming parser", () => {
         return new Response(
           JSON.stringify({
             id: "chatcmpl_test",
-            model: "gpt-5.4",
+            model: "gpt-5.5",
             choices: [
               {
                 message: {
@@ -566,7 +599,7 @@ describe("Responses streaming parser", () => {
       },
       {
         prompt: "hello",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
       }
     );
 
@@ -731,7 +764,7 @@ describe("Responses streaming parser", () => {
       },
       {
         prompt: "hello",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
       },
       {
         onTextDelta: (delta) => {
@@ -813,7 +846,7 @@ describe("Responses streaming parser", () => {
       },
       {
         prompt: "make an image",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         stream: true,
       },
       {
@@ -893,7 +926,7 @@ describe("Responses streaming parser", () => {
       },
       {
         prompt: "make an image",
-        model: "gpt-5.4",
+        model: "gpt-5.5",
         stream: true,
       }
     );

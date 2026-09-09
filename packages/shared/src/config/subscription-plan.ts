@@ -45,26 +45,38 @@ const MODERATION_BLOCK_RISK_LEVEL_RANK: Record<
   high: 3,
 };
 
-/**
- * 对话模式旗舰模型
- */
-export const GPT54_CHAT_MODEL = "gpt-5.4";
-export const GPT54_MINI_CHAT_MODEL = "gpt-5.4-mini";
-export const GPT52_CHAT_MODEL = "gpt-5.2";
-export const GPT53_CODEX_CHAT_MODEL = "gpt-5.3-codex";
-export const GPT53_CODEX_SPARK_CHAT_MODEL = "gpt-5.3-codex-spark";
+/** 对话模型目录：普通套餐使用 GPT-5.5，旗舰能力解锁四款高级模型。 */
 export const GPT55_CHAT_MODEL = "gpt-5.5";
+export const GPT6_ASTRA_CHAT_MODEL = "gpt-6-astra";
+export const GPT56_SOL_CHAT_MODEL = "gpt-5.6-sol";
+export const GPT56_TERRA_CHAT_MODEL = "gpt-5.6-terra";
+export const GPT56_LUNA_CHAT_MODEL = "gpt-5.6-luna";
+
+export const PREMIUM_CHAT_MODELS = [
+  GPT6_ASTRA_CHAT_MODEL,
+  GPT56_SOL_CHAT_MODEL,
+  GPT56_TERRA_CHAT_MODEL,
+  GPT56_LUNA_CHAT_MODEL,
+] as const;
 
 export const RESPONSES_IMAGE_MODELS = [
-  GPT54_CHAT_MODEL,
-  GPT54_MINI_CHAT_MODEL,
-  GPT52_CHAT_MODEL,
-  GPT53_CODEX_CHAT_MODEL,
-  GPT53_CODEX_SPARK_CHAT_MODEL,
   GPT55_CHAT_MODEL,
+  ...PREMIUM_CHAT_MODELS,
 ] as const;
 
 export type ResponsesImageModel = (typeof RESPONSES_IMAGE_MODELS)[number];
+
+/** 检查模型是否在当前文本模型目录中；用于选择器恢复和服务端白名单校验。 */
+export function isResponsesImageModel(
+  model: string
+): model is ResponsesImageModel {
+  return RESPONSES_IMAGE_MODELS.some((candidate) => candidate === model);
+}
+
+/** 检查模型是否需要旗舰能力；白名单由 isResponsesImageModel 单独校验。 */
+export function isPremiumChatModel(model: string): boolean {
+  return PREMIUM_CHAT_MODELS.some((candidate) => candidate === model);
+}
 
 export type UploadLimitSettingKey =
   | "PLAN_FREE_MAX_FILE_MB"
@@ -317,9 +329,9 @@ export function canUsePromptOptimization(plan: SubscriptionPlan): boolean {
 }
 
 /**
- * 是否允许对话生图使用 GPT-5.5
+ * 是否允许对话生图使用 GPT-6 Astra 和 GPT-5.6 系列
  */
-export function canUseGpt55Chat(plan: SubscriptionPlan): boolean {
+export function canUsePremiumChatModels(plan: SubscriptionPlan): boolean {
   return isPlanAtLeast(plan, "ultra");
 }
 

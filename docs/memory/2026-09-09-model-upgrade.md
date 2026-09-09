@@ -11,7 +11,7 @@
 
 - 核对 `basketikun/chatgpt2api` 的 main 提交 `dc105e51bd486bd75c8ef4f74be4bc4724bdfc33`，仍使用 `picture_v2`，没有可验证的 2.5 图片版本选择字段。没有引入虚构的 Web 2.5 参数。
 - 2.5 生成和编辑在混合分组选后端前选择 Responses 车道，报价同步使用其子组倍率；纯 Web 账号提前释放租约并返回不支持，不上报账号失败，也不跨纯 Web 分组重试。
-- 旧图片模型保持既有 Web 路由；普通 Web 聊天按需出图的实际版本由 ChatGPT 服务端选择。已知 GPT-5.5 Web 文本型号使用既有 `gpt-5-5-thinking`，新旗舰文本 ID 不猜别名、不静默降级。
+- 旧图片模型保持既有 Web 路由；普通 Web 聊天按需出图的实际版本由 ChatGPT 服务端选择。后续依据用户 HAR 补齐五模型的 Work slug 与 Images 预设，详见 [HAR 模型表](2026-09-09-har-model-catalog.md)；Web 2.5 版本边界不变。
 
 ## 来源
 

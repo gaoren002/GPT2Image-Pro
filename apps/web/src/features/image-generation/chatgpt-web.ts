@@ -7,6 +7,11 @@ import { getRuntimeSettingString } from "@repo/shared/system-settings";
 import { parseImageSize } from "./resolution";
 import { isContentSafetyRejection } from "./sla-classification";
 import { unsupportedWebImageModelError } from "./web-image-models";
+import { getWebConversationTurnNodes } from "./web-conversation-history";
+import {
+  resolveImagesWebModel,
+  resolveWorkWebModel,
+} from "./web-model-catalog";
 import {
   buildWebHistoryTranscript,
   downloadWebHistoryImageReference,
@@ -783,20 +788,34 @@ async function uploadAttachment(
   } satisfies UploadedAttachment;
 }
 
-const DEFAULT_WEB_GPT_MODEL_SLUG = "gpt-5-5-thinking";
-
 /**
- * 普通默认模型沿用本模块可编辑文件路径已使用的 GPT-5.5 Web 标识。
- * 新型号缺少可验证的 Web 别名时原样透传，由上游判定可用性，不猜别名或降级。
+ * 按聊天/Images 场景转换已鉴权的站内模型；两个场景的 slug 与思考档位不同。
+ * 未收录的管理员自定义 Web 标识保留旧协议，不把未经验证的别名写入模型表。
+ * 纯参数转换，无网络副作用；权限仍由统一生成服务在进入 Web 前校验。
  */
-function webGptModelSlug(gptModel?: string) {
-  const requestedModel = gptModel?.trim();
-  if (!requestedModel || requestedModel.toLowerCase() === "gpt-5.5") {
-    return DEFAULT_WEB_GPT_MODEL_SLUG;
-  }
-  return requestedModel;
+function webConversationModelParameters(options: {
+  gptModel?: string;
+  thinking?: ThinkingLevel;
+  promptOptimization?: boolean;
+  systemHints?: string[];
+}) {
+  const resolved =
+    options.systemHints?.length === 0
+      ? resolveWorkWebModel(options)
+      : resolveImagesWebModel(options);
+  if (resolved) return { ...resolved, force_parallel_switch: "auto" };
+  return {
+    model: options.gptModel?.trim() || "gpt-5-5-thinking",
+    paragen_thinking_level: webThinkingValue(
+      options.thinking,
+      options.promptOptimization
+    ),
+    force_parallel_switch:
+      options.promptOptimization === false ? "instant" : "auto",
+  };
 }
 
+/** 为未收录的管理员自定义 Web slug 保留旧思考参数；已验证模型使用 thinking_effort。 */
 function webThinkingValue(
   thinking: ThinkingLevel | undefined,
   promptOptimization?: boolean
@@ -862,14 +881,8 @@ async function prepareImageConversation(
       parent_message_id: options.continuation?.useNativeContinuation
         ? options.continuation.parentMessageId
         : randomUUID(),
-      model: webGptModelSlug(options.gptModel),
-      paragen_thinking_level: webThinkingValue(
-        options.thinking,
-        options.promptOptimization
-      ),
+      ...webConversationModelParameters(options),
       paragen_cot_summary_display_override: "allow",
-      force_parallel_switch:
-        options.promptOptimization === false ? "instant" : "auto",
       client_prepare_state: "success",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
@@ -968,12 +981,7 @@ async function startImageGeneration(
     body: JSON.stringify({
       action: "next",
       messages: [
-        buildMessage(
-          prompt,
-          references,
-          options.requestMessageId,
-          systemHints
-        ),
+        buildMessage(prompt, references, options.requestMessageId, systemHints),
       ],
       ...(options.continuation?.useNativeContinuation
         ? { conversation_id: options.continuation.conversationId }
@@ -981,7 +989,7 @@ async function startImageGeneration(
       parent_message_id: options.continuation?.useNativeContinuation
         ? options.continuation.parentMessageId
         : randomUUID(),
-      model: webGptModelSlug(options.gptModel),
+      ...webConversationModelParameters(options),
       client_prepare_state: "sent",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
@@ -1001,12 +1009,6 @@ async function startImageGeneration(
         app_name: "chatgpt.com",
       },
       paragen_cot_summary_display_override: "allow",
-      paragen_thinking_level: webThinkingValue(
-        options.thinking,
-        options.promptOptimization
-      ),
-      force_parallel_switch:
-        options.promptOptimization === false ? "instant" : "auto",
     }),
   });
   if (!response.ok) {
@@ -1355,6 +1357,8 @@ function conversationNodesAfterMessage(
   } catch {
     return [];
   }
+  const turnNodes = getWebConversationTurnNodes(data, requestMessageId);
+  if (turnNodes !== null) return turnNodes;
   const mapping = getConversationMapping(data);
   if (!mapping) return [];
 
@@ -1530,9 +1534,18 @@ function extractAssistantAnswer(
     requestMessageId
   )) {
     if (nodeAuthorRole(node) !== "assistant") continue;
+    const message = nodeMessageObject(node);
+    // Work 的 analysis 也可能是 text；只有面向用户的最终通道可作为答复，空终稿也必须收尾。
+    if (typeof message?.channel === "string" && message.channel !== "final")
+      continue;
+    if (typeof message?.recipient === "string" && message.recipient !== "all")
+      continue;
     const part = nodeTextContent(node);
     if (part) text = part;
-    if (part && nodeEndTurn(node)) complete = true;
+    if (nodeEndTurn(node)) {
+      text = part;
+      complete = true;
+    }
   }
   return { text, complete };
 }
@@ -1638,16 +1651,28 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * 读取抓包验证的最新十轮消息；只有端点不存在时回退旧 mapping 协议。
+ * 限流、鉴权与服务错误直接交给轮询层处理，避免重复请求放大故障；不保存会话内容。
+ */
 async function getConversationText(
   config: ApiConfig,
   conversationId: string,
   signal?: AbortSignal
 ) {
-  const path = `/backend-api/conversation/${conversationId}`;
-  const response = await fetchChatGptWeb(config, path, path, {
+  const encodedId = encodeURIComponent(conversationId);
+  const path = `/backend-api/conversations/${encodedId}?include_has_versions=true&num_turns=10`;
+  let response = await fetchChatGptWeb(config, path, path, {
     signal,
     headers: getHeaders(config, path, { Accept: "application/json" }),
   });
+  if ([404, 405, 410].includes(response.status)) {
+    const legacyPath = `/backend-api/conversation/${encodedId}`;
+    response = await fetchChatGptWeb(config, legacyPath, legacyPath, {
+      signal,
+      headers: getHeaders(config, legacyPath, { Accept: "application/json" }),
+    });
+  }
   if (!response.ok) {
     throw new Error(
       await webErrorMessage(response, "ChatGPT Web conversation")
@@ -2032,7 +2057,9 @@ async function runWebImage(
   images: ImageInputFile[]
 ): Promise<GenerateImageResult> {
   // 协议不支持的版本必须在上传、账号请求及会话占用前拒绝，不能只改展示模型后沿用 picture_v2。
-  const modelError = unsupportedWebImageModelError(params.model ?? config.model);
+  const modelError = unsupportedWebImageModelError(
+    params.model ?? config.model
+  );
   if (modelError) return { error: modelError };
   const abortController = new AbortController();
   const timeout = setTimeout(() => abortController.abort(), 20 * 60 * 1000);
@@ -2089,12 +2116,9 @@ async function runWebImage(
       )),
       ...(await Promise.all(
         historyImages.map((image, index) =>
-          uploadAttachment(
-            configWithSignal,
-            image,
-            images.length + index + 1,
-            { image: true }
-          )
+          uploadAttachment(configWithSignal, image, images.length + index + 1, {
+            image: true,
+          })
         )
       )),
       ...(await Promise.all(
@@ -2286,7 +2310,11 @@ async function pollWebChatResult(
   conversationId: string,
   requestMessageId: string,
   signal?: AbortSignal
-): Promise<{ responseText: string; hasImage: boolean; parentMessageId: string }> {
+): Promise<{
+  responseText: string;
+  hasImage: boolean;
+  parentMessageId: string;
+}> {
   const deadline = Date.now() + WEB_CHAT_POLL_TIMEOUT_MS;
   let bestText = "";
   let hasImage = false;
@@ -2391,12 +2419,9 @@ async function runWebChat(
       )),
       ...(await Promise.all(
         historyImages.map((image, index) =>
-          uploadAttachment(
-            configWithSignal,
-            image,
-            images.length + index + 1,
-            { image: true }
-          )
+          uploadAttachment(configWithSignal, image, images.length + index + 1, {
+            image: true,
+          })
         )
       )),
       ...(await Promise.all(
@@ -2510,8 +2535,7 @@ async function runWebChat(
       requestKind: config.backend?.requestKind,
     });
     return {
-      error:
-        error instanceof Error ? error.message : "ChatGPT Web chat failed",
+      error: error instanceof Error ? error.message : "ChatGPT Web chat failed",
     };
   } finally {
     clearTimeout(timeout);
@@ -2840,9 +2864,7 @@ async function fetchResolvedDownload(
     abs = null;
   }
   const isBackend =
-    !abs ||
-    abs.host.endsWith("chatgpt.com") ||
-    abs.host.endsWith("openai.com");
+    !abs || abs.host.endsWith("chatgpt.com") || abs.host.endsWith("openai.com");
   if (isBackend) {
     const path = abs ? `${abs.pathname}${abs.search}` : url;
     return fetchChatGptWeb(config, path, path, {
@@ -2870,12 +2892,14 @@ async function downloadEditableBinary(
   conversationId: string,
   artifact: EditableArtifact
 ): Promise<EditableFileBinary | null> {
-  const url = await resolveEditableDownloadUrl(config, conversationId, artifact);
+  const url = await resolveEditableDownloadUrl(
+    config,
+    conversationId,
+    artifact
+  );
   if (!url) return null;
   const response = await fetchResolvedDownload(config, url);
-  const buffer = response.ok
-    ? Buffer.from(await response.arrayBuffer())
-    : null;
+  const buffer = response.ok ? Buffer.from(await response.arrayBuffer()) : null;
   if (buffer && buffer.length > 0) {
     const mimeType =
       artifact.mimeType ||
@@ -3037,7 +3061,9 @@ export async function generateFileWithChatGptWeb(params: {
 }
 
 export const __testing__ = {
-  webGptModelSlug,
+  prepareImageConversation,
+  startImageGeneration,
+  getConversationText,
   extractQuotaAndRestoreAt,
   extractWebErrorPayloadMessage,
   extractWebStreamError,

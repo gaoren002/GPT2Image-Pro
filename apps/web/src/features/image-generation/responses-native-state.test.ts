@@ -1136,6 +1136,43 @@ describe("backend isolation", () => {
     expect(body.stream).toBe(false);
   });
 
+  it("保留 Astra 与显式 Sunburst 的独立模型选择及有效默认推理", () => {
+    const raw = {
+      model: "gpt-6-astra",
+      tools: [{ type: "image_generation", model: "gpt-image-2.5-sunburst" }],
+    };
+    const body = normalizeResponsesImageRequestBody(raw, {
+      model: "gpt-6-astra",
+      fallbackTool: { type: "image_generation", model: "gpt-image-2.5-flare" },
+      instructions: "test",
+      stream: false,
+    });
+
+    expect(body.model).toBe("gpt-6-astra");
+    expect(body.tools).toEqual(raw.tools);
+    expect(body.reasoning).toBeUndefined();
+    expect(raw.tools[0]?.model).toBe("gpt-image-2.5-sunburst");
+
+    const params = {
+      prompt: "draw",
+      model: "gpt-image-2.5-sunburst",
+      gptModel: "gpt-6-astra",
+    };
+    const config = responsesConfig();
+    const requests = [
+      buildResponsesImageGenerationRequest(config, params),
+      buildResponsesImageEditRequest(config, {
+        ...params,
+        images: [testImage],
+      }),
+    ];
+    for (const request of requests) {
+      expect(request.model).toBe("gpt-6-astra");
+      expect(request.tools[0]?.model).toBe("gpt-image-2.5-sunburst");
+      expect(request.reasoning.effort).toBe("medium");
+    }
+  });
+
   it.each([
     "none",
     "minimal",

@@ -1,7 +1,7 @@
 /**
  * 验证 ChatGPT Web 的图像、会话和附件协议；使用模拟设置与网络隔离，避免访问真实账号。
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
   editImageWithChatGptWeb,
@@ -12,15 +12,167 @@ vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingString: vi.fn(async () => undefined),
 }));
 
+describe("ChatGPT Web 抓包协议回归", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    {
+      options: {
+        gptModel: "gpt-6-astra",
+        thinking: "xhigh" as const,
+        systemHints: [],
+      },
+      expected: {
+        model: "gpt-6-astra-wm",
+        thinking_effort: "xhigh",
+        conversation_origin: "tpp",
+        service_tier: "standard",
+        system_hints: [],
+      },
+    },
+    {
+      options: {
+        gptModel: "gpt-5.5",
+        thinking: "none" as const,
+        systemHints: [],
+      },
+      expected: {
+        model: "gpt-5.5-wm",
+        thinking_effort: "min",
+        conversation_origin: "tpp",
+        service_tier: "standard",
+        system_hints: [],
+      },
+    },
+    {
+      options: { gptModel: "gpt-5.6-sol", thinking: "xhigh" as const },
+      expected: {
+        model: "gpt-5-6-thinking",
+        thinking_effort: "max",
+        system_hints: ["picture_v2"],
+      },
+    },
+    {
+      options: { gptModel: "gpt-5.5", thinking: "none" as const },
+      expected: { model: "gpt-5-5-instant", system_hints: ["picture_v2"] },
+    },
+  ])("prepare 与 submit 使用相同的已验证模型参数 $expected.model", async ({
+    options,
+    expected,
+  }) => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ conduit_token: "test-conduit" }))
+      .mockResolvedValueOnce(new Response("data: [DONE]\n\n"));
+    const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
+    const requestOptions = { ...options, requestMessageId: "test-request" };
+    const requirements = { token: "test-requirements" };
+    const conduit = await __testing__.prepareImageConversation(
+      config,
+      "测试",
+      requirements,
+      requestOptions
+    );
+    await __testing__.startImageGeneration(
+      config,
+      "测试",
+      requirements,
+      conduit,
+      requestOptions,
+      []
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject(expected);
+      expect(body).not.toHaveProperty("paragen_thinking_level");
+      if (!("thinking_effort" in expected))
+        expect(body).not.toHaveProperty("thinking_effort");
+      if (!("conversation_origin" in expected)) {
+        expect(body).not.toHaveProperty("conversation_origin");
+        expect(body).not.toHaveProperty("service_tier");
+      }
+    }
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))
+        .force_parallel_switch
+    ).toBe("auto");
+  });
+
+  it("优先读取新版 conversations 消息列表", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const payload = { messages: [], page_info: { has_previous_page: false } };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(Response.json(payload));
+    expect(
+      JSON.parse(
+        await __testing__.getConversationText(
+          { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+          "test-conversation"
+        )
+      )
+    ).toEqual(payload);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://chatgpt.com/backend-api/conversations/test-conversation?include_has_versions=true&num_turns=10"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    404, 405, 410,
+  ])("新版端点 HTTP %s 时兼容旧版 mapping 查询", async (status) => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const payload = { mapping: {} };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("not found", { status }))
+      .mockResolvedValueOnce(Response.json(payload));
+    expect(
+      JSON.parse(
+        await __testing__.getConversationText(
+          { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+          "test-conversation"
+        )
+      )
+    ).toEqual(payload);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://chatgpt.com/backend-api/conversation/test-conversation"
+    );
+  });
+
+  it.each([
+    401, 403, 429, 500,
+  ])("新版查询 HTTP %s 不追加旧端点请求", async (status) => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("upstream error", { status }));
+    await expect(
+      __testing__.getConversationText(
+        { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+        "test-conversation"
+      )
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ChatGPT Web image choices", () => {
   it.each([
     "gpt-image-2.5",
     "gpt-image-2.5-flare",
     "gpt-image-2.5-sunburst.web",
   ])("生成和编辑 %s 在上传或请求之前明确拒绝，避免静默出旧版图", async (model) => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("unexpected upstream request", { status: 400 })
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response("unexpected upstream request", { status: 400 })
+      );
     try {
       const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
       const results = await Promise.all([
@@ -29,7 +181,11 @@ describe("ChatGPT Web image choices", () => {
           prompt: "换成蓝色背景",
           model,
           images: [
-            { data: Buffer.from("test"), name: "reference.png", type: "image/png" },
+            {
+              data: Buffer.from("test"),
+              name: "reference.png",
+              type: "image/png",
+            },
           ],
         }),
       ]);
@@ -295,7 +451,12 @@ describe("ChatGPT Web image choices", () => {
 
     expect(
       __testing__.outputMatchesInputImage(
-        [{ imageBase64: Buffer.from("new image").toString("base64"), index: 0 }],
+        [
+          {
+            imageBase64: Buffer.from("new image").toString("base64"),
+            index: 0,
+          },
+        ],
         [{ data: input, name: "input.jpg", type: "image/jpeg" }]
       )
     ).toBe(false);
@@ -450,20 +611,117 @@ describe("ChatGPT Web editable file (ppt/psd)", () => {
 });
 
 describe("ChatGPT Web chat (text answer extraction)", () => {
-  it("缺省与普通用户 GPT-5.5 使用已有的 Web thinking 模型标识", () => {
-    expect(__testing__.webGptModelSlug()).toBe("gpt-5-5-thinking");
-    expect(__testing__.webGptModelSlug(" gpt-5.5 ")).toBe(
-      "gpt-5-5-thinking"
-    );
+  it.each([
+    "",
+    "本轮答案",
+  ])("新版 messages 按轮次提取最终答案 %j，不串入前后轮次或思考", (answer) => {
+    const conversation = {
+      messages: [
+        {
+          id: "previous",
+          author: { role: "user" },
+          metadata: { working_turn_id: "turn-previous" },
+        },
+        {
+          id: "previous-answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "turn-previous" },
+          content: { content_type: "text", parts: ["前轮答案"] },
+        },
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: {
+            working_turn_id: "turn-current",
+            turn_exchange_id: "exchange-current",
+          },
+        },
+        {
+          id: "analysis",
+          author: { role: "assistant" },
+          channel: "analysis",
+          metadata: {
+            working_turn_id: "turn-current",
+            turn_exchange_id: "exchange-current",
+          },
+          content: { content_type: "text", parts: ["内部思考"] },
+        },
+        {
+          id: "answer",
+          author: { role: "assistant" },
+          channel: "final",
+          recipient: "all",
+          status: "finished_successfully",
+          end_turn: true,
+          metadata: {
+            working_turn_id: "turn-current",
+            turn_exchange_id: "exchange-current",
+          },
+          content: { content_type: "text", parts: [answer] },
+        },
+        {
+          id: "next",
+          author: { role: "user" },
+          metadata: { working_turn_id: "turn-next" },
+        },
+        {
+          id: "next-answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "turn-next" },
+          content: { content_type: "text", parts: ["后轮答案"] },
+        },
+      ],
+    };
+    expect(
+      __testing__.extractAssistantAnswer(
+        JSON.stringify(conversation),
+        "request"
+      )
+    ).toEqual({ text: answer, complete: true });
+    expect(
+      __testing__
+        .conversationNodesAfterMessage(JSON.stringify(conversation), "request")
+        .map(({ id }) => id)
+    ).toEqual(["analysis", "answer"]);
   });
 
-  it.each([
-    "gpt-6-astra",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-  ])("新型号 %s 保留明确请求标识，由上游验证可用性，不回退旧模型", (model) => {
-    expect(__testing__.webGptModelSlug(model)).toBe(model);
+  it("空的最终答复标记完成，不把此前 analysis 文本当作答案", () => {
+    const conversation = {
+      mapping: {
+        request: { id: "request", children: ["analysis"] },
+        analysis: {
+          parent: "request",
+          children: ["final"],
+          message: {
+            id: "analysis",
+            author: { role: "assistant" },
+            channel: "analysis",
+            content: { content_type: "text", parts: ["内部思考"] },
+          },
+        },
+        final: {
+          parent: "analysis",
+          message: {
+            id: "final",
+            author: { role: "assistant" },
+            channel: "final",
+            status: "finished_successfully",
+            end_turn: true,
+            content: { content_type: "text", parts: [""] },
+          },
+        },
+      },
+    };
+    expect(
+      __testing__.extractAssistantAnswer(
+        JSON.stringify(conversation),
+        "request"
+      )
+    ).toEqual({ text: "", complete: true });
   });
 
   it("extracts the finalized assistant text and marks the turn complete", () => {
@@ -507,7 +765,11 @@ describe("ChatGPT Web chat (text answer extraction)", () => {
     const conversation = {
       current_node: "answer_1",
       mapping: {
-        request_1: { id: "request_1", create_time: 100, children: ["answer_1"] },
+        request_1: {
+          id: "request_1",
+          create_time: 100,
+          children: ["answer_1"],
+        },
         answer_1: {
           id: "answer_1",
           parent: "request_1",

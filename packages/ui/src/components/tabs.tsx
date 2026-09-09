@@ -23,8 +23,10 @@ const TabsList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <TabsPrimitive.List
     ref={ref}
+    // 全站 Tab 统一胶囊语言:rounded-full 容器 + bg-muted/40 + 细边框。
+    // (settings 下划线风与旧 segmented 已收敛到本规格)
     className={cn(
-      "inline-flex h-9 items-center justify-center gap-1 rounded-lg p-1 text-muted-foreground",
+      "inline-flex h-9 items-center justify-center gap-1 rounded-full border border-border bg-muted/40 p-1 text-muted-foreground",
       className
     )}
     {...props}
@@ -43,8 +45,9 @@ const TabsTrigger = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <TabsPrimitive.Trigger
     ref={ref}
+    // 胶囊容器内 trigger 同为全圆;激活态白底浮起(与弹窗 segmented 一致)。
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium ring-offset-background transition-[color,background-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:text-foreground data-[state=active]:bg-secondary data-[state=active]:text-foreground",
+      "inline-flex items-center justify-center whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-medium ring-offset-background transition-[color,background-color,box-shadow] duration-200 ease-[var(--ease-out-quart)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:text-foreground data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs",
       className
     )}
     {...props}

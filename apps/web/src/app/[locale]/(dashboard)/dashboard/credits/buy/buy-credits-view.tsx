@@ -256,7 +256,7 @@ export function BuyCreditPackagesView() {
               key={pkg.id}
               id={`credit-package-${pkg.id}`}
               className={cn(
-                "relative flex flex-col rounded-lg border transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:shadow-whisper motion-reduce:transition-none animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none",
+                "relative flex flex-col rounded-lg border lift-hover motion-reduce:transition-none animate-in fade-in slide-in-from-bottom-2 motion-reduce:animate-none",
                 selectedPackageId === pkg.id
                   ? "border-foreground ring-2 ring-foreground/20 shadow-whisper"
                   : isPopular

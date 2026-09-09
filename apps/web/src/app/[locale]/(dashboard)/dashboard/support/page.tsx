@@ -182,7 +182,7 @@ export default async function SupportPage() {
                 属性（400ms），不影响 hover 抬升过渡的 duration-250。
               */}
               <Card
-                className="cursor-pointer animate-in fade-in slide-in-from-bottom-2 transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper motion-reduce:animate-none motion-reduce:transition-none"
+                className="cursor-pointer animate-in fade-in slide-in-from-bottom-2 lift-hover motion-reduce:animate-none motion-reduce:transition-none"
                 style={{
                   animationDelay: `${(index % 12) * 50}ms`,
                   animationDuration: "400ms",

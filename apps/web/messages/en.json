@@ -659,6 +659,7 @@
     }
   },
   "Settings": {
+    "title": "Settings",
     "tabs": {
       "account": "Account",
       "security": "Security",
@@ -773,6 +774,11 @@
       "modelHint": "Leave blank to use the default model",
       "useStream": "Stream responses",
       "useStreamDescription": "Send stream=true and accept New API image event streams.",
+      "chatUpstreamLabel": "Chat Completions upstream",
+      "chatUpstreamResponses": "Responses image mode",
+      "chatUpstreamNativeChat": "Native Chat Completions",
+      "chatUpstreamNativeImages": "Native Images",
+      "chatUpstreamHint": "Responses mode calls the upstream /responses endpoint; native Chat mode calls /chat/completions; Images mode translates to /images/generations or /images/edits and does not support multi-turn conversations.",
       "save": "Save Configuration",
       "remove": "Remove",
       "docsLink": "API Documentation",

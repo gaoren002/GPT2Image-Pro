@@ -731,7 +731,7 @@ function ImageSizeDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         aria-describedby={undefined}
-        className="max-h-[92vh] w-[calc(100vw-1.5rem)] max-w-md gap-0 overflow-y-auto rounded-3xl border-border p-0"
+        className="max-h-[92vh] w-[calc(100vw-1.5rem)] max-w-md gap-0 overflow-y-auto rounded-lg border-border p-0"
       >
         <DialogTitle className="sr-only">{title}</DialogTitle>
         <div className="space-y-6 p-6">
@@ -745,7 +745,7 @@ function ImageSizeDialog({
             </p>
           </div>
 
-          <div className="grid grid-cols-3 rounded-xl bg-muted p-1">
+          <div className="grid grid-cols-3 rounded-md bg-muted p-1">
             {[
               { value: "auto" as ImageSizeMode, label: copy("Auto", "自动") },
               {
@@ -761,9 +761,9 @@ function ImageSizeDialog({
                 key={item.value}
                 type="button"
                 onClick={() => setMode(item.value)}
-                className={`h-9 rounded-lg text-sm font-medium transition ${
+                className={`h-9 rounded-sm text-sm font-medium transition ${
                   mode === item.value
-                    ? "bg-background text-foreground shadow-sm"
+                    ? "bg-background text-foreground shadow-xs"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
@@ -784,7 +784,7 @@ function ImageSizeDialog({
                       key={item.value}
                       type="button"
                       onClick={() => setBase(item.value)}
-                      className={`h-10 rounded-xl border text-sm font-medium transition ${
+                      className={`h-10 rounded-md border text-sm font-medium transition ${
                         base === item.value
                           ? "border-primary bg-primary/5 text-primary"
                           : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -811,7 +811,7 @@ function ImageSizeDialog({
                           setCustomRatio(item.value);
                           setCustomRatioOpen(false);
                         }}
-                        className={`flex h-16 flex-col items-center justify-center gap-1 rounded-xl border text-xs transition ${
+                        className={`flex h-16 flex-col items-center justify-center gap-1 rounded-md border text-xs transition ${
                           ratio === item.value
                             ? "border-primary bg-primary/5 text-primary"
                             : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -831,7 +831,7 @@ function ImageSizeDialog({
                     {copy("Custom ratio", "自定义比例")}
                   </Button>
                   {customRatioOpen && (
-                    <div className="space-y-2 rounded-xl border border-border bg-background p-3">
+                    <div className="space-y-2 rounded-md border border-border bg-background p-3">
                       <label
                         htmlFor="create-custom-ratio"
                         className="text-xs font-medium text-muted-foreground"
@@ -908,7 +908,7 @@ function ImageSizeDialog({
             </>
           )}
 
-          <div className="rounded-2xl bg-muted/30 p-4">
+          <div className="rounded-lg bg-muted/30 p-4">
             <p className="text-xs font-medium text-muted-foreground">
               {copy("Will use", "将使用")}
             </p>
@@ -929,7 +929,7 @@ function ImageSizeDialog({
             )}
           </div>
 
-          <div className="flex gap-3 rounded-2xl border border-border bg-muted/20 p-4 text-xs leading-5 text-muted-foreground">
+          <div className="flex gap-3 rounded-lg border border-border bg-muted/20 p-4 text-xs leading-5 text-muted-foreground">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
             <p>
               {copy(
@@ -942,7 +942,7 @@ function ImageSizeDialog({
           {showMixRouting && (
             <label
               htmlFor="create-mix-web-first"
-              className={`flex items-start gap-3 rounded-2xl border border-border bg-muted/20 p-4 text-xs leading-5 text-muted-foreground ${
+              className={`flex items-start gap-3 rounded-lg border border-border bg-muted/20 p-4 text-xs leading-5 text-muted-foreground ${
                 mixRoutingAvailable ? "cursor-pointer" : "cursor-not-allowed"
               }`}
             >
@@ -983,7 +983,7 @@ function ImageSizeDialog({
               type="button"
               variant="secondary"
               onClick={() => onOpenChange(false)}
-              className="h-10 rounded-xl"
+              className="h-10"
             >
               {copy("Cancel", "取消")}
             </Button>
@@ -991,7 +991,7 @@ function ImageSizeDialog({
               type="button"
               onClick={apply}
               disabled={!canConfirm}
-              className="h-10 rounded-xl"
+              className="h-10"
             >
               {copy("Confirm", "确定")}
             </Button>
@@ -3557,7 +3557,7 @@ export function CreatePageClient({
     if (!params.open) return null;
     const visibleOptions = params.options.slice(0, 8);
     return (
-      <div className="absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-lg">
+      <div className="absolute bottom-full left-0 right-0 z-30 mb-2 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-menu">
         {visibleOptions.length > 0 ? (
           <div className="max-h-64 overflow-y-auto py-1">
             {visibleOptions.map((option) => (
@@ -7911,7 +7911,7 @@ export function CreatePageClient({
                   className="object-contain"
                   unoptimized={shouldBypassImageOptimization(previewUrl)}
                 />
-                <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-background/90 px-3 py-1.5 text-xs font-medium text-foreground shadow-sm">
+                <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-background/90 px-3 py-1.5 text-xs font-medium text-foreground shadow-whisper">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {copy("Previewing stream", "正在预览流式结果")}
                 </div>
@@ -7949,7 +7949,7 @@ export function CreatePageClient({
                 className="object-contain"
                 unoptimized={shouldBypassImageOptimization(modeResult.imageUrl)}
               />
-              <span className="absolute right-2 top-2 rounded bg-background/90 px-2 py-1 text-xs font-medium text-foreground opacity-0 shadow-sm transition-opacity hover:opacity-100 focus:opacity-100 group-hover:opacity-100">
+              <span className="absolute right-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-xs font-medium text-foreground opacity-0 shadow-whisper transition-opacity hover:opacity-100 focus:opacity-100 group-hover:opacity-100">
                 <Eye className="mr-1 inline h-3.5 w-3.5" />
                 {copy("Preview", "预览")}
               </span>
@@ -8055,19 +8055,19 @@ export function CreatePageClient({
         }}
         className="mb-10"
       >
-        <TabsList className="mb-6 h-auto flex-wrap justify-start gap-1 rounded-full border border-border bg-muted/40 p-1">
-          <TabsTrigger value="text" className="gap-1.5 rounded-full px-4">
+        <TabsList className="mb-6 h-auto flex-wrap justify-start gap-1">
+          <TabsTrigger value="text" className="gap-1.5 px-4">
             <Wand2 className="h-4 w-4" />
             {copy("Text to image", "文生图")}
           </TabsTrigger>
-          <TabsTrigger value="image" className="gap-1.5 rounded-full px-4">
+          <TabsTrigger value="image" className="gap-1.5 px-4">
             <ImagePlus className="h-4 w-4" />
             {copy("Image to image", "图生图")}
           </TabsTrigger>
           <TabsTrigger
             value="chat"
             disabled={!chatAllowed}
-            className="gap-1.5 rounded-full px-4"
+            className="gap-1.5 px-4"
           >
             <MessageSquare className="h-4 w-4" />
             {copy("chat(codex)", "chat(codex)")}
@@ -8077,7 +8077,7 @@ export function CreatePageClient({
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="chat-web" className="gap-1.5 rounded-full px-4">
+          <TabsTrigger value="chat-web" className="gap-1.5 px-4">
             <MessageSquare className="h-4 w-4" />
             {copy("chat(web)", "chat(web)")}
           </TabsTrigger>
@@ -8085,7 +8085,7 @@ export function CreatePageClient({
             value="agent"
             disabled={!effectiveAgentAllowed}
             title={agentBackendUnavailableReason}
-            className="gap-1.5 rounded-full px-4"
+            className="gap-1.5 px-4"
           >
             <Wand2 className="h-4 w-4" />
             {copy("Agent", "Agent")}
@@ -8107,7 +8107,7 @@ export function CreatePageClient({
           <TabsTrigger
             value="waterfall"
             disabled={!waterfallAllowed}
-            className="gap-1.5 rounded-full px-4"
+            className="gap-1.5 px-4"
           >
             <ImagePlus className="h-4 w-4" />
             {copy("Waterfall", "瀑布流")}
@@ -8117,7 +8117,7 @@ export function CreatePageClient({
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="video" className="gap-1.5 rounded-full px-4">
+          <TabsTrigger value="video" className="gap-1.5 px-4">
             <Wand2 className="h-4 w-4" />
             {copy("Video", "视频")}
           </TabsTrigger>
@@ -8129,11 +8129,11 @@ export function CreatePageClient({
             onValueChange={(value) => setTextMode(value as TextGenerationMode)}
             className="space-y-4"
           >
-            <TabsList className="rounded-full border border-border bg-muted/40 p-1">
-              <TabsTrigger value="single" className="rounded-full px-4">
+            <TabsList>
+              <TabsTrigger value="single" className="px-4">
                 {copy("Single prompt", "单提示词")}
               </TabsTrigger>
-              <TabsTrigger value="lines" className="rounded-full px-4">
+              <TabsTrigger value="lines" className="px-4">
                 {copy("Line batch", "逐行批量")}
               </TabsTrigger>
             </TabsList>
@@ -8352,7 +8352,7 @@ export function CreatePageClient({
                       key={`${item.file.name}-${item.previewUrl}`}
                       className="group relative aspect-square overflow-hidden rounded-md border bg-muted"
                     >
-                      <span className="absolute left-1 top-1 z-10 rounded bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm">
+                      <span className="absolute left-1 top-1 z-10 rounded-sm bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-whisper">
                         {index + 1}
                       </span>
                       <Image
@@ -9254,7 +9254,7 @@ export function CreatePageClient({
                                             activeVariant.imageUrl
                                           )}
                                         />
-                                        <span className="absolute right-2 top-2 rounded bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
+                                        <span className="absolute right-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground opacity-0 shadow-whisper transition-opacity group-hover:opacity-100">
                                           <Eye className="mr-1 inline h-3 w-3" />
                                           {copy("Preview", "预览")}
                                         </span>
@@ -9741,7 +9741,7 @@ export function CreatePageClient({
                 ref={batchScrollRef}
                 className="max-h-[760px] overflow-y-auto p-3"
               >
-                <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
+                <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background/95 px-3 py-2 text-xs shadow-whisper backdrop-blur">
                   <div className="min-w-0">
                     <p className="truncate font-medium text-foreground">
                       {batchPromptRef.current || batchPrompt}
@@ -9833,7 +9833,7 @@ export function CreatePageClient({
                             )}
                           />
                           {card.state === "loading" && (
-                            <span className="absolute left-2 top-2 rounded-full bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-sm">
+                            <span className="absolute left-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-whisper">
                               <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
                               {copy("Streaming", "流式生成中")}
                             </span>

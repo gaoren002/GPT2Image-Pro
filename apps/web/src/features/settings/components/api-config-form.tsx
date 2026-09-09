@@ -251,7 +251,7 @@ export function ApiConfigForm() {
           {hasConfig && (
             <div className="-mx-2 flex items-center justify-between rounded-md px-2 py-1.5 transition-colors duration-150 hover:bg-muted/30">
               <div>
-                <Label className="text-sm">
+                <Label>
                   {t("apiConfig.enabled")}
                 </Label>
                 <p className="text-xs text-muted-foreground">
@@ -323,10 +323,10 @@ export function ApiConfigForm() {
             </p>
           </div>
 
-          {/* Streaming toggle：行 hover 微提亮 */}
-          <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-3 transition-colors duration-150 hover:bg-muted/30">
+          {/* Streaming toggle：行 hover 微提亮(与 Active toggle 同配方:无边框 hover 行) */}
+          <div className="-mx-2 flex items-center justify-between rounded-md px-2 py-1.5 transition-colors duration-150 hover:bg-muted/30">
             <div>
-              <Label htmlFor="api-use-stream" className="text-sm">
+              <Label htmlFor="api-use-stream">
                 {t("apiConfig.useStream")}
               </Label>
               <p className="text-xs text-muted-foreground">
@@ -346,7 +346,7 @@ export function ApiConfigForm() {
               htmlFor="api-chat-upstream"
               className="text-xs uppercase tracking-[0.6px] text-muted-foreground"
             >
-              Chat Completions 上游
+              {t("apiConfig.chatUpstreamLabel")}
             </Label>
             <Select
               value={chatCompletionsUpstreamMode}
@@ -363,15 +363,19 @@ export function ApiConfigForm() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="responses">Responses 生图模式</SelectItem>
-                <SelectItem value="chat_completions">
-                  原生 Chat Completions
+                <SelectItem value="responses">
+                  {t("apiConfig.chatUpstreamResponses")}
                 </SelectItem>
-                <SelectItem value="images">原生 Images</SelectItem>
+                <SelectItem value="chat_completions">
+                  {t("apiConfig.chatUpstreamNativeChat")}
+                </SelectItem>
+                <SelectItem value="images">
+                  {t("apiConfig.chatUpstreamNativeImages")}
+                </SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Responses 模式会请求上游 /responses；原生 Chat 模式会请求 /chat/completions；Images 模式会转换为 /images/generations 或 /images/edits，不支持多轮对话。
+              {t("apiConfig.chatUpstreamHint")}
             </p>
           </div>
 

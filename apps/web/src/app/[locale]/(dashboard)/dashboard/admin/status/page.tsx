@@ -924,7 +924,7 @@ function MetricCard({
       className="animate-in fade-in slide-in-from-bottom-2 duration-400 motion-reduce:animate-none"
       style={{ animationDelay: `${delay}ms`, animationFillMode: "backwards" }}
     >
-      <Card className="h-full gap-3 rounded-lg py-5 transition-all duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper">
+      <Card className="h-full gap-3 rounded-lg py-5 lift-hover">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-0">
           <CardTitle className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
             {title}

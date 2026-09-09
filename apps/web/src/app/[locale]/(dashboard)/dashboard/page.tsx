@@ -43,7 +43,7 @@ const sectionEnterClass =
  * Tailwind v4 的 -translate-y-* 产出原生 CSS translate 属性,过渡列表须写 translate 而非 transform。
  */
 const cardLiftClass =
-  "transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper motion-reduce:transition-none";
+  "lift-hover motion-reduce:transition-none";
 
 export default async function DashboardPage() {
   const session = await auth.api.getSession({ headers: await headers() });

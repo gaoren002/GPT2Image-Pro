@@ -56,7 +56,7 @@ export function PseoFeatureGrid({ page }: { page: PseoPage }) {
                 // 白纸卡浮在浅底节上,hover 轻抬升 + 边框提亮 + shadow-whisper
                 <Card
                   key={feature.title}
-                  className="group border-border bg-background shadow-none transition-[border-color,box-shadow,transform] duration-250 hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-whisper"
+                  className="group border-border bg-background shadow-none lift-hover"
                 >
                   <CardContent className="p-6">
                     <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-md bg-foreground/5 text-foreground transition-colors duration-150 group-hover:bg-foreground group-hover:text-background">

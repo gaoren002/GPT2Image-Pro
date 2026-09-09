@@ -514,7 +514,8 @@ export function PricingSection({
         className={cn(
           // 轴身:去圆角的纸面,悬停以边色与投影回应(立轴不抬升)。
           // gap-5/py-5:密度收紧,全轴(绳杆地杆含)须容于一屏紧视口
-          "relative flex h-full flex-col gap-5 rounded-none border-border py-5 transition-[border-color,box-shadow] duration-250 hover:border-foreground/30 hover:shadow-whisper",
+          // duration-200:对齐全站 hover 过渡规格
+          "relative flex h-full flex-col gap-5 rounded-none border-border py-5 transition-[border-color,box-shadow] duration-200 hover:border-foreground/30 hover:shadow-whisper",
           // 推荐档:细 ring + 轻阴影,替代粗边框重阴影
           popular && !isCurrent && "ring-1 ring-foreground/20 shadow-whisper",
           // enterprise 卡边框本就更深,悬停保持同深度避免反向变浅
@@ -542,8 +543,9 @@ export function PricingSection({
             </span>
           </div>
 
-          {/* Credits highlight */}
-          <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+          {/* Credits highlight:轴身内的"地纸"块,延续 rounded-none 纸面语言,
+              只以底色区分,不再引入圆角盒中盒 */}
+          <div className="mb-4 rounded-none bg-muted/40 px-3 py-2.5">
             <div className="flex items-center gap-1.5">
               <Coins className="size-4 text-foreground" />
               <span className="font-serif text-lg font-medium">
@@ -706,12 +708,13 @@ export function PricingSection({
             标题下装裱横档自中心生长——进入廊道前的开幕一拍 */}
         <div className="mb-12 text-center">
           <InkReveal>
-            <p className="mb-3 text-[11px] uppercase tracking-widest text-muted-foreground">
+            <p className="mb-3 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
               {tCinema("framingLabel")}
             </p>
           </InkReveal>
           <InkReveal phase={0.22}>
-            <h2 className="mb-4 text-balance font-serif text-3xl font-medium tracking-tight md:text-5xl">
+            {/* 首页谷段 section 标题统一一档:text-3xl -> md:text-4xl(与 FAQ 对齐) */}
+            <h2 className="mb-4 text-balance font-serif text-3xl font-medium tracking-tight md:text-4xl">
               {t("title")}
             </h2>
           </InkReveal>
@@ -875,13 +878,15 @@ export function PricingSection({
                   />
                   <Card
                     className={cn(
-                      "flex h-full flex-col rounded-none border-border transition-[border-color,box-shadow] duration-150 hover:border-foreground/30 hover:shadow-whisper",
+                      // 与订阅轴同 hover 语言(200ms 过渡),避免同页两套时值
+                      "flex h-full flex-col rounded-none border-border transition-[border-color,box-shadow] duration-200 hover:border-foreground/30 hover:shadow-whisper",
                       pkg.popular && "ring-1 ring-foreground/20 shadow-whisper"
                     )}
                   >
                     <CardHeader className="space-y-2">
                       <div className="flex items-start justify-between gap-3">
-                        <CardTitle className="text-base font-medium">
+                        {/* 卡片标题字号与订阅轴对齐(text-lg) */}
+                        <CardTitle className="text-lg font-medium">
                           {packageName}
                         </CardTitle>
                         {pkg.popular && (
@@ -955,11 +960,8 @@ export function PricingSection({
 
                       <div className="flex flex-wrap gap-2">
                         {planPrices.map(({ planId, price }) => (
-                          <Badge
-                            key={`${pkg.id}-${planId}`}
-                            variant="outline"
-                            className="rounded-md"
-                          >
+                          // 徽章形状走 Badge 默认(rounded-full),不再第三种形状
+                          <Badge key={`${pkg.id}-${planId}`} variant="outline">
                             {t(`plans.${planId}.name`)} {formatMoney(price)}
                           </Badge>
                         ))}
@@ -986,7 +988,7 @@ export function PricingSection({
         {/* 例言(v1.0.2):计费规则的书页凡例体——灰底白卡退役,
             标题居中两侧短线,条目衬线序号(一/二/…),随滚动逐条
             显影(相位错落,滚回倒放)。文案与条目内容不动。 */}
-        <div className="mt-12 border-y border-border/70 py-8">
+        <div className="mt-12 border-y border-border/60 py-8">
           <InkReveal>
             <div className="flex items-center justify-center gap-4">
               <span aria-hidden="true" className="h-px w-10 bg-foreground/30" />

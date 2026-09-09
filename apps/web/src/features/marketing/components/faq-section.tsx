@@ -163,7 +163,8 @@ export function FAQSection({
           {/* Header 揭幕(v1.0.2):三行随滚动错落显影,与谷段同语言 */}
           <div className="mb-12 text-center">
             <InkReveal>
-              <p className="mb-2 text-sm font-medium uppercase tracking-wider text-muted-foreground">
+              {/* 眉标对齐全站小标签规范:text-[11px] + tracking-widest */}
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                 {t("label")}
               </p>
             </InkReveal>

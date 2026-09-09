@@ -134,11 +134,13 @@ export function CookieConsent() {
     <div
       className={cn(
         "fixed bottom-0 left-0 right-0 z-50 p-4",
-        "animate-in fade-in slide-in-from-bottom-5 duration-400 motion-reduce:animate-none"
+        // 入场规格统一:duration-400 + bottom-2(与 legal/pseo 区块入场同语言)
+        "animate-in fade-in slide-in-from-bottom-2 duration-400 motion-reduce:animate-none"
       )}
     >
       <div className="container">
-        <div className="rounded-lg border border-border bg-background p-6 shadow-modal">
+        {/* 浮动卡面统一 whisper 阴影;modal 留给真正挡交互的弹窗 */}
+        <div className="rounded-lg border border-border bg-background p-6 shadow-whisper">
           {!showDetails ? (
             // 简洁视图
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -189,7 +191,7 @@ export function CookieConsent() {
 
               <div className="space-y-3">
                 {/* 必要 Cookie */}
-                <div className="flex items-start justify-between rounded-md border border-border p-4">
+                <div className="flex items-start justify-between rounded-md bg-muted/40 p-4">
                   <div className="flex-1">
                     <h4 className="font-medium">{t("essential.title")}</h4>
                     <p className="mt-1 text-sm text-muted-foreground">
@@ -202,7 +204,7 @@ export function CookieConsent() {
                 </div>
 
                 {/* 分析 Cookie */}
-                <div className="flex items-start justify-between rounded-md border border-border p-4">
+                <div className="flex items-start justify-between rounded-md bg-muted/40 p-4">
                   <div className="flex-1">
                     <h4 className="font-medium">{t("analytics.title")}</h4>
                     <p className="mt-1 text-sm text-muted-foreground">
@@ -220,7 +222,7 @@ export function CookieConsent() {
                 </div>
 
                 {/* 营销 Cookie */}
-                <div className="flex items-start justify-between rounded-md border border-border p-4">
+                <div className="flex items-start justify-between rounded-md bg-muted/40 p-4">
                   <div className="flex-1">
                     <h4 className="font-medium">{t("marketing.title")}</h4>
                     <p className="mt-1 text-sm text-muted-foreground">

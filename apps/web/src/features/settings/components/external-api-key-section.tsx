@@ -538,7 +538,7 @@ export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
                 key={key.id}
                 // API Key 行卡片 hover 抬升：轻位移 + whisper 阴影 + 边框提亮。
                 // Tailwind v4 的 -translate-y-* 产出原生 translate 属性，过渡列表须写 translate。
-                className="flex flex-col gap-3 rounded-md border border-border px-3 py-3 transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper motion-reduce:transition-none sm:flex-row sm:items-center sm:justify-between"
+                className="flex flex-col gap-3 rounded-md border border-border px-3 py-3 lift-hover motion-reduce:transition-none sm:flex-row sm:items-center sm:justify-between"
               >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">

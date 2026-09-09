@@ -659,6 +659,7 @@
     }
   },
   "Settings": {
+    "title": "设置",
     "tabs": {
       "account": "账户",
       "security": "安全",
@@ -773,6 +774,11 @@
       "modelHint": "留空则使用默认模型",
       "useStream": "流式响应",
       "useStreamDescription": "发送 stream=true，并兼容 New API 的图像事件流。",
+      "chatUpstreamLabel": "Chat Completions 上游",
+      "chatUpstreamResponses": "Responses 生图模式",
+      "chatUpstreamNativeChat": "原生 Chat Completions",
+      "chatUpstreamNativeImages": "原生 Images",
+      "chatUpstreamHint": "Responses 模式会请求上游 /responses；原生 Chat 模式会请求 /chat/completions；Images 模式会转换为 /images/generations 或 /images/edits，不支持多轮对话。",
       "save": "保存配置",
       "remove": "删除",
       "docsLink": "API 文档",

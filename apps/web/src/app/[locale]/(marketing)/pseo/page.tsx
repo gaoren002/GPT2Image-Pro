@@ -116,7 +116,7 @@ export default async function PseoIndexPage({
           {pages.map((page) => (
             <Card
               key={page.slug}
-              className="group border-border bg-background shadow-none transition-[border-color,box-shadow,transform] duration-250 hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-whisper"
+              className="group border-border bg-background shadow-none lift-hover"
             >
               <CardContent className="flex h-full flex-col p-6">
                 <div className="mb-4 flex items-center justify-between">

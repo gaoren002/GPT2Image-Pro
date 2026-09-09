@@ -79,10 +79,6 @@ interface SettingsProfileViewProps {
 
 type FormValues = z.infer<typeof updateProfileSchema>;
 
-/** Tab 触发器统一样式：单色边框激活态 + 150ms 颜色过渡 */
-const tabTriggerClass =
-  "rounded-md border border-transparent px-4 py-2 transition-colors duration-150 data-[state=active]:border-foreground/20 data-[state=active]:bg-foreground/5 data-[state=active]:text-foreground data-[state=active]:shadow-none";
-
 /** 设置分区节标题：uppercase 小标签 + 下边框分隔（对齐参考项目排版语言） */
 const sectionTitleClass =
   "text-xs font-medium uppercase tracking-[1.2px] text-muted-foreground";
@@ -349,27 +345,32 @@ export function SettingsProfileView({ user }: SettingsProfileViewProps) {
 
   return (
     <div className="max-w-4xl space-y-8">
+      {/* 页头:对齐 dashboard/admin 页头节奏(衬线大标题),此前无标题直接进 Tab */}
+      <div className="space-y-1">
+        <h1 className="font-serif text-3xl font-medium tracking-tight">
+          {t("title")}
+        </h1>
+      </div>
       <Tabs
         value={activeTab}
         onValueChange={(value) => setActiveTab(normalizeTab(value))}
         className="w-full"
       >
-        <div className="border-b border-border/60 pb-2">
-          <TabsList className="h-auto gap-1 bg-transparent p-0">
-            <TabsTrigger value="account" className={tabTriggerClass}>
-              {tTabs("account")}
-            </TabsTrigger>
-            <TabsTrigger value="security" className={tabTriggerClass}>
-              {tTabs("security")}
-            </TabsTrigger>
-            <TabsTrigger value="backend" className={tabTriggerClass}>
-              {tTabs("backend")}
-            </TabsTrigger>
-            <TabsTrigger value="advanced" className={tabTriggerClass}>
-              {tTabs("advanced")}
-            </TabsTrigger>
-          </TabsList>
-        </div>
+        {/* Tab 语言收敛到全站胶囊规格(TabsList 默认类),不再用下划线风 */}
+        <TabsList className="h-auto gap-1">
+          <TabsTrigger value="account">
+            {tTabs("account")}
+          </TabsTrigger>
+          <TabsTrigger value="security">
+            {tTabs("security")}
+          </TabsTrigger>
+          <TabsTrigger value="backend">
+            {tTabs("backend")}
+          </TabsTrigger>
+          <TabsTrigger value="advanced">
+            {tTabs("advanced")}
+          </TabsTrigger>
+        </TabsList>
 
         <TabsContent
           value="account"

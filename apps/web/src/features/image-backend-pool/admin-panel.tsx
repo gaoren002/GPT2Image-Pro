@@ -2961,7 +2961,7 @@ export function ImageBackendPoolAdminPanel({
                       animationFillMode: "backwards",
                     }}
                   >
-                    <Card className="h-full transition-all duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper">
+                    <Card className="h-full lift-hover">
                       <CardContent className="p-4">
                         <div className="mb-3 flex items-center justify-between gap-2">
                           <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">

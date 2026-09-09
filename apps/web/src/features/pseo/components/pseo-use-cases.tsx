@@ -22,7 +22,7 @@ export function PseoUseCases({ page }: { page: PseoPage }) {
           {useCases.map((useCase) => (
             <Card
               key={useCase.title}
-              className="border-border bg-background shadow-none transition-[border-color,box-shadow,transform] duration-250 hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-whisper"
+              className="border-border bg-background shadow-none lift-hover"
             >
               <CardContent className="flex h-full flex-col p-6">
                 <h3 className="text-lg font-medium text-foreground">

@@ -311,7 +311,7 @@ export function AdminAnnouncementsManagement({
               animationFillMode: "backwards",
             }}
           >
-            <Card className="h-full transition-all duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper">
+            <Card className="h-full lift-hover">
               <CardHeader className="pb-2">
                 <CardTitle className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                   {item.label}
@@ -349,7 +349,7 @@ export function AdminAnnouncementsManagement({
             return (
               <Card
                 key={item.id}
-                className="transition-all duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper"
+                className="lift-hover"
               >
                 <CardContent className="p-5">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">

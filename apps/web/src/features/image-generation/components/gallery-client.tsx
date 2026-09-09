@@ -397,7 +397,7 @@ export function GalleryClient({
             // 尺寸徽标常显于左上(hover 遮罩会挡住 video controls,故不做遮罩)。
             <div
               key={item.id}
-              className="group animate-in fade-in slide-in-from-bottom-2 overflow-hidden rounded-lg border border-border bg-background transition-[translate,box-shadow] duration-250 hover:-translate-y-1 hover:shadow-whisper motion-reduce:animate-none motion-reduce:transition-none"
+              className="group animate-in fade-in slide-in-from-bottom-2 overflow-hidden rounded-lg border border-border bg-background lift-hover motion-reduce:animate-none motion-reduce:transition-none"
               // 入场错峰:按网格索引 50ms 递增(12 个一轮回),fill-mode 用 backwards
               // 保证延迟期间停留在动画首帧(透明),避免"先显示再闪回透明"的跳变。
               // 入场时长走内联长属性(400ms),不影响 hover 过渡的 duration-250。

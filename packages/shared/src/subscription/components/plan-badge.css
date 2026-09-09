@@ -1,177 +1,121 @@
 /**
- * 订阅等级徽章动画样式
+ * 订阅等级徽章动画样式(黑白墨纸风)
+ *
+ * 三种克制的黑白微动效,均遵守 prefers-reduced-motion 降级:
+ * - sweep:高光自左向右扫过(Starter/Pro)
+ * - breathe:呼吸式 ring 光晕(Ultra)
+ * - glint:斜向高光缓扫(Enterprise)
  */
 
-/* Starter - 微光扫过效果 */
-.plan-badge-shimmer {
+@keyframes plan-badge-sweep-kf {
+  0% {
+    transform: translateX(-120%) skewX(-12deg);
+  }
+  55%,
+  100% {
+    transform: translateX(220%) skewX(-12deg);
+  }
+}
+
+/* sweep:伪元素高光扫过;当前景为深色(pro)时用亮高光,浅色时用暗高光 */
+.plan-badge-sweep {
   position: relative;
   overflow: hidden;
 }
 
-.plan-badge-shimmer::before {
+.plan-badge-sweep::after {
   content: "";
   position: absolute;
   top: 0;
-  left: -100%;
-  width: 100%;
+  left: 0;
+  width: 45%;
   height: 100%;
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.4),
+    rgb(255 255 255 / 0.35),
     transparent
   );
-  animation: shimmer 3s infinite;
+  animation: plan-badge-sweep-kf 3.2s var(--ease-ink, ease-in-out) infinite;
 }
 
-@keyframes shimmer {
-  0% {
-    left: -100%;
-  }
-  50%,
-  100% {
-    left: 100%;
-  }
-}
-
-/* Pro - 金色流光效果 */
-.plan-badge-shine {
-  position: relative;
-  overflow: hidden;
-}
-
-.plan-badge-shine::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: -150%;
-  width: 150%;
-  height: 100%;
+.dark .plan-badge-sweep::after {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 215, 0, 0.3),
-    rgba(255, 255, 255, 0.5),
-    rgba(255, 215, 0, 0.3),
+    rgb(255 255 255 / 0.22),
     transparent
   );
-  animation: shine 2.5s infinite;
 }
 
-@keyframes shine {
-  0% {
-    left: -150%;
-  }
-  50%,
-  100% {
-    left: 150%;
-  }
-}
-
-/* Ultra - 极光渐变效果 */
-.plan-badge-aurora {
-  position: relative;
-  overflow: hidden;
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
-.plan-badge-aurora::before {
-  content: "";
-  position: absolute;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
-  background: conic-gradient(
-    from 0deg,
-    transparent,
-    rgba(168, 85, 247, 0.3),
-    rgba(236, 72, 153, 0.3),
-    rgba(168, 85, 247, 0.3),
-    transparent
-  );
-  animation: aurora-rotate 4s linear infinite;
-}
-
-@keyframes aurora-rotate {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes pulse-glow {
+/* breathe:ring 光晕呼吸(ultra,近黑反白) */
+@keyframes plan-badge-breathe-kf {
   0%,
   100% {
-    box-shadow: 0 0 15px rgba(168, 85, 247, 0.4);
+    box-shadow: 0 0 0 0 rgb(0 0 0 / 0.14);
   }
   50% {
-    box-shadow: 0 0 25px rgba(168, 85, 247, 0.6), 0 0 35px rgba(236, 72, 153, 0.3);
+    box-shadow: 0 0 0 3px rgb(0 0 0 / 0.1);
   }
 }
 
-/* Enterprise - understated business sweep */
-.plan-badge-enterprise {
+.dark .plan-badge-breathe {
+  animation-name: plan-badge-breathe-dark-kf;
+}
+
+@keyframes plan-badge-breathe-dark-kf {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(255 255 255 / 0.16);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgb(255 255 255 / 0.12);
+  }
+}
+
+.plan-badge-breathe {
+  animation: plan-badge-breathe-kf 2.8s ease-in-out infinite;
+}
+
+/* glint:顶部斜向高光缓扫(enterprise) */
+@keyframes plan-badge-glint-kf {
+  0% {
+    transform: translateX(-140%) rotate(8deg);
+  }
+  60%,
+  100% {
+    transform: translateX(260%) rotate(8deg);
+  }
+}
+
+.plan-badge-glint {
   position: relative;
   overflow: hidden;
 }
 
-.plan-badge-enterprise::before {
+.plan-badge-glint::before {
   content: "";
   position: absolute;
-  top: 0;
-  left: -120%;
-  width: 120%;
-  height: 100%;
+  top: -30%;
+  left: 0;
+  width: 30%;
+  height: 160%;
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.28),
+    rgb(255 255 255 / 0.28),
     transparent
   );
-  animation: enterprise-sweep 3.5s infinite;
+  animation: plan-badge-glint-kf 3.8s var(--ease-ink, ease-in-out) infinite;
 }
 
-@keyframes enterprise-sweep {
-  0% {
-    left: -120%;
+@media (prefers-reduced-motion: reduce) {
+  .plan-badge-sweep::after,
+  .plan-badge-glint::before {
+    animation: none;
+    display: none;
   }
-  45%,
-  100% {
-    left: 120%;
-  }
-}
-
-/* 暗色模式调整 */
-@media (prefers-color-scheme: dark) {
-  .plan-badge-shimmer::before {
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(255, 255, 255, 0.2),
-      transparent
-    );
-  }
-
-  .plan-badge-shine::before {
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(255, 215, 0, 0.2),
-      rgba(255, 255, 255, 0.3),
-      rgba(255, 215, 0, 0.2),
-      transparent
-    );
-  }
-
-  .plan-badge-enterprise::before {
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(15, 23, 42, 0.18),
-      transparent
-    );
+  .plan-badge-breathe {
+    animation: none;
   }
 }

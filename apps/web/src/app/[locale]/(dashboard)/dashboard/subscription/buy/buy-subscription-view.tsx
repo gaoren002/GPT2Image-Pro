@@ -247,7 +247,7 @@ export function BuySubscriptionView({
             <Card
               key={planId}
               className={cn(
-                "relative flex h-full flex-col border-border transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:border-foreground/30 hover:shadow-whisper motion-reduce:transition-none",
+                "relative flex h-full flex-col border-border lift-hover motion-reduce:transition-none",
                 popular && "border-foreground/40 shadow-whisper",
                 isCurrent && "ring-2 ring-foreground"
               )}

@@ -44,10 +44,16 @@ function seg(p: number, a: number, b: number) {
 /** 点类型:与图例一一对应 */
 type DotKind = "ok" | "platform" | "muted";
 
+/**
+ * 点色:CSS 变量取主题 token,明暗两态自动切换(不再硬编码 hex)。
+ * ok=墨点(foreground),platform=错误空圈(destructive),muted=淡灰点(border)。
+ * WHY 不用彩色:全站黑白单色,错误语义以 destructive 红呈现在图例与空圈,
+ * 保持克制且暗底可见(旧 #221d1a 墨点在暗底上几乎不可见)。
+ */
 const DOT_COLORS: Record<DotKind, string> = {
-  ok: "#221d1a",
-  platform: "#a8352a",
-  muted: "#c9c2b4",
+  ok: "var(--foreground)",
+  platform: "var(--destructive)",
+  muted: "var(--border)",
 };
 
 /** 确定性洗牌种子随机(与水墨引擎同式) */
@@ -292,19 +298,22 @@ export function SlaStatusSection({
   }
 
   return (
-    <section className="border-y border-border/60 bg-secondary/50">
-      <div className="container py-16 md:py-20">
+    // 区块纵向节奏对齐首页谷段(py-20 md:py-28,与 FAQ/Pricing 一致)
+    <section className="border-y border-border/60 bg-secondary/50 py-20 md:py-28">
+      <div className="container">
         <div className="grid gap-10 lg:grid-cols-[1.1fr_2fr] lg:items-center">
           <div>
             {/* 左栏三行随滚动错落显影(v1.0.2 同族语言);
                 大数字保留自己的落墨尾段显影,不重复包裹 */}
             <InkReveal>
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {/* 眉标对齐全站小标签规范:text-[11px] + tracking-widest */}
+              <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                 {copy("Generation SLA", "生图服务 SLA")}
               </p>
             </InkReveal>
             <InkReveal phase={0.2}>
-              <h2 className="mt-2 font-serif text-3xl font-medium tracking-tight">
+              {/* 首页谷段 section 标题统一一档:补 md:text-4xl(与 FAQ/Pricing 对齐) */}
+              <h2 className="mt-2 font-serif text-3xl font-medium tracking-tight md:text-4xl">
                 {copy("Every stroke lands", "千笔之约")}
               </h2>
             </InkReveal>

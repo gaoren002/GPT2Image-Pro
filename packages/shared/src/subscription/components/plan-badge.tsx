@@ -3,12 +3,13 @@
 /**
  * 订阅等级徽章组件
  *
- * 根据用户订阅等级显示不同样式的徽章：
- * - Free: 灰色静态
- * - Starter: 蓝色微光
- * - Pro: 金色流光动画
- * - Ultra: 紫色极光 + 脉冲光晕
- * - Enterprise: 深色商务高亮
+ * 根据用户订阅等级显示不同样式的徽章。
+ * 黑白单色设计语言:等级差异用"墨色浓度 + 图标 + 微动效"表达,不引入彩色。
+ * - Free: 浅灰静态
+ * - Starter: 中灰 + 微光扫过
+ * - Pro: 深灰 + 流光扫过
+ * - Ultra: 近黑反白 + 呼吸光晕
+ * - Enterprise: 纯黑反白 + 高光扫过
  */
 
 import "./plan-badge.css";
@@ -63,6 +64,9 @@ const sizeConfig: Record<
 
 /**
  * 计划配置
+ *
+ * WHY 不用彩色:全站为黑白墨纸风,彩色徽章在界面中过度抢眼;等级感改用
+ * 墨色浓度递进(free 最浅 -> enterprise 最深)与克制的黑白微动效表达。
  */
 const planConfig: Record<
   PlanType,
@@ -70,7 +74,6 @@ const planConfig: Record<
     icon: typeof User;
     labelKey: string;
     baseStyles: string;
-    glowStyles: string;
     animationClass: string;
   }
 > = {
@@ -78,41 +81,36 @@ const planConfig: Record<
     icon: User,
     labelKey: "free",
     baseStyles:
-      "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-    glowStyles: "",
+      "bg-muted text-muted-foreground border border-border/60",
     animationClass: "",
   },
   starter: {
     icon: Sparkles,
     labelKey: "starter",
     baseStyles:
-      "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
-    glowStyles: "shadow-[0_0_10px_rgba(59,130,246,0.3)]",
-    animationClass: "plan-badge-shimmer",
+      "bg-secondary text-secondary-foreground border border-border/60",
+    animationClass: "plan-badge-sweep",
   },
   pro: {
     icon: Crown,
     labelKey: "pro",
     baseStyles:
-      "bg-gradient-to-r from-amber-100 to-yellow-100 text-amber-700 dark:from-amber-900/50 dark:to-yellow-900/50 dark:text-amber-300",
-    glowStyles: "shadow-[0_0_15px_rgba(245,158,11,0.4)]",
-    animationClass: "plan-badge-shine",
+      "bg-foreground/85 text-background border border-foreground/85",
+    animationClass: "plan-badge-sweep",
   },
   ultra: {
     icon: Gem,
     labelKey: "ultra",
     baseStyles:
-      "bg-gradient-to-r from-purple-100 via-pink-100 to-purple-100 text-purple-700 dark:from-purple-900/50 dark:via-pink-900/50 dark:to-purple-900/50 dark:text-purple-300",
-    glowStyles: "shadow-[0_0_20px_rgba(168,85,247,0.5)]",
-    animationClass: "plan-badge-aurora",
+      "bg-foreground text-background border border-foreground plan-badge-breathe",
+    animationClass: "",
   },
   enterprise: {
     icon: Building2,
     labelKey: "enterprise",
     baseStyles:
-      "bg-gradient-to-r from-zinc-900 via-slate-800 to-zinc-900 text-white dark:from-zinc-100 dark:via-slate-200 dark:to-zinc-100 dark:text-zinc-950",
-    glowStyles: "shadow-[0_0_20px_rgba(15,23,42,0.35)]",
-    animationClass: "plan-badge-enterprise",
+      "bg-foreground text-background border border-foreground plan-badge-glint",
+    animationClass: "",
   },
 };
 
@@ -136,24 +134,10 @@ export function PlanBadge({
         "relative inline-flex items-center justify-center rounded-full font-medium overflow-hidden",
         sizeStyles.badge,
         config.baseStyles,
-        config.glowStyles,
         config.animationClass,
         className
       )}
     >
-      {/* 动画背景层 */}
-      {plan !== "free" && (
-        <div
-          className={cn(
-            "absolute inset-0 opacity-0",
-            plan === "starter" && "plan-badge-shimmer-bg",
-            plan === "pro" && "plan-badge-shine-bg",
-            plan === "ultra" && "plan-badge-aurora-bg",
-            plan === "enterprise" && "plan-badge-enterprise-bg"
-          )}
-        />
-      )}
-
       {/* 内容层 */}
       <Icon className={cn("relative z-10", sizeStyles.icon)} />
       {showLabel && (

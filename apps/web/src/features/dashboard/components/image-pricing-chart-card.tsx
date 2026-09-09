@@ -238,7 +238,7 @@ export function ImagePricingChartCard({
   // hover 语言与首页统计卡一致:轻抬升 + whisper 阴影 + 边框提亮;
   // Tailwind v4 的 -translate-y-* 走原生 translate 属性,过渡列表须写 translate 而非 transform
   return (
-    <Card className="transition-[border-color,box-shadow,translate] duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper motion-reduce:transition-none">
+    <Card className="lift-hover motion-reduce:transition-none">
       <CardHeader className="space-y-1">
         <CardTitle className="font-serif text-lg font-medium tracking-tight">
           {copy("Image Pricing Curve", "生图计价曲线")}

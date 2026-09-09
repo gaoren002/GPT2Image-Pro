@@ -982,7 +982,7 @@ export function AdminUsersManagement({
                 animationFillMode: "backwards",
               }}
             >
-              <Card className="h-full transition-all duration-250 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-whisper">
+              <Card className="h-full lift-hover">
                 <CardHeader className="flex flex-row items-center justify-between pb-2">
                   <CardTitle className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                     {item.label}

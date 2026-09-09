@@ -14,7 +14,10 @@ import {
 } from "@repo/shared/config/subscription-plan";
 import { getPlanCapabilitySnapshot } from "@repo/shared/subscription/services/plan-capabilities";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
-import { DEFAULT_IMAGE_MODEL } from "@/features/image-generation/resolution";
+import {
+  DEFAULT_IMAGE_MODEL,
+  GPT_IMAGE_25_MODELS,
+} from "@/features/image-generation/resolution";
 
 const DEFAULT_MODEL_OWNER = "gpt2image";
 
@@ -107,7 +110,8 @@ export async function getExternalModelsForUser(
 ): Promise<OpenAIModelList> {
   const plan = await getUserPlan(userId);
   const capabilities = await getPlanCapabilitySnapshot(plan.plan);
-  const imageModels = [DEFAULT_IMAGE_MODEL];
+  // 2.5 旗舰双档在前,/v1/models 让 API 用户优先发现当前旗舰;DEFAULT 兜底仍暴露。
+  const imageModels = [...GPT_IMAGE_25_MODELS, DEFAULT_IMAGE_MODEL];
   const fireflyModels = getExternalFireflyModels({
     imageGenerateAllowed: capabilities.features["externalApi.images.generate"],
   });

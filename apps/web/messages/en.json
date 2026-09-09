@@ -37,7 +37,7 @@
       },
       "export": {
         "title": "Cutting-Edge Models",
-        "description": "Powered by the latest AI models including GPT Image 2. Get stunning photorealistic images, artistic renders, and creative compositions with state-of-the-art quality."
+        "description": "Powered by the latest AI models including GPT Image 2.5. Get stunning photorealistic images, artistic renders, and creative compositions with state-of-the-art quality."
       },
       "batch": {
         "title": "Credits System",
@@ -151,7 +151,7 @@
       },
       {
         "question": "Which AI image models are supported?",
-        "answer": "GPT2IMAGE supports the leading image generation models on the market, including GPT Image 2. Just sign up, choose a plan, and start generating — the platform handles model routing and delivers results in a unified interface."
+        "answer": "GPT2IMAGE supports the leading image generation models on the market, including GPT Image 2.5. Just sign up, choose a plan, and start generating — the platform handles model routing and delivers results in a unified interface."
       },
       {
         "question": "How does the credits system work?",
@@ -351,7 +351,7 @@
       },
       "platform": {
         "title": "Platform",
-        "api": "GPT Image 2",
+        "api": "GPT Image 2.5",
         "apiDesc": "Next-generation image model with stunning quality",
         "multiModel": "Multi-model Support",
         "multiModelDesc": "Leading image generation models in one place",

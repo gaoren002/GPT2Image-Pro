@@ -1030,6 +1030,8 @@ const FIREFLY_MODEL_OPTIONS = [
 ] as const;
 const TEXT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
+  { value: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst" },
+  { value: "gpt-image-2.5-flare", label: "GPT Image 2.5 Flare" },
   { value: "gpt-image-2", label: "GPT Image 2" },
   { value: "gpt-image-1.5", label: "GPT Image 1.5" },
   { value: "gpt-image-1-mini", label: "GPT Image 1 Mini" },
@@ -1042,6 +1044,8 @@ const CHAT_IMAGE_MODEL_OPTIONS = TEXT_MODEL_OPTIONS.filter(
 );
 const EDIT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
+  { value: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst" },
+  { value: "gpt-image-2.5-flare", label: "GPT Image 2.5 Flare" },
   { value: "gpt-image-2", label: "GPT Image 2" },
   { value: "gpt-image-1.5", label: "GPT Image 1.5" },
   { value: "gpt-image-1-mini", label: "GPT Image 1 Mini" },

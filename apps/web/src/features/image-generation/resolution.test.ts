@@ -9,6 +9,9 @@ import {
   getImageModel,
   getQualityMultiplier,
   getThinkingMultiplier,
+  GPT_IMAGE_25_FLARE_MODEL,
+  GPT_IMAGE_25_MODELS,
+  GPT_IMAGE_25_SUNBURST_MODEL,
   IMAGE_1024_BASE_PIXELS,
   IMAGE_DIMENSION_STEP,
   isImageModel,
@@ -242,6 +245,30 @@ describe("image model resolution", () => {
     expect(getImageModel("gpt-image-1")).toBe(DEFAULT_IMAGE_MODEL);
     expect(getImageModel("gpt-4o")).toBeNull();
     expect(getImageModel(undefined, "gpt-image-3")).toBe("gpt-image-3");
+  });
+
+  it("recognizes the gpt-image-2.5 flagship duo as image models", () => {
+    expect(GPT_IMAGE_25_MODELS).toEqual([
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+    ]);
+    expect(GPT_IMAGE_25_SUNBURST_MODEL).toBe("gpt-image-2.5-sunburst");
+    expect(GPT_IMAGE_25_FLARE_MODEL).toBe("gpt-image-2.5-flare");
+    // 2.5 双档天然命中 gpt-image- 前缀,服务端模型白名单无需单独登记。
+    expect(isImageModel(GPT_IMAGE_25_SUNBURST_MODEL)).toBe(true);
+    expect(isImageModel(GPT_IMAGE_25_FLARE_MODEL)).toBe(true);
+    expect(getImageModel(GPT_IMAGE_25_SUNBURST_MODEL)).toBe(
+      GPT_IMAGE_25_SUNBURST_MODEL
+    );
+    expect(getImageModel(` ${GPT_IMAGE_25_FLARE_MODEL} `)).toBe(
+      GPT_IMAGE_25_FLARE_MODEL
+    );
+    // 大小写不敏感(内部 toLowerCase 后再按前缀匹配)。
+    expect(isImageModel("GPT-IMAGE-2.5-FLARE")).toBe(true);
+    // 2.5 兜底不变:显式传 2.5 不会被 DEFAULT 覆盖。
+    expect(getImageModel(GPT_IMAGE_25_SUNBURST_MODEL)).not.toBe(
+      DEFAULT_IMAGE_MODEL
+    );
   });
 });
 

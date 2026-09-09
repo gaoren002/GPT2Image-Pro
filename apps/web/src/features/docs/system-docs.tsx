@@ -374,7 +374,7 @@ const sections = {
   "object": "list",
   "data": [
     {
-      "id": "gpt-image-2",
+      "id": "gpt-image-2.5-sunburst",
       "object": "model",
       "created": 0,
       "owned_by": "gpt2image"
@@ -614,7 +614,7 @@ curl https://gpt2image.superapi.buzz/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "messages": [
       { "role": "system", "content": "你是专业视觉海报设计师。" },
       { "role": "user", "content": "生成一张科技企业宣传海报，16:9，蓝白配色" }
@@ -630,7 +630,7 @@ curl https://gpt2image.superapi.buzz/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4-mini",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "messages": [
       {
         "role": "user",
@@ -872,7 +872,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A cute baby sea otter",
     "n": 1,
     "size": "1024x1024",
@@ -904,7 +904,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "生成一张 16:9 产品海报",
     "size": "1536x864",
     "response_format": "url",
@@ -920,7 +920,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "一张 1:1 头像海报",
     "size": "1024x1024",
     "response_format": "url",
@@ -933,7 +933,7 @@ curl -N https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Accept: text/event-stream" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "一张透明玻璃材质的未来感咖啡杯",
     "size": "1024x1024",
     "response_format": "url",
@@ -960,7 +960,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "一张透明背景的产品图标",
     "size": "1024x1024",
     "response_format": "url",
@@ -988,13 +988,13 @@ event: image_generation.partial_image
 data: {"type":"image_generation.partial_image","index":0,"partial_image_index":0,"url":"https://gpt2image.superapi.buzz/api/storage/generations/..."}
 
 event: image_generation.completed
-data: {"type":"image_generation.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
+data: {"type":"image_generation.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2.5-sunburst","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
 
 # async=true 的立即响应
 {
   "id": "task_...",
   "object": "image.generation",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "processing",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -1009,7 +1009,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
 {
   "id": "task_...",
   "object": "image",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "completed",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -1032,7 +1032,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               name: "model",
               requirement: "可选",
               description:
-                "图片模型。本站接受 gpt-image-* 类图片模型；也接受 Adobe Firefly 模型 id（firefly-<family>-<resolution>-<ratio>，如 firefly-nano-banana-pro-2k-16x9，或只写族名如 firefly-gpt-image-2），命中后路由到 Adobe（Firefly）后端。family ∈ gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro；resolution ∈ 1k、2k、4k；ratio ∈ 1x1、16x9、9x16、4x3、3x4。Responses 对话模型请使用 /v1/responses。",
+                "图片模型。本站接受 gpt-image-* 类图片模型（旗舰为 gpt-image-2.5-sunburst / gpt-image-2.5-flare，支持 xhigh/max 质量档）；也接受 Adobe Firefly 模型 id（firefly-<family>-<resolution>-<ratio>，如 firefly-nano-banana-pro-2k-16x9，或只写族名如 firefly-gpt-image-2），命中后路由到 Adobe（Firefly）后端。family ∈ gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro；resolution ∈ 1k、2k、4k；ratio ∈ 1x1、16x9、9x16、4x3、3x4。Responses 对话模型请使用 /v1/responses。",
             },
             {
               name: "force_firefly / forceFirefly",
@@ -1215,7 +1215,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
           example: `# 1. multipart 上传参考图
 curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="把参考图改成电影海报风格" \\
   -F n="1" \\
   -F size="1024x1024" \\
@@ -1230,7 +1230,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
 # 2. multipart 多参考图 + mask + Codex/Responses 参数
 curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="只重绘 mask 区域，保持人物脸部不变" \\
   -F size="1536x1024" \\
   -F quality="medium" \\
@@ -1247,7 +1247,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "把参考图改成干净的电商主图",
     "images": [
       "https://example.com/reference.png",
@@ -1275,7 +1275,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "保留人物，改成电影剧照质感",
     "images": ["https://example.com/reference.png"],
     "size": "1024x1024",
@@ -1287,7 +1287,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
 curl -N https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Accept: text/event-stream" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="保留构图，改成水彩插画风格" \\
   -F size="1024x1024" \\
   -F response_format="url" \\
@@ -1325,7 +1325,7 @@ event: image_edit.partial_image
 data: {"type":"image_edit.partial_image","index":0,"partial_image_index":0,"url":"https://gpt2image.superapi.buzz/api/storage/generations/..."}
 
 event: image_edit.completed
-data: {"type":"image_edit.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
+data: {"type":"image_edit.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2.5-sunburst","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
 
 # async=true 的任务查询和回调响应格式同 /v1/images/generations
 `,
@@ -1537,7 +1537,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
           responseExample: `{
   "id": "task_...",
   "object": "image",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "completed",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -1554,7 +1554,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
 {
   "id": "task_...",
   "object": "image.generation",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "processing",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -1838,7 +1838,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "联网查询浙江双元科技公开资料，迭代生成一张企业宣传海报",
     "size": "1536x1024",
     "quality": "high",
@@ -1854,7 +1854,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4-mini",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "参考这张产品图，先分析卖点，再生成一张电商海报",
     "images": ["https://example.com/product.png"],
     "size": "1024x1024",
@@ -1865,7 +1865,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
 curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -F model="gpt-5.4" \\
-  -F image_model="gpt-image-2" \\
+  -F image_model="gpt-image-2.5-sunburst" \\
   -F prompt="阅读附件资料并生成一张展会宣传海报" \\
   -F size="1536x1024" \\
   -F response_format="url" \\
@@ -1880,7 +1880,7 @@ curl -N https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "先搜索资料，再迭代生成一张科技蓝企业海报",
     "size": "1536x1024",
     "stream": true,
@@ -2117,7 +2117,7 @@ curl https://gpt2image.superapi.buzz/v1/responses \\
   -d '{
     "model": "gpt-5.4",
     "input": "生成一张横版科技产品 KV",
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1536x864",
     "quality": "medium",
     "reasoning": { "effort": "low" },
@@ -2139,7 +2139,7 @@ curl https://gpt2image.superapi.buzz/v1/responses \\
         ]
       }
     ],
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1024x1024",
     "output_format": "webp",
     "output_compression": 85,
@@ -2154,7 +2154,7 @@ curl -N https://gpt2image.superapi.buzz/v1/responses \\
     "model": "gpt-5.4",
     "previous_response_id": "resp_previous_id",
     "input": "在上一张图基础上加一个月亮",
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1024x1024",
     "reasoning": { "effort": "minimal" },
     "stream": true
@@ -2796,7 +2796,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
   "object": "list",
   "data": [
     {
-      "id": "gpt-image-2",
+      "id": "gpt-image-2.5-sunburst",
       "object": "model",
       "created": 0,
       "owned_by": "gpt2image"
@@ -2902,7 +2902,7 @@ curl https://gpt2image.superapi.buzz/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "messages": [
       { "role": "system", "content": "You are a professional poster designer." },
       { "role": "user", "content": "Create a 16:9 blue and white technology company poster" }
@@ -2918,7 +2918,7 @@ curl https://gpt2image.superapi.buzz/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4-mini",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "messages": [
       {
         "role": "user",
@@ -3154,7 +3154,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A cute baby sea otter",
     "n": 1,
     "size": "1024x1024",
@@ -3186,7 +3186,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "Create a 16:9 product campaign poster",
     "size": "1536x864",
     "response_format": "url",
@@ -3202,7 +3202,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A 1:1 avatar poster",
     "size": "1024x1024",
     "response_format": "url",
@@ -3215,7 +3215,7 @@ curl -N https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Accept: text/event-stream" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A transparent glass futuristic coffee cup",
     "size": "1024x1024",
     "response_format": "url",
@@ -3242,7 +3242,7 @@ curl https://gpt2image.superapi.buzz/v1/images/generations \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "A transparent-background product icon",
     "size": "1024x1024",
     "response_format": "url",
@@ -3270,13 +3270,13 @@ event: image_generation.partial_image
 data: {"type":"image_generation.partial_image","index":0,"partial_image_index":0,"url":"https://gpt2image.superapi.buzz/api/storage/generations/..."}
 
 event: image_generation.completed
-data: {"type":"image_generation.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
+data: {"type":"image_generation.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2.5-sunburst","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
 
 # Immediate async=true response
 {
   "id": "task_...",
   "object": "image.generation",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "processing",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -3291,7 +3291,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
 {
   "id": "task_...",
   "object": "image",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "completed",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -3314,7 +3314,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               name: "model",
               requirement: "Optional",
               description:
-                "Image model. GPT2IMAGE accepts gpt-image-* style image models here. It also accepts Adobe Firefly model ids (firefly-<family>-<resolution>-<ratio>, e.g. firefly-nano-banana-pro-2k-16x9, or just a family such as firefly-gpt-image-2), which route to the Adobe (Firefly) backend. family ∈ gpt-image-2, gpt-image-1.5, nano-banana, nano-banana2, nano-banana-pro; resolution ∈ 1k, 2k, 4k; ratio ∈ 1x1, 16x9, 9x16, 4x3, 3x4. Use /v1/responses for Responses chat models.",
+                "Image model. GPT2IMAGE accepts gpt-image-* style image models here (flagship: gpt-image-2.5-sunburst / gpt-image-2.5-flare, with the new xhigh/max quality levels). It also accepts Adobe Firefly model ids (firefly-<family>-<resolution>-<ratio>, e.g. firefly-nano-banana-pro-2k-16x9, or just a family such as firefly-gpt-image-2), which route to the Adobe (Firefly) backend. family ∈ gpt-image-2, gpt-image-1.5, nano-banana, nano-banana2, nano-banana-pro; resolution ∈ 1k, 2k, 4k; ratio ∈ 1x1, 16x9, 9x16, 4x3, 3x4. Use /v1/responses for Responses chat models.",
             },
             {
               name: "force_firefly / forceFirefly",
@@ -3491,7 +3491,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
           example: `# 1. multipart upload reference image.
 curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="Turn the reference image into a cinematic poster" \\
   -F n="1" \\
   -F size="1024x1024" \\
@@ -3506,7 +3506,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
 # 2. multipart multiple references + mask + Codex/Responses fields.
 curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="Only redraw the masked area and keep the face unchanged" \\
   -F size="1536x1024" \\
   -F quality="medium" \\
@@ -3523,7 +3523,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "Turn the reference into a clean ecommerce hero image",
     "images": [
       "https://example.com/reference.png",
@@ -3551,7 +3551,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-sunburst",
     "prompt": "Keep the person and make it look like a cinematic still",
     "images": ["https://example.com/reference.png"],
     "size": "1024x1024",
@@ -3563,7 +3563,7 @@ curl https://gpt2image.superapi.buzz/v1/images/edits \\
 curl -N https://gpt2image.superapi.buzz/v1/images/edits \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -H "Accept: text/event-stream" \\
-  -F model="gpt-image-2" \\
+  -F model="gpt-image-2.5-sunburst" \\
   -F prompt="Keep the composition and convert it to watercolor illustration" \\
   -F size="1024x1024" \\
   -F response_format="url" \\
@@ -3601,7 +3601,7 @@ event: image_edit.partial_image
 data: {"type":"image_edit.partial_image","index":0,"partial_image_index":0,"url":"https://gpt2image.superapi.buzz/api/storage/generations/..."}
 
 event: image_edit.completed
-data: {"type":"image_edit.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
+data: {"type":"image_edit.completed","index":0,"generation_id":"...","generationId":"...","model":"gpt-image-2.5-sunburst","size":"1024x1024","credits_consumed":1.31,"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","data":[{"url":"https://gpt2image.superapi.buzz/api/storage/generations/...","revised_prompt":"..."}]}
 
 # async=true task polling and callback shape match /v1/images/generations.
 `,
@@ -3807,7 +3807,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
           responseExample: `{
   "id": "task_...",
   "object": "image",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "completed",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -3824,7 +3824,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
 {
   "id": "task_...",
   "object": "image.generation",
-  "model": "gpt-image-2",
+  "model": "gpt-image-2.5-sunburst",
   "status": "processing",
   "created": 1713833628,
   "created_at": "2026-05-28T00:00:00.000Z",
@@ -4112,7 +4112,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "Search public information about Zhejiang Shuangyuan Technology and iterate an enterprise poster",
     "size": "1536x1024",
     "quality": "high",
@@ -4128,7 +4128,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4-mini",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "Analyze this product photo and create an ecommerce poster",
     "images": ["https://example.com/product.png"],
     "size": "1024x1024",
@@ -4139,7 +4139,7 @@ curl https://gpt2image.superapi.buzz/v1/agents/images \\
 curl https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
   -F model="gpt-5.4" \\
-  -F image_model="gpt-image-2" \\
+  -F image_model="gpt-image-2.5-sunburst" \\
   -F prompt="Read the attachment and create a trade-show poster" \\
   -F size="1536x1024" \\
   -F response_format="url" \\
@@ -4154,7 +4154,7 @@ curl -N https://gpt2image.superapi.buzz/v1/agents/images \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4",
-    "image_model": "gpt-image-2",
+    "image_model": "gpt-image-2.5-sunburst",
     "prompt": "Search first, then iterate a technology-blue enterprise poster",
     "size": "1536x1024",
     "stream": true,
@@ -4394,7 +4394,7 @@ curl https://gpt2image.superapi.buzz/v1/responses \\
   -d '{
     "model": "gpt-5.4",
     "input": "Generate a landscape technology product key visual",
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1536x864",
     "quality": "medium",
     "reasoning": { "effort": "low" },
@@ -4416,7 +4416,7 @@ curl https://gpt2image.superapi.buzz/v1/responses \\
         ]
       }
     ],
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1024x1024",
     "output_format": "webp",
     "output_compression": 85,
@@ -4431,7 +4431,7 @@ curl -N https://gpt2image.superapi.buzz/v1/responses \\
     "model": "gpt-5.4",
     "previous_response_id": "resp_previous_id",
     "input": "Add a moon based on the previous image",
-    "tools": [{ "type": "image_generation", "model": "gpt-image-2" }],
+    "tools": [{ "type": "image_generation", "model": "gpt-image-2.5-sunburst" }],
     "size": "1024x1024",
     "reasoning": { "effort": "minimal" },
     "stream": true

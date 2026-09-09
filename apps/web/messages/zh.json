@@ -37,7 +37,7 @@
       },
       "export": {
         "title": "前沿模型",
-        "description": "搭载最新 AI 模型，包括 GPT Image 2。获得令人惊叹的逼真图像、艺术渲染与创意构图，品质顶尖。"
+        "description": "搭载最新 AI 模型，包括 GPT Image 2.5。获得令人惊叹的逼真图像、艺术渲染与创意构图，品质顶尖。"
       },
       "batch": {
         "title": "积分管理",
@@ -151,7 +151,7 @@
       },
       {
         "question": "支持哪些 AI 图像模型？",
-        "answer": "GPT2IMAGE 支持市面上主流的图像生成模型，包括 GPT Image 2。只需注册账号、选择套餐即可开始生成——平台自动将请求路由到对应模型，并在统一界面中呈现结果。"
+        "answer": "GPT2IMAGE 支持市面上主流的图像生成模型，包括 GPT Image 2.5。只需注册账号、选择套餐即可开始生成——平台自动将请求路由到对应模型，并在统一界面中呈现结果。"
       },
       {
         "question": "积分系统如何工作？",
@@ -552,7 +552,7 @@
       },
       "platform": {
         "title": "平台",
-        "api": "GPT Image 2",
+        "api": "GPT Image 2.5",
         "apiDesc": "新一代图像模型，品质惊艳",
         "multiModel": "多模型支持",
         "multiModelDesc": "主流图像生成模型一站集成",

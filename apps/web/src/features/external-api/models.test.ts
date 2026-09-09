@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { SubscriptionPlan } from "@repo/shared/config/subscription-plan";
 
@@ -13,6 +13,22 @@ async function loadModels() {
   ]);
   return { ...models, GPT55_CHAT_MODEL: config.GPT55_CHAT_MODEL };
 }
+
+// getExternalModelsForUser 依赖 getUserPlan(查库)与能力快照;mock 掉以纯测列表组装。
+vi.mock("@repo/shared/subscription/services/user-plan", () => ({
+  getUserPlan: vi.fn(async () => ({ plan: "ultra" })),
+}));
+vi.mock(
+  "@repo/shared/subscription/services/plan-capabilities",
+  () => ({
+    getPlanCapabilitySnapshot: vi.fn(async () => ({
+      features: new Proxy(
+        {},
+        { get: () => true }
+      ) as unknown as Record<string, boolean>,
+    })),
+  })
+);
 
 describe("getExternalResponsesImageModels", () => {
   it("returns an empty list when the responses capability is disabled", async () => {
@@ -44,6 +60,24 @@ describe("getExternalResponsesImageModels", () => {
     expect(
       getExternalResponsesImageModels("ultra", { gpt55Allowed: false })
     ).not.toContain(GPT55_CHAT_MODEL);
+  });
+});
+
+describe("getExternalModelsForUser image model exposure", () => {
+  it("exposes the gpt-image-2.5 flagship duo ahead of the default model", async () => {
+    const { getExternalModelsForUser } = await loadModels();
+    const list = await getExternalModelsForUser("user-1");
+    const ids = list.data.map((model) => model.id);
+    // 2.5 旗舰双档必须暴露,且排在默认模型之前(旗舰门面)。
+    expect(ids.indexOf("gpt-image-2.5-sunburst")).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf("gpt-image-2.5-flare")).toBeGreaterThan(
+      ids.indexOf("gpt-image-2.5-sunburst")
+    );
+    expect(ids.indexOf("gpt-image-2.5-sunburst")).toBeLessThan(
+      ids.indexOf("gpt-image-2")
+    );
+    // 去重:2.5 双档不应与既有模型 id 重叠。
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

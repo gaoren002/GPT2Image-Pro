@@ -1,4 +1,13 @@
 export const DEFAULT_IMAGE_MODEL = "gpt-image-2";
+// gpt-image-2.5 旗舰双档(sunburst=精确编辑优先,flare=快速日常生成)。
+// 页面模型下拉、/v1/models 与营销文案以 2.5 为门面;DEFAULT_IMAGE_MODEL 保留
+// gpt-image-2 作为"Default"兜底(未显式选模型时的上游兼容锚点,不在页面展示)。
+export const GPT_IMAGE_25_SUNBURST_MODEL = "gpt-image-2.5-sunburst";
+export const GPT_IMAGE_25_FLARE_MODEL = "gpt-image-2.5-flare";
+export const GPT_IMAGE_25_MODELS = [
+  GPT_IMAGE_25_SUNBURST_MODEL,
+  GPT_IMAGE_25_FLARE_MODEL,
+] as const;
 export const LEGACY_IMAGE_MODEL = "gpt-image-1";
 export const IMAGE_MODEL_PREFIX = "gpt-image-";
 // Adobe Firefly（直连/网关）图像模型统一前缀；按模型前缀自动路由到 adobe 后端。

@@ -45,6 +45,8 @@ import {
   unfreezeCreditsAccount,
 } from "../../credits/core";
 import { expireStalePendingGenerations } from "../../generation-maintenance";
+// 管理员自助充值开关(ADMIN_SELF_CREDITS_GRANT_ENABLED)的运行时读取
+import { getRuntimeSettingBoolean } from "../../system-settings";
 import {
   ActionUserError,
   adminAction,
@@ -772,9 +774,20 @@ export const adminGrantCreditsAction = withAdminUsersAction("grantCredits")
   .schema(grantCreditsSchema)
   .action(async ({ parsedInput: data, ctx }) => {
     const targetUser = await getUserBasicOrThrow(data.userId);
-    // 防普通管理员自助铸币(S-H5);超管为最高信任层级,允许给自己充值。
+    // 防普通管理员自助铸币(S-H5);超管为最高信任层级,始终允许给自己充值。
+    // 普通管理员默认拒绝,站长可在系统设置(ADMIN_SELF_CREDITS_GRANT_ENABLED)放开。
     if (data.userId === ctx.userId && ctx.role !== "super_admin") {
-      throw new ActionUserError("不能为自己发放积分");
+      // WHY: fallback 与 defaultValue 一致(true),存量库未初始化该设置时也放行,
+      // 与"默认允许、站长可关"的产品语义对齐。
+      const selfGrantAllowed = await getRuntimeSettingBoolean(
+        "ADMIN_SELF_CREDITS_GRANT_ENABLED",
+        true
+      );
+      if (!selfGrantAllowed) {
+        throw new ActionUserError(
+          "不能为自己发放积分;如需允许,请在系统设置中开启「管理员给自己充值」"
+        );
+      }
     }
     // 目标权限护栏：普通 admin 不得向管理员及超管账户发放积分。
     assertCanActOnTarget(ctx.role, targetUser.role, "积分发放");

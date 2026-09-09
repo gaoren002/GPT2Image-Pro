@@ -159,6 +159,8 @@ describe("system setting default initialization", () => {
     expect(store.get("GENERATION_IMAGE_RETENTION_MODE")?.value).toBe("off");
     expect(store.get("GENERATION_IMAGE_MAX_COUNT")?.value).toBe(10000);
     expect(store.get("CREDITS_EXPIRY_DAYS")?.value).toBe(0);
+    // 管理员自助充值默认放开(修复:管理员无法设置自己余额);站长可在面板关闭。
+    expect(store.get("ADMIN_SELF_CREDITS_GRANT_ENABLED")?.value).toBe(true);
     expect(store.get("IMAGE_GENERATION_GLOBAL_CONCURRENCY")?.value).toBe(500);
     expect(store.get("IMAGE_BASE_CREDITS_1024")?.value).toBe(1.27);
     expect(store.get("IMAGE_BASE_CREDITS_4K")?.value).toBe(10);

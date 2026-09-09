@@ -156,6 +156,7 @@ export type SettingKey =
   | "IMAGE_RESTORATION_ENABLED"
   | "EDITABLE_FILE_PPT_CREDITS"
   | "EDITABLE_FILE_PSD_CREDITS"
+  | "ADMIN_SELF_CREDITS_GRANT_ENABLED"
   | "VIDEO_BASE_CREDITS_PER_SECOND"
   | "VIDEO_MODEL_MULTIPLIERS"
   | "NEXT_PUBLIC_GA_ID"
@@ -1433,6 +1434,15 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     min: 0,
     max: 100_000,
     defaultValue: 25,
+  },
+  {
+    key: "ADMIN_SELF_CREDITS_GRANT_ENABLED",
+    label: "管理员给自己充值",
+    description:
+      "控制普通管理员能否在用户管理中给自己发放积分（超管始终允许）。默认开启；关闭后普通管理员给自己充值会被拒绝（防铸币）。",
+    category: "credits",
+    valueType: "boolean",
+    defaultValue: true,
   },
   {
     key: "EDITABLE_FILE_PSD_CREDITS",

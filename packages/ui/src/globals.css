@@ -55,6 +55,12 @@
   --radius-3xl: 36px;
   --radius-4xl: 40px;
 
+  /* 动效 easing token:全站统一曲线。ease-ink=墨感主曲线(缓入急出,
+     用于进场/展开);ease-out-quart=利落收尾(用于 hover/微位移)。
+     经 tailwind 生成 ease-ink / ease-out-quart 工具类。 */
+  --ease-ink: cubic-bezier(0.22, 0.8, 0.36, 1);
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+
   /* 阴影 token(对齐 GPT2IMAGE 参考实现):
      whisper=悬浮卡片轻抬升, menu=下拉菜单, modal=模态弹窗。
      经 -src 变量间接引用:暗色下纯黑淡阴影不可见,须按主题加重(见 .dark)。 */
@@ -361,5 +367,123 @@ html[data-cinema="film"] [data-film-fallback] {
     border: 3px solid transparent;
     border-radius: 9999px;
     background-clip: content-box;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 全站动效基建(单一事实来源:所有页面/组件的动效从这里取)
+ * 设计语言:黑白墨纸风。动效须"纸感"——轻、缓、无弹跳。
+ * 三档进场距离:fade-up(常规区块)/ fade-up-sm(行内元素)/ 无位移纯淡入。
+ * 尊重 prefers-reduced-motion:全部动画降级为直接呈现。
+ * ------------------------------------------------------------------------- */
+
+/* 区块进场:上移 12px + 淡入,配合 .stagger 子元素逐级延迟 */
+@keyframes enter-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 行内元素进场:上移 6px + 淡入(按钮/徽章/卡片内元素) */
+@keyframes enter-fade-up-sm {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 纯淡入(遮罩/浮层/图片) */
+@keyframes enter-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 墨迹扫入:自上而下揭幕(标题/整段文字落纸),复用 FAQ 墨迹语言 */
+@keyframes ink-sweep-down {
+  from {
+    clip-path: inset(0 0 100% 0);
+    opacity: 0.4;
+  }
+  to {
+    clip-path: inset(0 0 0% 0);
+    opacity: 1;
+  }
+}
+
+  /* 骨架屏微光:muted 底上一道前景微光横向扫过。 */
+  @keyframes skeleton-shimmer-sweep {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+  .skeleton-shimmer {
+    background-color: var(--muted);
+    background-image: linear-gradient(
+      100deg,
+      transparent 40%,
+      color-mix(in srgb, var(--foreground) 7%, transparent) 50%,
+      transparent 60%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer-sweep 1.6s ease-in-out infinite;
+  }
+
+  /* 卡片悬浮:轻抬升 + whisper 阴影浮现。统一全站 hover 卡片语言。 */
+  .lift-hover {
+    transition:
+      transform 0.25s var(--ease-out-quart),
+      box-shadow 0.25s var(--ease-out-quart),
+      border-color 0.25s var(--ease-out-quart);
+  }
+  .lift-hover:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-whisper);
+  }
+
+  /* 逐级进场延迟:父容器加 .stagger,子元素按序入场(每级 60ms,最多 8 级) */
+  .stagger > * {
+    animation: enter-fade-up 0.55s var(--ease-ink) both;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0ms; }
+  .stagger > *:nth-child(2) { animation-delay: 60ms; }
+  .stagger > *:nth-child(3) { animation-delay: 120ms; }
+  .stagger > *:nth-child(4) { animation-delay: 180ms; }
+  .stagger > *:nth-child(5) { animation-delay: 240ms; }
+  .stagger > *:nth-child(6) { animation-delay: 300ms; }
+  .stagger > *:nth-child(7) { animation-delay: 360ms; }
+  .stagger > *:nth-child(8) { animation-delay: 420ms; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-fade-up-sm,
+  .animate-fade-in,
+  .animate-ink-sweep,
+  .stagger > * {
+    animation: none;
+  }
+  .lift-hover,
+  .lift-hover:hover {
+    transition: none;
+    transform: none;
+  }
+  .skeleton-shimmer {
+    animation: none;
   }
 }

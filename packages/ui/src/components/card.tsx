@@ -2,12 +2,14 @@ import type * as React from "react";
 
 import { cn } from "../utils";
 
-function Card({ className, ...props }: React.ComponentProps<"div">) {
+function Card({ className, hoverable = false, ...props }: React.ComponentProps<"div"> & { hoverable?: boolean }) {
   return (
     <div
       data-slot="card"
+      // hoverable:交互卡片加统一 hover 抬升语言(非交互卡片不抬,避免整页浮起)。
       className={cn(
         "bg-card text-card-foreground flex flex-col gap-6 rounded-lg border py-6",
+        hoverable && "lift-hover",
         className
       )}
       {...props}

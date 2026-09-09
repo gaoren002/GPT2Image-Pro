@@ -161,6 +161,9 @@ export {
 // Separator
 export { Separator } from "./components/separator";
 
+// Skeleton
+export { Skeleton } from "./components/skeleton";
+
 // Sheet
 export {
   Sheet,

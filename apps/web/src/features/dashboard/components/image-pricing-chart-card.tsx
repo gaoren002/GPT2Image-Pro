@@ -361,7 +361,7 @@ export function ImagePricingChartCard({
           ))}
         </div>
         <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
-          <div className="rounded-md border bg-muted/20 p-3 text-xs">
+          <div className="rounded-md border bg-muted/30 p-3 text-xs">
             <div className="font-medium text-foreground">
               {copy("Base formula", "基础公式")}
             </div>
@@ -413,7 +413,7 @@ export function ImagePricingChartCard({
               </p>
             </div>
           </div>
-          <div className="rounded-md border bg-muted/20 p-3 text-xs">
+          <div className="rounded-md border bg-muted/30 p-3 text-xs">
             <div className="font-medium text-foreground">
               {copy("Examples", "计算示例")}
             </div>

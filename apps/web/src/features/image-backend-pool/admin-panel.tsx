@@ -2338,7 +2338,8 @@ export function ImageBackendPoolAdminPanel({
         }}
         className="w-full"
       >
-        <TabsList className="h-auto flex-wrap justify-start bg-transparent p-0">
+        {/* Tab 语言收敛到全站胶囊规格(TabsList 默认类) */}
+        <TabsList className="h-auto flex-wrap justify-start">
           <TabsTrigger value="groups">分组</TabsTrigger>
           <TabsTrigger value="accounts">账号池</TabsTrigger>
           <TabsTrigger value="apis">API 后端</TabsTrigger>

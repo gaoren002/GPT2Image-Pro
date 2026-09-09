@@ -386,7 +386,7 @@ export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
                       <span
                         aria-hidden="true"
                         className={cn(
-                          "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-foreground transition-[opacity,scale] duration-200",
+                          "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-foreground transition-[opacity,scale] duration-150",
                           isActive
                             ? "scale-y-100 opacity-100"
                             : "scale-y-50 opacity-0"
@@ -431,7 +431,7 @@ export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
                   className={cn(
                     // 卡片化用户区:细边框 + 轻底色,hover 同步提亮边框与底色;
                     // 折叠态空间不足,退化为无边框纯图标
-                    "flex w-full items-center gap-3 rounded-md border border-sidebar-border/60 bg-sidebar-accent/20 px-2.5 py-2 transition-colors duration-200 hover:border-sidebar-border hover:bg-sidebar-accent/50",
+                    "flex w-full items-center gap-3 rounded-md border border-sidebar-border/60 bg-sidebar-accent/20 px-2.5 py-2 transition-colors duration-150 hover:border-sidebar-border hover:bg-sidebar-accent/50",
                     collapsed &&
                       "justify-center border-transparent bg-transparent px-0 hover:border-transparent"
                   )}

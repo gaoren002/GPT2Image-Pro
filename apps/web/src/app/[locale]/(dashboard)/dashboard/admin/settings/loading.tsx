@@ -4,7 +4,7 @@
  */
 export default function Loading() {
   return (
-    <div className="container mx-auto max-w-5xl animate-pulse px-4 py-8 motion-reduce:animate-none md:px-6 md:py-12">
+    <div className="container mx-auto animate-pulse px-4 py-6 motion-reduce:animate-none md:px-6">
       <div className="mb-8 space-y-2">
         <div className="h-9 w-48 rounded bg-muted" />
         <div className="h-4 w-72 rounded bg-muted" />

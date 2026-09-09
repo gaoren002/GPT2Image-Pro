@@ -84,12 +84,17 @@ export function DashboardMainWrapper({
             半透明底 + backdrop-blur 让内容滚过其后仍可读;rounded-t-lg 与卡片圆角贴合。
             before 伪元素以页面底色(bg-muted)填补停驻后顶栏上方 10px 的缝隙,
             高度取 9px 而非 10px,是为了未滚动时不遮住卡片自身 1px 的顶边框 */}
-        <header className="sticky top-2.5 z-30 flex h-12 shrink-0 items-center gap-3 rounded-t-lg border-b border-border/60 bg-background/80 px-4 backdrop-blur before:absolute before:-inset-x-px before:-top-2.5 before:h-[9px] before:bg-muted">
+        {/* 悬浮玻璃顶栏:sticky 停驻在卡片原顶位(main 上内边距 10px 处),
+            半透明底 + backdrop-blur 让内容滚过其后仍可读;rounded-t-lg 与卡片圆角贴合。
+            before 伪元素以页面底色(bg-muted)填补停驻后顶栏上方 10px 的缝隙,
+            高度取 9px 而非 10px,是为了未滚动时不遮住卡片自身 1px 的顶边框。
+            阴影对齐全站浮动卡面语言(whisper),与创作页 sticky 头同规格 */}
+        <header className="sticky top-2.5 z-30 flex h-12 shrink-0 items-center gap-3 rounded-t-lg border-b border-border/60 bg-background/95 px-4 shadow-whisper backdrop-blur before:absolute before:-inset-x-px before:-top-2.5 before:h-[9px] before:bg-muted">
           {/* 移动端汉堡按钮 */}
           <button
             type="button"
             onClick={toggleMobile}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150 cursor-pointer md:hidden"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150 md:hidden"
           >
             <Menu className="h-4 w-4 pointer-events-none" />
           </button>
@@ -98,7 +103,7 @@ export function DashboardMainWrapper({
           <button
             type="button"
             onClick={toggleSidebar}
-            className="hidden h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150 cursor-pointer md:flex"
+            className="hidden h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150 md:flex"
           >
             {isCollapsed ? (
               <PanelLeft className="h-4 w-4 pointer-events-none" />

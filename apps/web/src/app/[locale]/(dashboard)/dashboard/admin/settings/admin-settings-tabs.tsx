@@ -43,21 +43,12 @@ export function AdminSettingsTabs({
 
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-      <TabsList className="h-auto flex-wrap justify-start bg-transparent p-0">
+      {/* Tab 语言收敛到全站胶囊规格(TabsList 默认类) */}
+      <TabsList className="h-auto flex-wrap justify-start">
         {canManageSystemSettings ? (
-          <TabsTrigger
-            value="system"
-            className="rounded-md border border-transparent px-3 py-2 data-[state=active]:border-foreground/20 data-[state=active]:bg-foreground/5 data-[state=active]:text-foreground data-[state=active]:shadow-none"
-          >
-            系统设置
-          </TabsTrigger>
+          <TabsTrigger value="system">系统设置</TabsTrigger>
         ) : null}
-        <TabsTrigger
-          value="image-backends"
-          className="rounded-md border border-transparent px-3 py-2 data-[state=active]:border-foreground/20 data-[state=active]:bg-foreground/5 data-[state=active]:text-foreground data-[state=active]:shadow-none"
-        >
-          生图后端池
-        </TabsTrigger>
+        <TabsTrigger value="image-backends">生图后端池</TabsTrigger>
       </TabsList>
       {canManageSystemSettings ? (
         <TabsContent value="system" className="mt-6">

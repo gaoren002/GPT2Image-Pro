@@ -932,7 +932,8 @@ export function AdminUsersManagement({
     <div className="space-y-6">
       <div className="flex flex-col gap-3 animate-in fade-in slide-in-from-bottom-2 duration-400 motion-reduce:animate-none lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h2 className="font-serif text-2xl font-medium tracking-tight">
+          {/* 页头大标题对齐 dashboard 基准节奏(text-3xl 衬线) */}
+          <h2 className="font-serif text-3xl font-medium tracking-tight">
             用户管理
           </h2>
           <p className="text-muted-foreground">
@@ -1439,7 +1440,7 @@ export function AdminUsersManagement({
                 </div>
 
                 {canManageRoles && selectedUser ? (
-                  <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 p-3">
                     <span className="mr-1 text-sm text-muted-foreground">
                       超管操作
                     </span>
@@ -2298,7 +2299,8 @@ function Panel({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border bg-background p-4">
+    // 同层级信息卡统一配方:rounded-md + bg-muted/30(与文件内提示条一致)
+    <div className="rounded-md border bg-muted/30 p-3">
       <h3 className="mb-3 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
         {title}
       </h3>

@@ -1809,18 +1809,16 @@ export function SystemSettingsPanel() {
         </div>
       </div>
 
-      <div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+      {/* 提示条统一配方:rounded-md + bg-muted/30 + p-3(与 admin 面板同语言) */}
+      <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
         已保存配置优先于环境变量；未保存时继续使用环境变量兜底。标记为“需重启”或“需重新构建”的配置，保存后要重启服务或重新部署后才完整生效。
       </div>
 
       <Tabs defaultValue={SETTING_CATEGORIES[0]?.id ?? "general"} className="w-full">
-        <TabsList className="h-auto flex-wrap justify-start bg-transparent p-0">
+        {/* Tab 语言收敛到全站胶囊规格(TabsList 默认类) */}
+        <TabsList className="h-auto flex-wrap justify-start">
           {SETTING_CATEGORIES.map((category) => (
-            <TabsTrigger
-              key={category.id}
-              value={category.id}
-              className="rounded-md border border-transparent px-3 py-2 data-[state=active]:border-foreground/20 data-[state=active]:bg-foreground/5 data-[state=active]:text-foreground data-[state=active]:shadow-none"
-            >
+            <TabsTrigger key={category.id} value={category.id}>
               {category.label}
             </TabsTrigger>
           ))}

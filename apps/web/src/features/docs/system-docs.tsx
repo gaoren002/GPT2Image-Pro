@@ -777,7 +777,7 @@ data: {"id":"chatcmpl_...","object":"chat.completion.chunk","choices":[{"index":
               requirement: "可选",
               custom: true,
               description:
-                "本站扩展：图片模型，默认 gpt-image-2.5（本站别名，出站映射为 gpt-image-2.5-sunburst），可显式选择 gpt-image-2.5-flare；保留 gpt-image-2 选项，需为 gpt-image-*。Web 上游不支持锁定 gpt-image-2.5；选择该模型时，纯 Web 分组不可用，需使用支持该模型的 API/Codex 后端。",
+                "本站扩展：图片模型，默认 gpt-image-2.5（本站别名，API/Codex 出站映射为 gpt-image-2.5-sunburst），可显式选择 gpt-image-2.5-flare；保留 gpt-image-2 选项，需为 gpt-image-*。Web 默认使用 GPT Image 2.5，沿用网页生图协议。",
             },
             {
               name: "promptOptimization / prompt_optimization",
@@ -2357,15 +2357,15 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       description:
         "走 ChatGPT 网页生图能力，适合复用 Web 账号额度，但不是严格参数化的 Images/Responses API。",
       valid: [
+        "默认使用 GPT Image 2.5，支持纯 Web 分组和混合分组的 Web 优先调度。",
         "**分辨率不可严格控制；size 只能作为提示/记录参考，不能保证按请求尺寸输出。**",
         "**不能保证 4K 输出；是否出高分辨率取决于 ChatGPT Web 当前能力和账号状态。**",
         "可控制主 GPT 对话模型和 Web 思考强度。",
-        "关闭提示词优化时会发送原始 prompt，并把 Web 思考强度压到 instant，尽量减少平台侧改写。",
+        "关闭提示词优化时会发送原始 prompt；图片路径使用即时档，Work 对话使用 min 档。",
       ],
       invalid: [
         "外部 /v1/responses 会适配进统一 chat 生成链路，但调度类型仍是 responses；当前只会选择 Codex/Responses 分组或外接 Responses API 后端，不会转到 Web 账号池。",
         "外部 /v1/responses 的 model 为空时默认使用 gpt-5.5；显式传入时需在 /v1/models 返回列表内，超出列表会被本站拦截。",
-        "Web 上游不支持锁定 gpt-image-2.5 系列。选择该系列时，纯 Web 分组不可用；混合分组需有支持对应模型的 API/Codex 后端。",
         "不保证完全不改写提示词；ChatGPT Web 上游仍可能理解、补全或改写。",
       ],
     },
@@ -3086,7 +3086,7 @@ data: {"id":"chatcmpl_...","object":"chat.completion.chunk","choices":[{"index":
               requirement: "Optional",
               custom: true,
               description:
-                "GPT2IMAGE extension. Image model, default gpt-image-2.5 (a GPT2IMAGE alias mapped to gpt-image-2.5-sunburst upstream). Select gpt-image-2.5-flare explicitly to use Flare; gpt-image-2 remains available. Must be gpt-image-*. The Web upstream cannot select gpt-image-2.5 explicitly; this model requires a supported API/Codex backend and is unavailable in Web-only groups.",
+                "GPT2IMAGE extension. Image model, default gpt-image-2.5 (a GPT2IMAGE alias mapped to gpt-image-2.5-sunburst for API/Codex backends). Select gpt-image-2.5-flare explicitly to use Flare; gpt-image-2 remains available. Must be gpt-image-*. Web uses GPT Image 2.5 by default through its image generation protocol.",
             },
             {
               name: "promptOptimization / prompt_optimization",
@@ -4657,15 +4657,15 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       description:
         "Uses ChatGPT Web image generation. It can reuse Web account quota, but it is not a strictly parameterized Images/Responses API.",
       valid: [
+        "Uses GPT Image 2.5 by default, supporting Web-only groups and Web-first routing in mixed groups.",
         "**Resolution is not strictly controllable; size is only a hint/record value and output may differ.**",
         "**4K output is not guaranteed; high-resolution output depends on current ChatGPT Web capability and account state.**",
         "The main GPT conversation model and Web thinking level can be controlled.",
-        "When prompt optimization is off, GPT2IMAGE sends the original prompt and forces Web thinking to instant to reduce platform-side rewriting.",
+        "When prompt optimization is off, GPT2IMAGE sends the original prompt; image requests use instant mode and Work conversations use min effort.",
       ],
       invalid: [
         "External /v1/responses is adapted into the shared chat generation path, but its scheduling type remains responses; it only selects Codex/Responses groups or external Responses API backends, not Web account pools.",
         "For external /v1/responses, an empty model defaults to gpt-5.5; explicit models must be listed by /v1/models or GPT2IMAGE rejects them.",
-        "The Web upstream cannot select a gpt-image-2.5 model explicitly. These models are unavailable in Web-only groups; mixed groups need a supported API/Codex backend.",
         "Cannot guarantee prompt text is never interpreted, expanded, or revised by ChatGPT Web upstream.",
       ],
     },

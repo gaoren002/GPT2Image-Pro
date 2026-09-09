@@ -9,9 +9,9 @@
 
 ## Web 边界
 
-- 核对 `basketikun/chatgpt2api` 的 main 提交 `dc105e51bd486bd75c8ef4f74be4bc4724bdfc33`，仍使用 `picture_v2`，没有可验证的 2.5 图片版本选择字段。没有引入虚构的 Web 2.5 参数。
-- 2.5 生成和编辑在混合分组选后端前选择 Responses 车道，报价同步使用其子组倍率；纯 Web 账号提前释放租约并返回不支持，不上报账号失败，也不跨纯 Web 分组重试。
-- 旧图片模型保持既有 Web 路由；普通 Web 聊天按需出图的实际版本由 ChatGPT 服务端选择。后续依据用户 HAR 补齐五模型的 Work slug 与 Images 预设，详见 [HAR 模型表](2026-09-09-har-model-catalog.md)；Web 2.5 版本边界不变。
+- 用户确认 ChatGPT Web 默认图片引擎已经是 GPT Image 2.5，沿用 `picture_v2` 即可。先前因缺少 API 风格版本字段而加入的限制被用户否决并移除。
+- 默认、Sunburst、Flare 图片选择均可进入 Web 生成/编辑流程；混合组恢复既有 Web 优先、失败后回退逻辑，报价按预测车道计算。真正需要 Responses 的 Agent 等请求仍按原业务限制调度。
+- 后续依据用户 HAR 补齐五模型的 Work slug 与 Images 预设，详见 [HAR 模型表](2026-09-09-har-model-catalog.md)。套餐权限、API/Codex 的图片模型字段映射保持不变。
 
 ## 来源
 

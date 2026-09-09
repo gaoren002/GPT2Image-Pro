@@ -22,8 +22,8 @@
 
 ## 功能
 
-- [2026-09-09 HAR 模型表](memory/2026-09-09-har-model-catalog.md) — Work 五模型映射 `-wm` 与专用档位，Images 最新/5.6/5.5 分表；兼容新版 messages 会话读取；Astra + Sunburst 配对回归。HAR 未证明可锁定 Web 图片 2.5，继续保留版本保护。
-- [2026-09-09 模型升级](memory/2026-09-09-model-upgrade.md) — 图片默认 `gpt-image-2.5` 别名出站映射 Sunburst；普通文本仅 5.5，Ultra+ 通过 `models.premium` 开放 Astra 与 5.6 三款；2.5 混合组跳过无法锁定版本的 Web，报价同步。
+- [2026-09-09 HAR 模型表](memory/2026-09-09-har-model-catalog.md) — Work 五模型映射 `-wm` 与专用档位，Images 最新/5.6/5.5 分表；兼容新版 messages 会话读取；Astra + Sunburst 配对回归。用户确认 Web 默认已是 2.5，已移除版本拦截，恢复 Web 优先与报价。
+- [2026-09-09 模型升级](memory/2026-09-09-model-upgrade.md) — 图片默认 `gpt-image-2.5`，API/Codex 别名出站映射 Sunburst；Web 使用默认 2.5；普通文本仅 5.5，Ultra+ 通过 `models.premium` 开放 Astra 与 5.6 三款。
 - [UI 一致性治理](memory/ui-consistency-2026-09.md) — 黑白墨纸全站规格(圆角/阴影/动效/Tab/眉标/页头/加载态 token 基准)+PlanBadge 黑白化；动效基建在 packages/ui globals.css(animate-fade-up/stagger/lift-hover/skeleton-shimmer)；vitest 并行满载偶发 3 用例超时假失败(--fileParallelism=false 全绿)
 - [纯中转 API Key](plan/2026-05-30-relay-only-api-key.md) — relay_only key：不记录/不存储/仍扣费仍审核；附带修复 consumeCredits 幂等（dev: 7c6da21→e957f48）
 - **首页影片化 v1.2（2026-07-23/24，已落地 main）**：自研水墨 NPR 管线（gl/ink 共享 GLSL 库）+ 三大奇观（dive 入画千里江山/展墙墨池真倒影焦散/macro 浮雕迎光）+ 光标抚墨三路分发 + 镜头签名 + 单项熔断（最贵 pass 先行牺牲，breakerListener→context 通知 DOM 兜底恢复）；落地记录与 11 条实施勘误见 [设计稿十一节](plan/2026-07-23-homepage-cinema-v12-design.md)

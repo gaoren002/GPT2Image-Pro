@@ -59,7 +59,7 @@ prepare 和 submit 都发送 `thinking_effort`、`conversation_origin: "tpp"`、
 - 新查询为 `GET /backend-api/conversations/{id}?include_has_versions=true&num_turns=10`，返回 `messages[]`、`current_node`、`page_info`。仅在新端点不存在时兼容旧 `/backend-api/conversation/{id}` 与 mapping；限流、鉴权、服务故障不追加旧端点请求。
 - 新消息按用户消息的 `working_turn_id` / `turn_exchange_id` 与父链关联，隔离前后轮次。抓包没有翻页请求，未猜测 cursor 参数；本次查询只读取最新十轮。
 - Work 的 analysis 文本不是最终答复；空的最终答复仍应结束轮询，不能沿用此前文本。
-- HAR 没有证明能选择 `gpt-image-2.5`、Sunburst 或 Flare。`picture_v2` 仅说明调用图片工具；部分工具 metadata 的通用模型 slug 也不能证明图片引擎版本。保持 Web 2.5 显式版本保护与混合组转 Responses 的行为。
+- 用户随后明确确认 Web 默认已经是 GPT Image 2.5，并否决额外版本保护。已移除 Web 2.5 拦截、因模型版本强制转 Responses 的路由与报价逻辑，恢复纯 Web 生成/编辑和混合组 Web 优先。HAR 没有 API 风格图片版本字段，不应据此阻止网页默认引擎请求；继续沿用 `picture_v2`。
 - Work 目录声明图片工具可用，不代表本资料实测了 Work 五模型的图片工具矩阵。
 
 ## Astra + Sunburst 的 API 配置
@@ -70,8 +70,8 @@ prepare 和 submit 都发送 `thinking_effort`、`conversation_origin: "tpp"`、
 
 ## 本次验证
 
-- `pnpm turbo test -- --fileParallelism=false`：Shared 552、Web 706，共 1,258 项通过。串行文件调度沿用已记录的测试稳定性经验，未跳过用例。
+- 移除版本保护后，`pnpm turbo test -- --fileParallelism=false`：Shared 552、Web 696，共 1,248 项通过。随被否决的版本门禁删除对应旧测试，新增默认/显式 2.5 的生成编辑分发与 Web 报价回归；未跳过用例。
 - `pnpm turbo typecheck`：四个包通过。
-- 七个改动代码文件的 Biome lint 无 error；`git diff --check`、AGENTS/CLAUDE 镜像检查通过。
+- 九个改动代码文件的 Biome lint 无 error；`git diff --check`、AGENTS/CLAUDE 镜像检查通过。
 - 全仓 lint 仍是原有七个错误，涉及两个 loading 文件、JSON-LD、PSD orchestrator 和 internal-job-scheduler；已核对这些文件相对本次起始 HEAD 没有改动。
 - 模型请求体、新旧会话查询、跨轮隔离、空终稿和 Astra/Sunburst 配对由模拟网络与纯函数测试覆盖。没有进行线上账号回放或部署。

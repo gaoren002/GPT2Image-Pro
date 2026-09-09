@@ -1,5 +1,4 @@
 /** 统一图像生成管线：校验套餐和模型、选择后端并完成队列、扣费与结果保存。 */
-import { supportsWebImageModel } from "./web-image-models";
 import { db } from "@repo/database";
 import { generation, user } from "@repo/database/schema";
 import { resolveImageModelMultiplier } from "@repo/shared/adobe";
@@ -64,7 +63,6 @@ import { getRuntimeImageBaseCreditPricing } from "./pricing-settings";
 import { withImageGenerationQueue } from "./queue";
 import {
   alignImageSizeToStep,
-  DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_SIZE,
   getImageCreditCostBreakdown,
   getImageModel,
@@ -197,12 +195,6 @@ function shouldForceWebBackend(
     size,
     webFirst: input.forceWebBackend ?? input.mixWebFirst ?? true,
     requiresResponsesBackend,
-    imageModel:
-      input.mode === "chat" && input.webChat
-        ? undefined
-        : getImageModel(
-            input.mode === "chat" ? input.imageModel : input.model
-          ) || DEFAULT_IMAGE_MODEL,
     pixelRange: range,
   });
 }
@@ -1130,13 +1122,6 @@ export async function runImageGenerationForUser(
   const requiresResponsesBackend = Boolean(
     input.requiresResponsesBackend || (input.mode === "chat" && input.agentMode)
   );
-  const imageModelRequiresResponses =
-    !(input.mode === "chat" && input.webChat) &&
-    !input.forceFirefly &&
-    !isFireflyModel(input.mode === "chat" ? input.imageModel : input.model) &&
-    !supportsWebImageModel(
-      input.mode === "chat" ? input.imageModel : input.model
-    );
   const forceWebPixelRange = await getForceWebPixelRange();
   // 统一的 Web-first 偏好(默认开启,详见 shouldForceWebBackend)。两个变量同值,
   // 分别供 gen/edit 路径(forceWebBackend)与 chat 路径(mixWebFirst)透传到 service 层;
@@ -1145,7 +1130,6 @@ export async function runImageGenerationForUser(
   // 导向 web/codex 账号 → "分组无可用后端"。force_firefly 强制走 adobe 同理。故二者一律
   // 关闭 Web-first 偏好,确保 firefly 路径不被 Web-first 覆盖。
   const preferWebFirst =
-    !imageModelRequiresResponses &&
     !isFireflyModel(input.model) &&
     !input.forceFirefly &&
     shouldForceWebBackend(input, size, forceWebPixelRange);
@@ -1320,17 +1304,14 @@ export async function runImageGenerationForUser(
                 preferredMemberType: input.preferredBackendMemberType,
                 stickyPreviousResponseId: input.stickyPreviousResponseId,
                 stickySessionKey: input.stickySessionKey,
-                accountBackendPreference:
-                  requiresResponsesBackend || imageModelRequiresResponses
-                    ? "responses"
-                    : preferWebWithFallback
-                      ? "web"
-                      : undefined,
-                accountBackendPreferenceMode:
-                  forceWebBackend ||
-                  (imageModelRequiresResponses && !requiresResponsesBackend)
-                    ? "mixed-only"
+                accountBackendPreference: requiresResponsesBackend
+                  ? "responses"
+                  : preferWebWithFallback
+                    ? "web"
                     : undefined,
+                accountBackendPreferenceMode: forceWebBackend
+                  ? "mixed-only"
+                  : undefined,
                 forceFirefly: input.forceFirefly,
                 ignoreUserConfig: requiresResponsesBackend,
               });

@@ -121,22 +121,23 @@ describe("image generation billing preview", () => {
     "gpt-image-2.5",
     "gpt-image-2.5-sunburst",
     "gpt-image-2.5-flare",
-  ])("quotes the Responses child rate when %s cannot use Web", (imageModel) => {
-    const preferWeb = shouldPreferWebImageRoute({
+  ])("按 Web 优先开关为 %s 使用 Web 子组报价", (imageModel) => {
+    const request = {
       size: "1024x1024",
       webFirst: true,
       imageModel,
       pixelRange: DEFAULT_PIXEL_RANGE,
-    });
-    expect(preferWeb).toBe(false);
+    };
+    const preferWeb = shouldPreferWebImageRoute(request);
+    expect(preferWeb).toBe(true);
     const route = predictImageBillingRoute({
       selectedGroup: MIXED_GROUP,
       groups: MIXED_GROUPS,
       preferredBackendType: preferWeb ? "web" : "responses",
     });
-    expect(route.groupId).toBe(RESPONSES_GROUP.id);
+    expect(route.groupId).toBe(WEB_GROUP.id);
     expect(route.billingMultiplier).toBe(
-      MIXED_GROUP.billingMultiplier * RESPONSES_GROUP.billingMultiplier
+      MIXED_GROUP.billingMultiplier * WEB_GROUP.billingMultiplier
     );
   });
 

@@ -12,6 +12,8 @@ vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingString: vi.fn(async () => undefined),
 }));
 
+vi.mock("@repo/shared/logger", () => ({ logError: vi.fn() }));
+
 describe("ChatGPT Web 抓包协议回归", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -164,14 +166,19 @@ describe("ChatGPT Web 抓包协议回归", () => {
 
 describe("ChatGPT Web image choices", () => {
   it.each([
+    undefined,
     "gpt-image-2.5",
     "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
     "gpt-image-2.5-sunburst.web",
-  ])("生成和编辑 %s 在上传或请求之前明确拒绝，避免静默出旧版图", async (model) => {
+  ])("默认和显式 %s 均发起 Web 生成/编辑，实际上游错误正常返回", async (model) => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response("unexpected upstream request", { status: 400 })
+      .mockImplementation(async (url) =>
+        String(url) === "https://chatgpt.com/"
+          ? new Response("<html></html>")
+          : new Response("mock upstream unauthorized", { status: 401 })
       );
     try {
       const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
@@ -190,12 +197,23 @@ describe("ChatGPT Web image choices", () => {
         }),
       ]);
       for (const result of results) {
-        expect(result.error).toContain("WEB_IMAGE_MODEL_UNAVAILABLE");
+        expect(result.error).toContain("HTTP 401");
         expect(result.imageBase64).toBeUndefined();
       }
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalled();
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/backend-api/sentinel/chat-requirements")
+        )
+      ).toBe(true);
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/backend-api/files")
+        )
+      ).toBe(true);
     } finally {
       fetchMock.mockRestore();
+      vi.unstubAllEnvs();
     }
   });
 

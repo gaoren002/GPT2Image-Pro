@@ -2957,7 +2957,6 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size,
       webFirst: textMixWebFirst,
-      imageModel: textModel === "default" ? DEFAULT_IMAGE_MODEL : textModel,
       pixelRange: forceWebPixelRange,
     });
   const editMixWebFirstActive =
@@ -2967,7 +2966,6 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size: effectiveEditSize,
       webFirst: editMixWebFirst,
-      imageModel: editModel === "default" ? DEFAULT_IMAGE_MODEL : editModel,
       requiresResponsesBackend: editHasImageReference,
       pixelRange: forceWebPixelRange,
     });
@@ -2979,12 +2977,6 @@ export function CreatePageClient({
     shouldPreferWebImageRoute({
       size: batchFallbackSize,
       webFirst: activeMode === "chat-web" ? true : chatMixWebFirst,
-      imageModel:
-        activeMode === "chat-web"
-          ? undefined
-          : chatImageModel === "default"
-            ? DEFAULT_IMAGE_MODEL
-            : chatImageModel,
       requiresResponsesBackend: chatRequiresResponsesBackend,
       pixelRange: forceWebPixelRange,
     });

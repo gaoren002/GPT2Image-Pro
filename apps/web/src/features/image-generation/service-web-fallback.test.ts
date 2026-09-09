@@ -52,35 +52,14 @@ describe("image service Web-first fallback", () => {
   it.each([
     "mixed",
     "web",
-  ] as const)("does not report a Web account failure for unsupported 2.5 in a %s group", async (groupBackendType) => {
+  ] as const)("dispatches GPT Image 2.5 to Web normally in a %s group", async (groupBackendType) => {
     process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
     const { generateImage } = await import("./service");
     const { generateImageWithChatGptWeb } = await import("./chatgpt-web");
-    const imageBase64 = Buffer.from("new-model-image").toString("base64");
-    const fetchMock = vi.fn(
-      async (_url: string, _init?: RequestInit) =>
-        new Response(JSON.stringify({ data: [{ b64_json: imageBase64 }] }), {
-          headers: { "Content-Type": "application/json" },
-        })
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    if (groupBackendType === "mixed") {
-      backendPoolMock.resolveImageBackendPoolConfig.mockResolvedValueOnce({
-        config: {
-          baseUrl: "https://api.example.test/v1",
-          apiKey: "codex-key",
-          backend: {
-            type: "pool-account",
-            id: "codex-1",
-            groupId: "group-1",
-            userId: "user-1",
-            requestKind: "image_generation",
-            accountBackend: "responses",
-            reportResult: true,
-          },
-        },
-      });
-    }
+    const imageBase64 = Buffer.from("web-default-image").toString("base64");
+    vi.mocked(generateImageWithChatGptWeb).mockResolvedValueOnce({
+      imageBase64,
+    });
     const result = await generateImage(
       {
         baseUrl: "https://chatgpt.com",
@@ -99,33 +78,23 @@ describe("image service Web-first fallback", () => {
       },
       { prompt: "draw", model: "gpt-image-2.5", mixWebFirst: true }
     );
-    expect(generateImageWithChatGptWeb).not.toHaveBeenCalled();
+    expect(result.imageBase64).toBe(imageBase64);
+    expect(generateImageWithChatGptWeb).toHaveBeenCalledTimes(1);
+    expect(
+      backendPoolMock.releaseImageBackendInflightLease
+    ).toHaveBeenCalledTimes(1);
     expect(
       backendPoolMock.releaseImageBackendInflightLease
     ).toHaveBeenCalledWith(expect.objectContaining({ memberId: "web-1" }));
-    expect(backendPoolMock.reportImageBackendResult).not.toHaveBeenCalledWith(
-      expect.objectContaining({ memberId: "web-1" })
+    expect(backendPoolMock.reportImageBackendResult).toHaveBeenCalledWith(
+      expect.objectContaining({ memberId: "web-1", success: true })
     );
-    if (groupBackendType === "mixed") {
-      expect(result.imageBase64).toBe(imageBase64);
-      expect(
-        backendPoolMock.resolveImageBackendPoolConfig
-      ).toHaveBeenCalledWith(
-        expect.objectContaining({ accountBackendPreference: "responses" })
-      );
-      const requestBody = JSON.parse(
-        String(fetchMock.mock.calls[0]?.[1]?.body)
-      );
-      expect(requestBody.model).toBe("gpt-image-2.5-sunburst");
-    } else {
-      expect(result.error).toContain("WEB_IMAGE_MODEL_UNAVAILABLE");
-      expect(
-        backendPoolMock.resolveImageBackendPoolConfig
-      ).not.toHaveBeenCalled();
-    }
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).not.toHaveBeenCalled();
   });
 
-  it("falls back to Responses when force Web exhausts Web candidates", async () => {
+  it("falls back to Responses only after GPT Image 2.5 Web requests fail and exhaust Web candidates", async () => {
     process.env.DATABASE_URL =
       process.env.DATABASE_URL || "postgresql://test:test@127.0.0.1:5432/test";
     const { generateImage } = await import("./service");
@@ -180,7 +149,7 @@ describe("image service Web-first fallback", () => {
       },
       {
         prompt: "make an icon",
-        model: "gpt-image-2",
+        model: "gpt-image-2.5",
         size: "1024x1024",
         forceWebBackend: true,
       }
@@ -238,7 +207,7 @@ describe("image service Web-first fallback", () => {
       },
       {
         prompt: "make an icon",
-        model: "gpt-image-2",
+        model: "gpt-image-2.5",
         size: "1024x1024",
         forceWebBackend: true,
       }

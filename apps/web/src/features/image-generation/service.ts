@@ -112,10 +112,6 @@ import {
 } from "./responses-request-normalizer";
 import { extractResponsesTokenUsage } from "./responses-usage";
 import { getCodexRetryAfterSeconds } from "./retry-metadata";
-import {
-  supportsWebImageModel,
-  unsupportedWebImageModelError,
-} from "./web-image-models";
 import type {
   AgentRunEvent,
   AgentRunEventStatus,
@@ -1068,7 +1064,6 @@ async function retryPoolBackendResult(
     accountBackendPreference?: ImageBackendAccountBackend;
     accountBackendPreferenceMode?: ImageBackendPreferenceMode;
     allowAnyResponsesBackend?: boolean;
-    imageModel?: string;
   }
 ) {
   // 仅"不需要上报"的后端直接跑一次返回。pool-adobe 等带 reportResult 的池后端必须进入
@@ -1154,40 +1149,6 @@ async function retryPoolBackendResult(
       throw fallbackError;
     }
   };
-
-  // 版本不兼容是路由条件，不是账号故障；在计入尝试和上报前释放并跳过 Web。
-  if (
-    options?.imageModel &&
-    !supportsWebImageModel(options.imageModel) &&
-    isPoolAccountBackend(candidate, "web")
-  ) {
-    const backend = candidate.backend;
-    if (backend?.type === "pool-account" && backend.inflightLease) {
-      await releaseImageBackendInflightLease({
-        memberType: "account",
-        memberId: backend.id,
-        leaseId: backend.inflightLeaseId,
-        leasePersisted: backend.inflightLeasePersisted,
-      });
-      backend.inflightLease = false;
-    }
-    if (backend?.groupBackendType !== "mixed") {
-      return {
-        error:
-          unsupportedWebImageModelError(options.imageModel) ||
-          "Unsupported Web image model.",
-      };
-    }
-    const fallback = await resolveResponsesFallback();
-    if (!fallback?.config) {
-      return {
-        error:
-          unsupportedWebImageModelError(options.imageModel) ||
-          "No compatible image backend.",
-      };
-    }
-    candidate = fallback.config;
-  }
 
   while (true) {
     attempt += 1;
@@ -4162,17 +4123,12 @@ export async function generateImage(
       config,
       (candidate) => generateImage(candidate, params, callbacks),
       {
-        mixWebFirst:
-          params.mixWebFirst &&
-          supportsWebImageModel(getModel(config, params.model)),
-        imageModel: getModel(config, params.model),
-        accountBackendPreference:
-          params.requiresResponsesBackend ||
-          !supportsWebImageModel(getModel(config, params.model))
-            ? "responses"
-            : params.forceWebBackend
-              ? "web"
-              : undefined,
+        mixWebFirst: params.mixWebFirst,
+        accountBackendPreference: params.requiresResponsesBackend
+          ? "responses"
+          : params.forceWebBackend
+            ? "web"
+            : undefined,
         accountBackendPreferenceMode: params.forceWebBackend
           ? "mixed-only"
           : undefined,
@@ -4328,17 +4284,12 @@ export async function editImage(
       config,
       (candidate) => editImage(candidate, params, callbacks),
       {
-        mixWebFirst:
-          params.mixWebFirst &&
-          supportsWebImageModel(getModel(config, params.model)),
-        imageModel: getModel(config, params.model),
-        accountBackendPreference:
-          params.requiresResponsesBackend ||
-          !supportsWebImageModel(getModel(config, params.model))
-            ? "responses"
-            : params.forceWebBackend
-              ? "web"
-              : undefined,
+        mixWebFirst: params.mixWebFirst,
+        accountBackendPreference: params.requiresResponsesBackend
+          ? "responses"
+          : params.forceWebBackend
+            ? "web"
+            : undefined,
         accountBackendPreferenceMode: params.forceWebBackend
           ? "mixed-only"
           : undefined,
@@ -4591,17 +4542,10 @@ export async function generateChatImage(
       config,
       (candidate) => generateChatImage(candidate, params, callbacks),
       {
-        mixWebFirst:
-          params.mixWebFirst &&
-          (params.webChat || supportsWebImageModel(params.imageModel)),
-        imageModel: params.webChat
-          ? undefined
-          : getImageModel(params.imageModel) || DEFAULT_IMAGE_MODEL,
-        accountBackendPreference:
-          params.requiresResponsesBackend ||
-          (!params.webChat && !supportsWebImageModel(params.imageModel))
-            ? "responses"
-            : undefined,
+        mixWebFirst: params.mixWebFirst,
+        accountBackendPreference: params.requiresResponsesBackend
+          ? "responses"
+          : undefined,
       }
     );
   }

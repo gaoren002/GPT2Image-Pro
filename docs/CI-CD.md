@@ -8,7 +8,7 @@
 | 文件 | 触发 | 作用 |
 |---|---|---|
 | `.github/workflows/ci.yml` | PR / push → `dev`·`main`，手动 | 提交门禁：文档镜像、风格、类型、测试、构建、容器可构建性 |
-| `.github/workflows/docker-release.yml` | push tag `v*.*.*`，手动 | 发布：构建并推送 3 个镜像到 GHCR + 起草 GitHub Release |
+| `.github/workflows/docker-release.yml` | push tag `v*.*.*`，手动 | 发布：构建并推送 4 个镜像到 GHCR + 起草 GitHub Release |
 | `.github/actions/setup/action.yml` | 被 ci.yml 复用 | 统一 Node 22 + pnpm + frozen-lockfile 安装 |
 | `.github/dependabot.yml` | 每周 | 依赖 / Action 安全更新自动开 PR |
 
@@ -33,7 +33,7 @@
 ## docker-release.yml —— 发布（tag 触发）
 
 - 触发：推送形如 `v*.*.*` 的 tag（含预发布 `v1.0.0-rc.1`，glob `v*.*.*` 同样匹配）。
-- 构建 + 推送到 GHCR（`ghcr.io`）3 个镜像：`web`、`migrate`、`chatgpt-web-proxy`，tag 含语义 tag、`latest`、`sha-<sha>`。
+- 构建 + 推送到 GHCR（`ghcr.io/${{ github.repository_owner }}`）4 个镜像：`web`、`migrate`、`chatgpt-web-proxy`、`chatgpt-register`，tag 含语义 tag、`latest`、`sha-<sha>`。
 - 起草（draft）一份 GitHub Release，附 docker-compose 部署包（`.tar.gz` / `.zip`）。
 
 ## 版本与发布流程（对齐 §0.2）
@@ -55,8 +55,8 @@ git push origin v0.2.0-rc.1   # → 触发 docker-release.yml
 
 修改配置示例：
 ```bash
-gh api -X PUT repos/MeowFree/GPT2Image-Pro/branches/<dev|main>/protection --input <config>.json
-gh api repos/MeowFree/GPT2Image-Pro/branches/<dev|main>/protection/required_status_checks  # 查看当前
+gh api -X PUT repos/gaoren002/GPT2Image-Pro/branches/<dev|main>/protection --input <config>.json
+gh api repos/gaoren002/GPT2Image-Pro/branches/<dev|main>/protection/required_status_checks  # 查看当前
 ```
 
 ## 已知边界 / 后续

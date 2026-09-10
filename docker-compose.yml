@@ -21,7 +21,7 @@ services:
       retries: 10
 
   migrate:
-    image: ghcr.io/meowfree/gpt2image-pro-migrate:${GPT2IMAGE_IMAGE_TAG:-latest}
+    image: ghcr.io/gaoren002/gpt2image-pro-migrate:${GPT2IMAGE_IMAGE_TAG:-latest}
     env_file:
       - ${GPT2IMAGE_ENV_FILE:-.env}
     environment:
@@ -32,7 +32,7 @@ services:
     restart: "no"
 
   web:
-    image: ghcr.io/meowfree/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:-latest}
+    image: ghcr.io/gaoren002/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file:
       - ${GPT2IMAGE_ENV_FILE:-.env}
@@ -71,7 +71,7 @@ services:
         condition: service_healthy
 
   super-resolution-worker:
-    image: ghcr.io/meowfree/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:-latest}
+    image: ghcr.io/gaoren002/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:-latest}
     restart: unless-stopped
     init: true
     env_file:
@@ -99,7 +99,7 @@ services:
     cpus: "${SUPER_RESOLUTION_WORKER_CPUS:-24.0}"
 
   chatgpt-web-proxy:
-    image: ghcr.io/meowfree/gpt2image-pro-chatgpt-web-proxy:${GPT2IMAGE_IMAGE_TAG:-latest}
+    image: ghcr.io/gaoren002/gpt2image-pro-chatgpt-web-proxy:${GPT2IMAGE_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       CHATGPT_WEB_PROXY_BIND: :3021
@@ -112,7 +112,7 @@ services:
   # 注册机 sidecar：debian + wine 跑 ChatGPTRegister.exe。仅 web 经内网调用，
   # X-Register-Secret 鉴权；不持有 DB 凭据，token 入库由 web 完成。
   chatgpt-register:
-    image: ghcr.io/meowfree/gpt2image-pro-chatgpt-register:${GPT2IMAGE_IMAGE_TAG:-latest}
+    image: ghcr.io/gaoren002/gpt2image-pro-chatgpt-register:${GPT2IMAGE_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       CHATGPT_REGISTER_BIND: :3023

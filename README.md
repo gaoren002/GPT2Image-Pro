@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MeowFree/GPT2Image-Pro/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/MeowFree/GPT2Image-Pro?style=social" /></a>
-  <a href="https://github.com/MeowFree/GPT2Image-Pro/blob/dev/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-green" /></a>
-  <a href="https://github.com/MeowFree/GPT2Image-Pro/releases"><img alt="Release" src="https://img.shields.io/badge/Release-v0.6.0-blue" /></a>
+  <a href="https://github.com/gaoren002/GPT2Image-Pro/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/gaoren002/GPT2Image-Pro?style=social" /></a>
+  <a href="https://github.com/gaoren002/GPT2Image-Pro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-green" /></a>
+  <a href="https://github.com/gaoren002/GPT2Image-Pro/releases"><img alt="Release" src="https://img.shields.io/badge/Release-v0.9.0-blue" /></a>
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" />
   <img alt="Docker" src="https://img.shields.io/badge/Docker-GHCR-2496ED?logo=docker&logoColor=white" />
@@ -217,7 +217,7 @@ docker compose up -d
 
 默认 compose 会启动 PostgreSQL、Web 应用、数据库迁移任务、Real-ESRGAN Worker 和 ChatGPT Web sidecar。首次启动默认自用模式，超管密码会写入 `app-bootstrap` volume 内的 `super-admin-credentials.txt`，也可通过日志查看。
 
-`GPT2IMAGE_IMAGE_TAG` 同时控制 Web、数据库迁移和 sidecar 镜像版本。升级时不要只改其中一个镜像；让三者使用同一个 tag，避免 Web 新版本启动但迁移任务仍停留在旧版本，导致运行时缺表或字段。
+`GPT2IMAGE_IMAGE_TAG` 同时控制 Web、数据库迁移、超分 Worker 和两个 sidecar 的镜像版本。升级时不要只改其中一个镜像；让所有服务使用同一个 tag，避免 Web 新版本启动但迁移任务或 sidecar 仍停留在旧版本。
 
 启动后查看状态：
 
@@ -256,7 +256,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #### 1. Web 应用
 
 ```bash
-git clone https://github.com/MeowFree/GPT2Image-Pro.git
+git clone https://github.com/gaoren002/GPT2Image-Pro.git
 cd GPT2Image-Pro
 cp .env.example .env.local
 mkdir -p apps/web
@@ -341,11 +341,12 @@ Web 应用默认启用内置定时任务，会自动执行 pending 超时退款�
 
 ## 发布
 
-仓库发布地址为 `MeowFree/GPT2Image-Pro`。打版本 tag 会触发 GitHub Actions：
+仓库发布地址为 `gaoren002/GPT2Image-Pro`。打版本 tag 会触发 GitHub Actions：
 
-- 构建并推送 `ghcr.io/meowfree/gpt2image-pro-web`
-- 构建并推送 `ghcr.io/meowfree/gpt2image-pro-migrate`
-- 构建并推送 `ghcr.io/meowfree/gpt2image-pro-chatgpt-web-proxy`
+- 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-web`
+- 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-migrate`
+- 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-chatgpt-web-proxy`
+- 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-chatgpt-register`
 - 创建 GitHub Release 草稿，并附带 compose 部署包
 
 ```bash

@@ -4,18 +4,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { logError } from "@repo/shared/logger";
 import { getRuntimeSettingString } from "@repo/shared/system-settings";
+import { solveChatGptTurnstileToken } from "./chatgpt-web-turnstile";
 import { parseImageSize } from "./resolution";
 import { isContentSafetyRejection } from "./sla-classification";
-import { getWebConversationTurnNodes } from "./web-conversation-history";
-import {
-  resolveImagesWebModel,
-  resolveWorkWebModel,
-} from "./web-model-catalog";
-import {
-  buildWebHistoryTranscript,
-  downloadWebHistoryImageReference,
-  getRecentWebHistoryImageReferences,
-} from "./web-history-references";
 import type {
   ApiConfig,
   ChatGptWebConversationState,
@@ -27,12 +18,22 @@ import type {
   ResponsesInputFile,
   ThinkingLevel,
 } from "./types";
+import { getWebConversationTurnNodes } from "./web-conversation-history";
+import {
+  buildWebHistoryTranscript,
+  downloadWebHistoryImageReference,
+  getRecentWebHistoryImageReferences,
+} from "./web-history-references";
+import {
+  resolveImagesWebModel,
+  resolveWorkWebModel,
+} from "./web-model-catalog";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887";
-const DEFAULT_CLIENT_BUILD_NUMBER = "6708908";
+const DEFAULT_CLIENT_VERSION = "prod-0161b0c50546a593fb298ade09215fe186023bb5";
+const DEFAULT_CLIENT_BUILD_NUMBER = "10493622";
 const DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js";
 const IMAGE_POLL_TIMEOUT_MS = 120_000;
 const IMAGE_POLL_INTERVAL_MS = 6_000;
@@ -41,6 +42,8 @@ const IMAGE_POLL_INTERVAL_MS = 6_000;
 // 故发起后至少等这么久再开始轮询,大幅削减状态查询量、降低 429。
 const IMAGE_POLL_INITIAL_DELAY_MS = 45_000;
 const WEB_PROXY_REQUEST_TIMEOUT_MS = 310_000;
+const WEB_SCREEN_WIDTH = 2560;
+const WEB_SCREEN_HEIGHT = 1440;
 
 type ChatRequirements = {
   token: string;
@@ -81,6 +84,8 @@ export type ChatGptWebAccountInfo = {
 };
 
 const webSessionCache = new Map<string, WebSession>();
+/** Node fetch 不保存 Set-Cookie；直连模式需按账号延续 Sentinel 的 oai-sc 状态。 */
+const webSentinelCookieCache = new Map<string, string>();
 
 type WebProxyResponsePayload = {
   status: number;
@@ -173,7 +178,7 @@ function lastWebConversationState(
 }
 
 function getWebSession(config: ApiConfig) {
-  const key = config.backend?.id || config.apiKey.slice(0, 24);
+  const key = getWebSessionKey(config);
   const cached = webSessionCache.get(key);
   if (cached) return cached;
   const session = {
@@ -185,7 +190,13 @@ function getWebSession(config: ApiConfig) {
 }
 
 function getWebSessionKey(config: ApiConfig) {
-  return config.backend?.id || config.apiKey.slice(0, 24) || "default";
+  const workspaceId = Object.entries(config.headers || {}).find(
+    ([key]) => key.toLowerCase() === "chatgpt-account-id"
+  )?.[1];
+  const identity = [config.backend?.id || "", workspaceId || "", config.apiKey]
+    .map((value) => `${value.length}:${value}`)
+    .join("|");
+  return `web:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 function encodeBody(body: BodyInit | null | undefined) {
@@ -259,6 +270,40 @@ function headersToObject(headers: HeadersInit | undefined) {
   return result;
 }
 
+function withSentinelCookie(
+  headers: Record<string, string>,
+  sentinelCookie: string | undefined
+) {
+  if (!sentinelCookie) return headers;
+  const cookieKey =
+    Object.keys(headers).find((key) => key.toLowerCase() === "cookie") ||
+    "Cookie";
+  const cookies = (headers[cookieKey] || "")
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .filter((cookie) => cookie && !cookie.toLowerCase().startsWith("oai-sc="));
+  cookies.push(`oai-sc=${sentinelCookie}`);
+  return { ...headers, [cookieKey]: cookies.join("; ") };
+}
+
+function captureSentinelCookie(config: ApiConfig, response: Response) {
+  const getSetCookie = (
+    response.headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie;
+  const values =
+    typeof getSetCookie === "function"
+      ? getSetCookie.call(response.headers)
+      : [response.headers.get("set-cookie") || ""];
+  for (const value of values) {
+    const match = value.match(/(?:^|,\s*)oai-sc=([^;,]*)/i);
+    if (!match) continue;
+    const cookie = match[1]?.trim();
+    const key = getWebSessionKey(config);
+    if (cookie) webSentinelCookieCache.set(key, cookie);
+    else webSentinelCookieCache.delete(key);
+  }
+}
+
 function toResponseHeaders(headers: WebProxyResponsePayload["headers"]) {
   const result = new Headers();
   for (const [key, values] of Object.entries(headers || {})) {
@@ -298,10 +343,15 @@ async function fetchChatGptWeb(
   };
   const proxy = await getWebProxyConfig();
   if (!proxy) {
-    return fetch(`${CHATGPT_BASE_URL}${urlPath}`, {
+    const response = await fetch(`${CHATGPT_BASE_URL}${urlPath}`, {
       ...init,
-      headers,
+      headers: withSentinelCookie(
+        headers,
+        webSentinelCookieCache.get(getWebSessionKey(config))
+      ),
     });
+    captureSentinelCookie(config, response);
+    return response;
   }
 
   const controller = new AbortController();
@@ -364,7 +414,7 @@ function powResourcesFromHtml(html: string): PowResources {
 }
 
 function legacyParseTime() {
-  const now = new Date(Date.now() - 5 * 60 * 60 * 1000);
+  const now = new Date(Date.now() + 8 * 60 * 60 * 1000);
   const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][
     now.getUTCDay()
   ];
@@ -383,52 +433,148 @@ function legacyParseTime() {
     "Dec",
   ][now.getUTCMonth()];
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${weekday} ${month} ${pad(now.getUTCDate())} ${now.getUTCFullYear()} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} GMT-0500 (Eastern Standard Time)`;
+  return `${weekday} ${month} ${pad(now.getUTCDate())} ${now.getUTCFullYear()} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())} GMT+0800 (中国标准时间)`;
+}
+
+const POW_NAVIGATOR_PROPERTIES = [
+  "storage−[object StorageManager]",
+  "locks−[object LockManager]",
+  "appCodeName−Mozilla",
+  "permissions−[object Permissions]",
+  "webdriver−false",
+  "vendor−Google Inc.",
+  "mediaDevices−[object MediaDevices]",
+  "cookieEnabled−true",
+  "product−Gecko",
+  "onLine−true",
+  "credentials−[object CredentialsContainer]",
+  "serviceWorker−[object ServiceWorkerContainer]",
+  "gpu−[object GPU]",
+  "pdfViewerEnabled−true",
+  "language−zh-CN",
+  "geolocation−[object Geolocation]",
+  "userAgentData−[object NavigatorUAData]",
+  "hardwareConcurrency−8",
+] as const;
+const POW_WINDOW_KEYS = [
+  "window",
+  "self",
+  "document",
+  "location",
+  "history",
+  "navigation",
+  "innerWidth",
+  "innerHeight",
+  "devicePixelRatio",
+  "screen",
+  "chrome",
+  "navigator",
+  "performance",
+  "crypto",
+  "indexedDB",
+  "sessionStorage",
+  "localStorage",
+  "scheduler",
+  "atob",
+  "btoa",
+  "fetch",
+  "matchMedia",
+  "postMessage",
+  "queueMicrotask",
+  "requestAnimationFrame",
+  "createImageBitmap",
+  "setInterval",
+  "setTimeout",
+  "caches",
+] as const;
+
+function randomPowValue<T>(values: readonly T[]): T {
+  const value = values[Math.floor(Math.random() * values.length)];
+  if (value === undefined) throw new Error("ChatGPT Web PoW 候选列表为空");
+  return value;
 }
 
 function powConfig(resources: PowResources) {
-  const scriptSource =
-    resources.scriptSources[
-      Math.floor(Math.random() * resources.scriptSources.length)
-    ] || DEFAULT_POW_SCRIPT;
+  const preferredScriptSources = resources.scriptSources.filter(
+    (source) =>
+      source.includes("/sentinel/") ||
+      source.includes("/cdn-cgi/challenge-platform/")
+  );
+  const scriptSource = randomPowValue(
+    preferredScriptSources.length
+      ? preferredScriptSources
+      : resources.scriptSources.length
+        ? resources.scriptSources
+        : [DEFAULT_POW_SCRIPT]
+  );
+  const monotonicNow = performance.now();
+  const reactKeySuffix = Math.random().toString(36).slice(2);
   return [
-    3000,
+    WEB_SCREEN_WIDTH + WEB_SCREEN_HEIGHT,
     legacyParseTime(),
     4294705152,
-    0,
+    1,
     USER_AGENT,
     scriptSource,
     resources.dataBuild,
-    "en-US",
-    "en-US,es-US,en,es",
+    "zh-CN",
+    "zh-CN,zh,en,en-US",
     0,
-    "webdriver-false",
-    "location",
-    "navigator",
-    performance.now(),
+    randomPowValue(POW_NAVIGATOR_PROPERTIES),
+    randomPowValue([
+      `__reactContainer$${reactKeySuffix}`,
+      `_reactListening${reactKeySuffix}`,
+      `__reactResources$${reactKeySuffix}`,
+      "location",
+    ]),
+    randomPowValue(POW_WINDOW_KEYS),
+    monotonicNow,
     randomUUID(),
     "",
-    16,
-    Date.now() - performance.now(),
+    8,
+    Date.now() - monotonicNow,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
   ];
 }
 
-function solvePow(seed: string, difficulty: string, config: unknown[]) {
-  const target = Buffer.from(difficulty, "hex");
-  const diffLen = Math.floor(difficulty.length / 2);
-  const seedBuffer = Buffer.from(seed);
-  const static1 = `${JSON.stringify(config.slice(0, 3)).slice(0, -1)},`;
-  const static2 = `,${JSON.stringify(config.slice(4, 9)).slice(1, -1)},`;
-  const static3 = `,${JSON.stringify(config.slice(10)).slice(1)}`;
+/** 2026-09 Web Sentinel SDK 的 32 位 FNV-1a + avalanche 哈希。 */
+function sentinelPowHash(value: string) {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619) >>> 0;
+  }
+  hash ^= hash >>> 16;
+  hash = Math.imul(hash, 2_246_822_507) >>> 0;
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 3_266_489_909) >>> 0;
+  hash ^= hash >>> 16;
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function solvePow(
+  seed: string,
+  difficulty: string,
+  config: unknown[],
+  signal?: AbortSignal
+) {
+  const startedAt = performance.now();
   for (let index = 0; index < 500_000; index++) {
-    const encoded = Buffer.from(
-      `${static1}${index}${static2}${index >> 1}${static3}`
-    ).toString("base64");
-    const digest = createHash("sha3-512")
-      .update(Buffer.concat([seedBuffer, Buffer.from(encoded)]))
-      .digest();
-    if (digest.subarray(0, diffLen).compare(target) <= 0) {
-      return { token: encoded, solved: true };
+    if ((index & 1023) === 0 && signal?.aborted) {
+      throw new Error("ChatGPT Web proof challenge aborted");
+    }
+    config[3] = index;
+    config[9] = Math.round(performance.now() - startedAt);
+    const encoded = Buffer.from(JSON.stringify(config)).toString("base64");
+    const hash = sentinelPowHash(seed + encoded);
+    if (hash.slice(0, difficulty.length) <= difficulty) {
+      return { token: `${encoded}~S`, solved: true };
     }
   }
   return {
@@ -437,22 +583,37 @@ function solvePow(seed: string, difficulty: string, config: unknown[]) {
   };
 }
 
-function buildLegacyRequirementsToken(resources: PowResources) {
-  const seed = String(Math.random());
-  const { token } = solvePow(seed, "0fffff", powConfig(resources));
-  return `gAAAAAC${token}`;
+function buildLegacyRequirementsToken(
+  resources: PowResources,
+  config = powConfig(resources)
+) {
+  const startedAt = performance.now();
+  config[3] = 1;
+  config[9] = performance.now() - startedAt;
+  return `gAAAAAC${Buffer.from(JSON.stringify(config)).toString("base64")}`;
 }
 
 function buildProofToken(data: {
   seed?: string;
   difficulty?: string;
   resources: PowResources;
+  config?: unknown[];
+  signal?: AbortSignal;
 }) {
-  if (!data.seed || !data.difficulty) return "";
+  if (
+    typeof data.seed !== "string" ||
+    !data.seed ||
+    data.seed.length > 1024 ||
+    typeof data.difficulty !== "string" ||
+    !/^[0-9a-f]{1,8}$/i.test(data.difficulty)
+  ) {
+    return "";
+  }
   const { token, solved } = solvePow(
     data.seed,
-    data.difficulty,
-    powConfig(data.resources)
+    data.difficulty.toLowerCase(),
+    data.config || powConfig(data.resources),
+    data.signal
   );
   if (!solved) {
     throw new Error(
@@ -462,12 +623,21 @@ function buildProofToken(data: {
   return `gAAAAAB${token}`;
 }
 
+function configuredHeader(config: ApiConfig, name: string) {
+  const match = Object.entries(config.headers || {}).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase()
+  );
+  const value = match?.[1]?.trim();
+  return value || undefined;
+}
+
 function getHeaders(
   config: ApiConfig,
   path: string,
   extra?: Record<string, string>
 ) {
   const session = getWebSession(config);
+  const chatgptAccountId = configuredHeader(config, "ChatGPT-Account-Id");
   return {
     "User-Agent": USER_AGENT,
     Origin: CHATGPT_BASE_URL,
@@ -495,6 +665,7 @@ function getHeaders(
     "OAI-Language": "zh-CN",
     "OAI-Client-Version": DEFAULT_CLIENT_VERSION,
     "OAI-Client-Build-Number": DEFAULT_CLIENT_BUILD_NUMBER,
+    ...(chatgptAccountId ? { "ChatGPT-Account-Id": chatgptAccountId } : {}),
     "X-OpenAI-Target-Path": path,
     "X-OpenAI-Target-Route": path,
     Authorization: `Bearer ${config.apiKey}`,
@@ -621,47 +792,112 @@ async function bootstrap(config: ApiConfig) {
   return powResourcesFromHtml(await response.text());
 }
 
-async function getChatRequirements(config: ApiConfig) {
-  const resources = await bootstrap(config);
-  const path = "/backend-api/sentinel/chat-requirements";
-  const response = await fetchChatGptWeb(config, path, path, {
-    method: "POST",
-    signal: config.signal,
-    headers: getHeaders(config, path, {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    }),
-    body: JSON.stringify({ p: buildLegacyRequirementsToken(resources) }),
-  });
-  if (!response.ok) {
+async function getChatRequirements(
+  config: ApiConfig,
+  bootstrappedResources?: PowResources
+) {
+  const resources = bootstrappedResources || (await bootstrap(config));
+  const basePath = "/backend-api/sentinel/chat-requirements";
+  const preparePath = `${basePath}/prepare`;
+  const pFingerprint = powConfig(resources);
+  const pToken = buildLegacyRequirementsToken(resources, pFingerprint);
+  const prepareResponse = await fetchChatGptWeb(
+    config,
+    preparePath,
+    preparePath,
+    {
+      method: "POST",
+      signal: config.signal,
+      headers: getHeaders(config, preparePath, {
+        "Content-Type": "application/json",
+        Accept: "*/*",
+      }),
+      body: JSON.stringify({ p: pToken }),
+    }
+  );
+  if (!prepareResponse.ok) {
     throw new Error(
-      await webErrorMessage(response, "ChatGPT Web requirements")
+      await webErrorMessage(prepareResponse, "ChatGPT Web requirements prepare")
     );
   }
-  const data = (await response.json()) as {
-    token?: string;
-    proof_token?: string;
-    so_token?: string;
+  const prepareData = (await prepareResponse.json()) as {
+    prepare_token?: string;
+    arkose?: { required?: boolean };
     proofofwork?: {
       required?: boolean;
       seed?: string;
       difficulty?: string;
     };
+    turnstile?: { required?: boolean; dx?: string };
+  };
+  if (!prepareData.prepare_token) {
+    throw new Error(
+      "ChatGPT Web requirements prepare response missing prepare token"
+    );
+  }
+  if (prepareData.arkose?.required) {
+    throw new Error(
+      "ChatGPT Web requirements requires unsupported Arkose token"
+    );
+  }
+
+  let proofToken = "";
+  if (prepareData.proofofwork?.required) {
+    const proofFingerprint = powConfig(resources);
+    const deviceId = pFingerprint[14];
+    if (typeof deviceId !== "string" || !deviceId) {
+      throw new Error("ChatGPT Web requirements fingerprint is incomplete");
+    }
+    // Sentinel 会在 p 与 proof 间保留设备 UUID，其余动态采样项重新生成。
+    proofFingerprint[14] = deviceId;
+    proofToken = buildProofToken({
+      seed: prepareData.proofofwork.seed,
+      difficulty: prepareData.proofofwork.difficulty,
+      resources,
+      config: proofFingerprint,
+      signal: config.signal,
+    });
+  }
+  if (prepareData.proofofwork?.required && !proofToken) {
+    throw new Error("ChatGPT Web requirements proof challenge is incomplete");
+  }
+  const turnstileToken = prepareData.turnstile?.required
+    ? solveChatGptTurnstileToken(prepareData.turnstile.dx || "", pToken)
+    : "";
+  if (prepareData.turnstile?.required && !turnstileToken) {
+    throw new Error("ChatGPT Web requirements Turnstile challenge failed");
+  }
+
+  const finalizePath = `${basePath}/finalize`;
+  const response = await fetchChatGptWeb(config, finalizePath, finalizePath, {
+    method: "POST",
+    signal: config.signal,
+    headers: getHeaders(config, finalizePath, {
+      "Content-Type": "application/json",
+      Accept: "*/*",
+    }),
+    body: JSON.stringify({
+      prepare_token: prepareData.prepare_token,
+      proofofwork: proofToken,
+      turnstile: turnstileToken,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      await webErrorMessage(response, "ChatGPT Web requirements finalize")
+    );
+  }
+  const data = (await response.json()) as {
+    token?: string;
+    so_token?: string;
   };
   if (!data.token) {
-    throw new Error("ChatGPT Web requirements response missing token");
+    throw new Error("ChatGPT Web requirements finalize response missing token");
   }
   return {
     token: data.token,
-    proofToken:
-      data.proof_token ||
-      (data.proofofwork?.required
-        ? buildProofToken({
-            seed: data.proofofwork.seed,
-            difficulty: data.proofofwork.difficulty,
-            resources,
-          })
-        : undefined),
+    proofToken: proofToken || undefined,
+    turnstileToken: turnstileToken || undefined,
     soToken: data.so_token,
   } satisfies ChatRequirements;
 }
@@ -787,29 +1023,57 @@ async function uploadAttachment(
   } satisfies UploadedAttachment;
 }
 
-/**
- * 按聊天/Images 场景转换已鉴权的站内模型；两个场景的 slug 与思考档位不同。
- * 未收录的管理员自定义 Web 标识保留旧协议，不把未经验证的别名写入模型表。
- * 纯参数转换，无网络副作用；权限仍由统一生成服务在进入 Web 前校验。
- */
-function webConversationModelParameters(options: {
+type WebConversationRequestOptions = {
   gptModel?: string;
   thinking?: ThinkingLevel;
   promptOptimization?: boolean;
+  profile: "images" | "work";
+  parentMessageId: string;
+  turnTraceId: string;
+  continuation?: WebContinuationState | null;
+  /** Images 强制生图默认 picture_v2；Work 传空数组，由 profile 独立决定模型目录。 */
   systemHints?: string[];
-}) {
+};
+
+type WebConversationSubmitOptions = WebConversationRequestOptions & {
+  requestMessageId: string;
+};
+
+const WEB_LOCAL_FUNCTION_NAMES = ["local.continue_in_work"] as const;
+/** 最新 Images 与 Work HAR 均携带的网页响应契约，不包含图片版本字段。 */
+const WEB_MODEL_RESPONSE_CONTRACTS = [
+  {
+    id: "photo_upload_action.v1",
+    protocol_version: 1,
+    presets: ["cap:image", "cap:file", "placement:end"],
+  },
+] as const;
+
+/**
+ * 按显式场景转换已鉴权的站内模型，并返回正式提交的并行开关。
+ * 未收录的管理员自定义 Web 标识保留旧协议，不把未经验证的别名写入模型表。
+ * 纯参数转换，无网络副作用；权限仍由统一生成服务在进入 Web 前校验。
+ */
+function webConversationModelRequest(options: WebConversationRequestOptions) {
   const resolved =
-    options.systemHints?.length === 0
+    options.profile === "work"
       ? resolveWorkWebModel(options)
       : resolveImagesWebModel(options);
-  if (resolved) return { ...resolved, force_parallel_switch: "auto" };
+  if (resolved) {
+    return {
+      modelParameters: resolved,
+      forceParallelSwitch: "auto" as const,
+    };
+  }
   return {
-    model: options.gptModel?.trim() || "gpt-5-5-thinking",
-    paragen_thinking_level: webThinkingValue(
-      options.thinking,
-      options.promptOptimization
-    ),
-    force_parallel_switch:
+    modelParameters: {
+      model: options.gptModel?.trim() || "gpt-5-5-thinking",
+      paragen_thinking_level: webThinkingValue(
+        options.thinking,
+        options.promptOptimization
+      ),
+    },
+    forceParallelSwitch:
       options.promptOptimization === false ? "instant" : "auto",
   };
 }
@@ -826,15 +1090,31 @@ function webThinkingValue(
   return thinking || "low";
 }
 
+/** prepare 返回 JSON，使用同轮 trace，但不提前发送正式提交的 Sentinel 凭据。 */
+function prepareConversationHeaders(
+  config: ApiConfig,
+  path: string,
+  turnTraceId: string
+) {
+  return getHeaders(config, path, {
+    "Content-Type": "application/json",
+    Accept: "*/*",
+    "OAI-GenUI-Client-Actions": "open_entity_detail",
+    "X-Oai-Turn-Trace-Id": turnTraceId,
+  });
+}
+
+/** 正式会话提交使用 SSE 与 Sentinel 凭据，可附带 prepare 返回的 conduit token。 */
 function imageHeaders(
   config: ApiConfig,
   path: string,
   requirements: ChatRequirements,
-  conduitToken?: string
+  options?: { conduitToken?: string; turnTraceId?: string }
 ) {
   return getHeaders(config, path, {
     "Content-Type": "application/json",
     Accept: "text/event-stream",
+    "OAI-GenUI-Client-Actions": "open_entity_detail",
     "OpenAI-Sentinel-Chat-Requirements-Token": requirements.token,
     ...(requirements.proofToken
       ? { "OpenAI-Sentinel-Proof-Token": requirements.proofToken }
@@ -845,56 +1125,53 @@ function imageHeaders(
     ...(requirements.soToken
       ? { "OpenAI-Sentinel-SO-Token": requirements.soToken }
       : {}),
-    ...(conduitToken ? { "X-Conduit-Token": conduitToken } : {}),
-    "X-Oai-Turn-Trace-Id": randomUUID(),
+    ...(options?.conduitToken
+      ? { "X-Conduit-Token": options.conduitToken }
+      : {}),
+    "X-Oai-Turn-Trace-Id": options?.turnTraceId || randomUUID(),
   });
 }
 
 async function prepareImageConversation(
   config: ApiConfig,
   prompt: string,
-  requirements: ChatRequirements,
-  options: {
-    gptModel?: string;
-    thinking?: ThinkingLevel;
-    promptOptimization?: boolean;
-    continuation?: WebContinuationState | null;
-    requestMessageId: string;
-    // 系统提示位:图像路径固定 ["picture_v2"](强制出图);网页对话路径传 []
-    // (不强制出图,让模型自行决定文字/出图)。缺省保持图像行为不变。
-    systemHints?: string[];
-  }
+  options: WebConversationRequestOptions
 ) {
   const path = "/backend-api/f/conversation/prepare";
   const systemHints = options.systemHints ?? ["picture_v2"];
+  const { modelParameters } = webConversationModelRequest(options);
   const response = await fetchChatGptWeb(config, path, path, {
     method: "POST",
     signal: config.signal,
-    headers: imageHeaders(config, path, requirements),
+    headers: prepareConversationHeaders(config, path, options.turnTraceId),
     body: JSON.stringify({
       action: "next",
-      fork_from_shared_post: false,
       ...(options.continuation?.useNativeContinuation
         ? { conversation_id: options.continuation.conversationId }
         : {}),
-      parent_message_id: options.continuation?.useNativeContinuation
-        ? options.continuation.parentMessageId
-        : randomUUID(),
-      ...webConversationModelParameters(options),
-      paragen_cot_summary_display_override: "allow",
-      client_prepare_state: "success",
+      parent_message_id: options.parentMessageId,
+      ...modelParameters,
+      client_prepare_state: "none",
+      client_prepare_dispatch: "debounced",
+      client_prepare_source: "composer_editor_state",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
       conversation_mode: { kind: "primary_assistant" },
       system_hints: systemHints,
+      model_response_contracts: WEB_MODEL_RESPONSE_CONTRACTS,
       partial_query: {
-        id: options.requestMessageId,
+        id: randomUUID(),
         author: { role: "user" },
         content: { content_type: "text", parts: [prompt] },
       },
       supports_buffering: true,
       supported_encodings: ["v1"],
-      client_contextual_info: { app_name: "chatgpt.com" },
+      local_function_names: WEB_LOCAL_FUNCTION_NAMES,
+      client_contextual_info: {
+        app_name: "chatgpt.com",
+        has_web_push_capabilities: true,
+        web_push_notification_permission: "default",
+      },
     }),
   });
   if (!response.ok) {
@@ -904,12 +1181,14 @@ async function prepareImageConversation(
   return data.conduit_token || "";
 }
 
+/** 构造正式用户消息；普通 Images/Work 使用最新 metadata，文件模式保留其独立旧协议。 */
 function buildMessage(
   prompt: string,
   references: UploadedAttachment[],
   messageId: string,
   // 图片生成用 ["picture_v2"];可编辑文件(PPT/PSD)生成传 [](gpt-5-5-thinking + 代码解释器)。
-  systemHints: string[] = ["picture_v2"]
+  systemHints: string[] = ["picture_v2"],
+  metadataProfile: "conversation" | "editable-file" = "conversation"
 ) {
   const parts = references.map((item) => ({
     content_type: item.content_type,
@@ -933,8 +1212,15 @@ function buildMessage(
       ? { content_type: "multimodal_text", parts }
       : { content_type: "text", parts: [prompt] },
     metadata: {
-      system_hints: systemHints,
+      ...(metadataProfile === "editable-file"
+        ? { system_hints: systemHints }
+        : systemHints.length
+          ? { system_hints: systemHints }
+          : { selected_sources: [] }),
       serialization_metadata: { custom_symbol_offsets: [] },
+      ...(metadataProfile === "conversation"
+        ? { submission_mode: "manual_send" }
+        : {}),
       ...(references.length
         ? {
             attachments: references.map((item) => ({
@@ -960,23 +1246,20 @@ async function startImageGeneration(
   prompt: string,
   requirements: ChatRequirements,
   conduitToken: string,
-  options: {
-    gptModel?: string;
-    thinking?: ThinkingLevel;
-    promptOptimization?: boolean;
-    continuation?: WebContinuationState | null;
-    requestMessageId: string;
-    // 见 prepareImageConversation 的 systemHints 说明。缺省 ["picture_v2"]。
-    systemHints?: string[];
-  },
+  options: WebConversationSubmitOptions,
   references: UploadedAttachment[]
 ) {
   const path = "/backend-api/f/conversation";
   const systemHints = options.systemHints ?? ["picture_v2"];
+  const { forceParallelSwitch, modelParameters } =
+    webConversationModelRequest(options);
   const response = await fetchChatGptWeb(config, path, path, {
     method: "POST",
     signal: config.signal,
-    headers: imageHeaders(config, path, requirements, conduitToken),
+    headers: imageHeaders(config, path, requirements, {
+      conduitToken,
+      turnTraceId: options.turnTraceId,
+    }),
     body: JSON.stringify({
       action: "next",
       messages: [
@@ -985,29 +1268,32 @@ async function startImageGeneration(
       ...(options.continuation?.useNativeContinuation
         ? { conversation_id: options.continuation.conversationId }
         : {}),
-      parent_message_id: options.continuation?.useNativeContinuation
-        ? options.continuation.parentMessageId
-        : randomUUID(),
-      ...webConversationModelParameters(options),
-      client_prepare_state: "sent",
+      parent_message_id: options.parentMessageId,
+      ...modelParameters,
+      client_prepare_state: "success",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
       conversation_mode: { kind: "primary_assistant" },
       enable_message_followups: true,
       system_hints: systemHints,
+      model_response_contracts: WEB_MODEL_RESPONSE_CONTRACTS,
       supports_buffering: true,
       supported_encodings: ["v1"],
+      local_function_names: WEB_LOCAL_FUNCTION_NAMES,
       client_contextual_info: {
         is_dark_mode: false,
         time_since_loaded: 1200,
         page_height: 1072,
         page_width: 1724,
         pixel_ratio: 1.2,
-        screen_height: 1440,
-        screen_width: 2560,
+        screen_height: WEB_SCREEN_HEIGHT,
+        screen_width: WEB_SCREEN_WIDTH,
         app_name: "chatgpt.com",
+        has_web_push_capabilities: true,
+        web_push_notification_permission: "default",
       },
       paragen_cot_summary_display_override: "allow",
+      force_parallel_switch: forceParallelSwitch,
     }),
   });
   if (!response.ok) {
@@ -2126,19 +2412,25 @@ async function runWebImage(
         )
       )),
     ];
-    const requirements = await getChatRequirements(configWithSignal);
+    const requestParentMessageId = continuation?.useNativeContinuation
+      ? continuation.parentMessageId
+      : randomUUID();
+    const requestOptions = {
+      gptModel: params.gptModel,
+      thinking: params.thinking,
+      promptOptimization: params.promptOptimization,
+      profile: "images" as const,
+      continuation,
+      parentMessageId: requestParentMessageId,
+      turnTraceId: randomUUID(),
+    };
+    const resources = await bootstrap(configWithSignal);
     const conduitToken = await prepareImageConversation(
       configWithSignal,
       prompt,
-      requirements,
-      {
-        gptModel: params.gptModel,
-        thinking: params.thinking,
-        promptOptimization: params.promptOptimization,
-        continuation,
-        requestMessageId,
-      }
+      requestOptions
     );
+    const requirements = await getChatRequirements(configWithSignal, resources);
     const launchedAt = Date.now();
     const response = await startImageGeneration(
       configWithSignal,
@@ -2146,10 +2438,7 @@ async function runWebImage(
       requirements,
       conduitToken,
       {
-        gptModel: params.gptModel,
-        thinking: params.thinking,
-        promptOptimization: params.promptOptimization,
-        continuation,
+        ...requestOptions,
         requestMessageId,
       },
       references
@@ -2429,21 +2718,27 @@ async function runWebChat(
         )
       )),
     ];
-    const requirements = await getChatRequirements(configWithSignal);
+    const requestParentMessageId = continuation?.useNativeContinuation
+      ? continuation.parentMessageId
+      : randomUUID();
     const options = {
       gptModel: params.gptModel,
       thinking: params.thinking,
       promptOptimization: params.promptOptimization,
+      profile: "work" as const,
       continuation,
+      parentMessageId: requestParentMessageId,
       requestMessageId,
       systemHints: [] as string[],
+      turnTraceId: randomUUID(),
     };
+    const resources = await bootstrap(configWithSignal);
     const conduitToken = await prepareImageConversation(
       configWithSignal,
       prompt,
-      requirements,
       options
     );
+    const requirements = await getChatRequirements(configWithSignal, resources);
     const response = await startImageGeneration(
       configWithSignal,
       prompt,
@@ -2654,27 +2949,30 @@ function editableFilePrompt(kind: EditableFileKind, userPrompt: string) {
 async function prepareFileConversation(
   config: ApiConfig,
   prompt: string,
-  requirements: ChatRequirements,
-  requestMessageId: string
+  options: {
+    parentMessageId: string;
+    turnTraceId: string;
+  }
 ) {
   const path = "/backend-api/f/conversation/prepare";
   const response = await fetchChatGptWeb(config, path, path, {
     method: "POST",
     signal: config.signal,
-    headers: imageHeaders(config, path, requirements),
+    headers: prepareConversationHeaders(config, path, options.turnTraceId),
     body: JSON.stringify({
       action: "next",
-      fork_from_shared_post: false,
-      parent_message_id: randomUUID(),
+      parent_message_id: options.parentMessageId,
       model: EDITABLE_FILE_MODEL,
       thinking_effort: EDITABLE_FILE_THINKING_EFFORT,
-      client_prepare_state: "success",
+      client_prepare_state: "none",
+      client_prepare_dispatch: "debounced",
+      client_prepare_source: "composer_editor_state",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
       conversation_mode: { kind: "primary_assistant" },
       system_hints: [],
       partial_query: {
-        id: requestMessageId,
+        id: randomUUID(),
         author: { role: "user" },
         content: { content_type: "text", parts: [prompt] },
       },
@@ -2699,20 +2997,29 @@ async function startFileConversation(
   requirements: ChatRequirements,
   conduitToken: string,
   requestMessageId: string,
-  references: UploadedAttachment[]
+  references: UploadedAttachment[],
+  options: {
+    parentMessageId: string;
+    turnTraceId: string;
+  }
 ) {
   const path = "/backend-api/f/conversation";
   const response = await fetchChatGptWeb(config, path, path, {
     method: "POST",
     signal: config.signal,
-    headers: imageHeaders(config, path, requirements, conduitToken),
+    headers: imageHeaders(config, path, requirements, {
+      conduitToken,
+      turnTraceId: options.turnTraceId,
+    }),
     body: JSON.stringify({
       action: "next",
-      messages: [buildMessage(prompt, references, requestMessageId, [])],
-      parent_message_id: randomUUID(),
+      messages: [
+        buildMessage(prompt, references, requestMessageId, [], "editable-file"),
+      ],
+      parent_message_id: options.parentMessageId,
       model: EDITABLE_FILE_MODEL,
       thinking_effort: EDITABLE_FILE_THINKING_EFFORT,
-      client_prepare_state: "sent",
+      client_prepare_state: "success",
       timezone_offset_min: -480,
       timezone: "Asia/Shanghai",
       conversation_mode: { kind: "primary_assistant" },
@@ -2993,7 +3300,8 @@ async function pollAndDownloadEditableFile(
 
 /**
  * 对话式生成可编辑文件(PPT/PSD)。上层入口(editable-file-operations 调用,传已选 plus/pro 账号 config)。
- * 流程:getChatRequirements → 上传输入图 → prepareFileConversation → startFileConversation → 读 SSE 取
+ * 流程:上传输入图 → bootstrap → prepareFileConversation → getChatRequirements →
+ *   startFileConversation → 读 SSE 取
  *   conversationId → 轮询取主文件+zip → 下载二进制。主文件缺失则抛错;zip 可缺。
  */
 export async function generateFileWithChatGptWeb(params: {
@@ -3016,20 +3324,25 @@ export async function generateFileWithChatGptWeb(params: {
         uploadAttachment(config, image, index + 1, { image: true })
       )
     );
-    const requirements = await getChatRequirements(config);
+    const conversationOptions = {
+      parentMessageId: randomUUID(),
+      turnTraceId: randomUUID(),
+    };
+    const resources = await bootstrap(config);
     const conduitToken = await prepareFileConversation(
       config,
       prompt,
-      requirements,
-      requestMessageId
+      conversationOptions
     );
+    const requirements = await getChatRequirements(config, resources);
     const response = await startFileConversation(
       config,
       prompt,
       requirements,
       conduitToken,
       requestMessageId,
-      references
+      references,
+      conversationOptions
     );
     const text = await readSseText(response);
     throwIfAborted(abortController.signal);
@@ -3058,6 +3371,7 @@ export async function generateFileWithChatGptWeb(params: {
 export const __testing__ = {
   prepareImageConversation,
   startImageGeneration,
+  getChatRequirements,
   getConversationText,
   extractQuotaAndRestoreAt,
   extractWebErrorPayloadMessage,

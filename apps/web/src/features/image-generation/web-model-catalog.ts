@@ -6,11 +6,11 @@
  * 的 POST 与历史 GET 验证了模型和全部 Work 档位；不保存会话数据或原始 HAR。
  */
 import {
+  GPT6_ASTRA_CHAT_MODEL,
   GPT55_CHAT_MODEL,
   GPT56_LUNA_CHAT_MODEL,
   GPT56_SOL_CHAT_MODEL,
   GPT56_TERRA_CHAT_MODEL,
-  GPT6_ASTRA_CHAT_MODEL,
   type ResponsesImageModel,
 } from "@repo/shared/config/subscription-plan";
 import type { ThinkingLevel } from "./types";
@@ -206,10 +206,12 @@ export type WorkWebModelRequest = {
   service_tier: "standard";
 };
 
-export type ImagesWebModelRequest = {
-  model: string;
-  thinking_effort?: "standard" | "extended" | "max";
-};
+export type ImagesWebModelRequest =
+  | {
+      model: string;
+      thinking_effort?: "standard" | "extended" | "max";
+    }
+  | WorkWebModelRequest;
 
 /**
  * 将已通过套餐校验的站内模型映射为 Work 请求参数，无副作用。
@@ -249,7 +251,8 @@ export function resolveWorkWebModel(
 /**
  * 为 Images 页面已验证的 GPT-5.5/Sol 模型选择实际提交参数，无副作用。
  * 低档和缺省使用已实测 standard：目录存在 min，但本组 Images HAR 未验证该档。
- * Astra/Terra/Luna 或自定义 slug 返回 null，不冒充有对应的 Images 预设。
+ * Astra/Terra/Luna 没有 Images 菜单别名，复用已实测 Work 主模型 slug，再由调用方
+ * 通过 picture_v2 请求生图；自定义 slug 仍返回 null。
  */
 export function resolveImagesWebModel(
   options: WebModelRequestOptions
@@ -261,7 +264,13 @@ export function resolveImagesWebModel(
       : apiModel === GPT56_SOL_CHAT_MODEL
         ? "5.6"
         : null;
-  if (!version) return null;
+  if (!version) {
+    return apiModel === GPT6_ASTRA_CHAT_MODEL ||
+      apiModel === GPT56_TERRA_CHAT_MODEL ||
+      apiModel === GPT56_LUNA_CHAT_MODEL
+      ? resolveWorkWebModel(options)
+      : null;
+  }
   const thinking = options.thinking;
   const preset =
     options.promptOptimization === false ||

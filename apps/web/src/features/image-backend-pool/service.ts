@@ -91,6 +91,10 @@ import type {
   ImageBackendRequestKind,
   ImagesUpstreamMode,
 } from "./types";
+import {
+  chatGptAccountIdFromAccessToken,
+  mergeChatGptAccountIdMetadata,
+} from "./web-account-metadata";
 
 const MANUAL_TOKEN_IMPORT_LIMIT = 10_000;
 const IMAGE_BACKEND_INFLIGHT_LEASE_TTL_MS = 30 * 60_000;
@@ -3140,7 +3144,10 @@ function toResolvedPoolConfig(
 
   const implementationMode = normalizeAccountBackend(member.implementationMode);
   const isResponsesBackend = implementationMode === "responses";
-  const chatgptAccountId = metadataString(member.metadata, "chatgptAccountId");
+  const chatgptAccountId =
+    (implementationMode === "web"
+      ? chatGptAccountIdFromAccessToken(member.accessToken)
+      : "") || metadataString(member.metadata, "chatgptAccountId");
 
   return {
     config: {
@@ -3161,7 +3168,9 @@ function toResolvedPoolConfig(
               ? { "chatgpt-account-id": chatgptAccountId }
               : {}),
           }
-        : undefined,
+        : chatgptAccountId
+          ? { "ChatGPT-Account-Id": chatgptAccountId }
+          : undefined,
       backend: {
         type: "pool-account",
         id: member.id,
@@ -3270,7 +3279,10 @@ async function resolvePoolMember(
     const fallback = await resolveAnyResponsesMember();
     if (fallback) return fallback;
     // 默认 Web 组同样保留已验权的组上下文，避免上层按被忽略的 Firefly 名称误报 Adobe 故障。
-    if (requestedGroup.explicit || getGroupBackendType(group.metadata) === "web") {
+    if (
+      requestedGroup.explicit ||
+      getGroupBackendType(group.metadata) === "web"
+    ) {
       throw new ImageBackendPoolUnavailableError(
         `生图后端分组「${group.name}」没有可用账号或 API`
       );
@@ -3729,11 +3741,17 @@ export async function refreshImageBackendAccountInfo(accountId: string) {
   }
 
   const now = new Date();
+  const chatgptAccountId =
+    chatGptAccountIdFromAccessToken(account.accessToken) ||
+    metadataString(account.metadata, "chatgptAccountId");
   try {
     const info = await getChatGptWebAccountInfo({
       baseUrl: "https://chatgpt.com",
       apiKey: account.accessToken,
       model: account.model || undefined,
+      headers: chatgptAccountId
+        ? { "ChatGPT-Account-Id": chatgptAccountId }
+        : undefined,
       backend: {
         type: "pool-account",
         id: account.id,
@@ -3744,7 +3762,14 @@ export async function refreshImageBackendAccountInfo(accountId: string) {
       .update(imageBackendAccount)
       .set({
         email: info.email || account.email,
-        metadata: mergeWebAccountMetadata(account.metadata, info),
+        metadata: mergeWebAccountMetadata(
+          mergeChatGptAccountIdMetadata(
+            account.metadata,
+            account.accessToken,
+            "web"
+          ),
+          info
+        ),
         status: "active",
         cooldownUntil:
           info.quota === 0 ? parseMetadataDate(info.restoreAt) : null,
@@ -4165,6 +4190,7 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
       ? undefined
       : input.refreshToken?.trim() || null;
   let existingPrimaryGroupId: string | null | undefined;
+  let existingMetadata: Record<string, unknown> | null | undefined;
 
   if (input.id) {
     const [existingAccount] = await db
@@ -4176,6 +4202,7 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
       .where(eq(imageBackendAccount.id, input.id))
       .limit(1);
     existingPrimaryGroupId = existingAccount?.groupId ?? null;
+    existingMetadata = existingAccount?.metadata;
     if (
       refreshToken !== undefined &&
       isSub2ApiBackedMetadata(existingAccount?.metadata)
@@ -4195,6 +4222,14 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
     accessToken = refreshed.accessToken;
     refreshToken = refreshed.refreshToken || refreshToken;
   }
+
+  const mergedInputMetadata = mergeChatGptAccountIdMetadata(
+    input.metadata !== undefined ? input.metadata : existingMetadata,
+    accessToken,
+    implementationMode
+  );
+  const shouldWriteMetadata =
+    input.metadata !== undefined || mergedInputMetadata !== existingMetadata;
 
   const updateBase = {
     name: input.name,
@@ -4218,7 +4253,7 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
     ...(input.lastErrorAt !== undefined
       ? { lastErrorAt: input.lastErrorAt }
       : {}),
-    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    ...(shouldWriteMetadata ? { metadata: mergedInputMetadata } : {}),
     ...(refreshToken !== undefined ? { refreshToken } : {}),
     updatedAt: new Date(),
   };
@@ -4259,6 +4294,7 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
     .select({
       id: imageBackendAccount.id,
       groupId: imageBackendAccount.groupId,
+      metadata: imageBackendAccount.metadata,
     })
     .from(imageBackendAccount)
     .where(
@@ -4269,8 +4305,16 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
     )
     .limit(1);
   if (existing) {
+    const duplicateMetadata = mergeChatGptAccountIdMetadata(
+      input.metadata !== undefined ? input.metadata : existing.metadata,
+      accessToken,
+      implementationMode
+    );
     const update = {
       ...updateBase,
+      ...(duplicateMetadata !== existing.metadata
+        ? { metadata: duplicateMetadata }
+        : {}),
       groupId: input.mergeGroupIds
         ? existing.groupId || primaryGroupId
         : primaryGroupId,
@@ -4412,6 +4456,11 @@ export async function bulkUpdateImageBackendAccounts(
           update.accessToken = refreshed.accessToken;
           update.credentialHash = hashBackendCredential(refreshed.accessToken);
           update.refreshToken = refreshed.refreshToken || account.refreshToken;
+          update.metadata = mergeChatGptAccountIdMetadata(
+            account.metadata,
+            refreshed.accessToken,
+            targetMode
+          );
         }
       }
       await db

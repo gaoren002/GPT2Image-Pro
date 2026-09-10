@@ -319,7 +319,9 @@ const dbMock = vi.hoisted(() => {
             }
           }
           rows = rows.map((row) =>
-            row.id === id ? { ...row, lastAcquiredAt: lockedLastAcquiredAt } : row
+            row.id === id
+              ? { ...row, lastAcquiredAt: lockedLastAcquiredAt }
+              : row
           );
         }
       }
@@ -482,12 +484,20 @@ vi.mock("@/features/image-generation/chatgpt-web", () => ({
   getChatGptWebAccountInfo: vi.fn(),
 }));
 
+import { getRuntimeSettingBoolean } from "@repo/shared/system-settings";
 import {
   reportImageBackendResult,
-  resolveImageBackendPoolConfig,
   resetImageBackendInflightForTests,
+  resolveImageBackendPoolConfig,
 } from "./service";
-import { getRuntimeSettingBoolean } from "@repo/shared/system-settings";
+
+function testJwt(payload: Record<string, unknown>) {
+  return [
+    Buffer.from('{"alg":"none"}').toString("base64url"),
+    Buffer.from(JSON.stringify(payload)).toString("base64url"),
+    "test-signature",
+  ].join(".");
+}
 
 function makeAccount(index: number) {
   return {
@@ -588,6 +598,57 @@ describe("image backend pool scheduler selection", () => {
     expect(dbMock.state.limitCalls.filter((call) => call.limit === 50)).toEqual(
       []
     );
+  });
+
+  it("propagates the imported ChatGPT workspace id to Web requests", async () => {
+    dbMock.state.groups[0] = {
+      ...dbMock.state.groups[0],
+      metadata: { backendType: "web" },
+    };
+    dbMock.state.accounts = [
+      {
+        ...makeAccount(1),
+        implementationMode: "web",
+        metadata: { chatgptAccountId: "workspace-1" },
+      },
+    ];
+
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+
+    expect(result?.config.headers).toEqual({
+      "ChatGPT-Account-Id": "workspace-1",
+    });
+  });
+
+  it("prefers the Web access token workspace claim for existing accounts", async () => {
+    dbMock.state.groups[0] = {
+      ...dbMock.state.groups[0],
+      metadata: { backendType: "web" },
+    };
+    dbMock.state.accounts = [
+      {
+        ...makeAccount(1),
+        accessToken: testJwt({
+          "https://api.openai.com/auth": {
+            chatgpt_account_id: "workspace-jwt",
+          },
+        }),
+        implementationMode: "web",
+        metadata: { chatgptAccountId: "workspace-stale" },
+      },
+    ];
+
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+
+    expect(result?.config.headers).toEqual({
+      "ChatGPT-Account-Id": "workspace-jwt",
+    });
   });
 
   it("reserves backend capacity during selection and skips saturated members", async () => {
@@ -1233,7 +1294,9 @@ describe("image backend pool scheduler selection", () => {
   });
 
   it.each([
-    ["Upstream Responses API returned HTTP 500: 没有可用token | invalid_request_error"],
+    [
+      "Upstream Responses API returned HTTP 500: 没有可用token | invalid_request_error",
+    ],
     ["Upstream Responses API returned HTTP 502: HTML response body. Check ..."],
   ])("marks dead-relay errors as error (sticky out): %s", async (errText) => {
     await reportImageBackendResult({
@@ -1246,7 +1309,10 @@ describe("image backend pool scheduler selection", () => {
     const update = dbMock.state.updates.find(
       (item) => item.tableName === "image_backend_api"
     );
-    expect(update?.values).toMatchObject({ status: "error", cooldownUntil: null });
+    expect(update?.values).toMatchObject({
+      status: "error",
+      cooldownUntil: null,
+    });
   });
 
   it("keeps an errored API out: a later success does not reactivate it", async () => {
@@ -1423,14 +1489,18 @@ describe("image backend pool scheduler selection", () => {
         requestKind: "image_generation",
       });
 
-      const picked = [first, second].map((r) => `${r?.memberType}:${r?.memberId}`);
+      const picked = [first, second].map(
+        (r) => `${r?.memberType}:${r?.memberId}`
+      );
       // 两个候选都被选中(并发各 1),证明 adobe 与 account 同池参与,adobe 未被排除。
       expect(picked).toContain("account:acct-1");
       expect(picked).toContain("adobe:adobe-1");
     });
 
     it("低优先级 adobe 仅作兜底:account 优先,account 饱和后才落 adobe", async () => {
-      dbMock.state.accounts = [{ ...makeAccount(1), priority: 1, concurrency: 1 }];
+      dbMock.state.accounts = [
+        { ...makeAccount(1), priority: 1, concurrency: 1 },
+      ];
       dbMock.state.adobes = [makeAdobe(1, { priority: 50 })];
 
       const first = await resolveImageBackendPoolConfig({

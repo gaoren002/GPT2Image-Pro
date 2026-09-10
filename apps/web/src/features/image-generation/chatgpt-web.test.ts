@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
   editImageWithChatGptWeb,
+  generateFileWithChatGptWeb,
   generateImageWithChatGptWeb,
 } from "./chatgpt-web";
 
@@ -13,6 +14,17 @@ vi.mock("@repo/shared/system-settings", () => ({
 }));
 
 vi.mock("@repo/shared/logger", () => ({ logError: vi.fn() }));
+
+function xorTurnstileProgram(program: unknown, key: string) {
+  const source = JSON.stringify(program);
+  let encoded = "";
+  for (let index = 0; index < source.length; index++) {
+    encoded += String.fromCharCode(
+      source.charCodeAt(index) ^ key.charCodeAt(index % key.length)
+    );
+  }
+  return Buffer.from(encoded).toString("base64");
+}
 
 describe("ChatGPT Web 抓包协议回归", () => {
   afterEach(() => {
@@ -25,6 +37,7 @@ describe("ChatGPT Web 抓包协议回归", () => {
       options: {
         gptModel: "gpt-6-astra",
         thinking: "xhigh" as const,
+        profile: "work" as const,
         systemHints: [],
       },
       expected: {
@@ -39,6 +52,7 @@ describe("ChatGPT Web 抓包协议回归", () => {
       options: {
         gptModel: "gpt-5.5",
         thinking: "none" as const,
+        profile: "work" as const,
         systemHints: [],
       },
       expected: {
@@ -50,7 +64,11 @@ describe("ChatGPT Web 抓包协议回归", () => {
       },
     },
     {
-      options: { gptModel: "gpt-5.6-sol", thinking: "xhigh" as const },
+      options: {
+        gptModel: "gpt-5.6-sol",
+        thinking: "xhigh" as const,
+        profile: "images" as const,
+      },
       expected: {
         model: "gpt-5-6-thinking",
         thinking_effort: "max",
@@ -58,8 +76,39 @@ describe("ChatGPT Web 抓包协议回归", () => {
       },
     },
     {
-      options: { gptModel: "gpt-5.5", thinking: "none" as const },
+      options: {
+        gptModel: "gpt-6-astra",
+        thinking: "high" as const,
+        profile: "images" as const,
+      },
+      expected: {
+        model: "gpt-6-astra-wm",
+        thinking_effort: "extended",
+        conversation_origin: "tpp",
+        service_tier: "standard",
+        system_hints: ["picture_v2"],
+      },
+    },
+    {
+      options: {
+        gptModel: "gpt-5.5",
+        thinking: "none" as const,
+        profile: "images" as const,
+      },
       expected: { model: "gpt-5-5-instant", system_hints: ["picture_v2"] },
+    },
+    {
+      options: {
+        gptModel: "gpt-5.6-sol",
+        thinking: "medium" as const,
+        profile: "images" as const,
+        systemHints: [],
+      },
+      expected: {
+        model: "gpt-5-6-thinking",
+        thinking_effort: "standard",
+        system_hints: [],
+      },
     },
   ])("prepare 与 submit 使用相同的已验证模型参数 $expected.model", async ({
     options,
@@ -71,12 +120,20 @@ describe("ChatGPT Web 抓包协议回归", () => {
       .mockResolvedValueOnce(Response.json({ conduit_token: "test-conduit" }))
       .mockResolvedValueOnce(new Response("data: [DONE]\n\n"));
     const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
-    const requestOptions = { ...options, requestMessageId: "test-request" };
-    const requirements = { token: "test-requirements" };
+    const requestOptions = {
+      ...options,
+      parentMessageId: "test-parent",
+      requestMessageId: "test-request",
+      turnTraceId: "test-turn-trace",
+    };
+    const requirements = {
+      token: "test-requirements",
+      proofToken: "test-proof",
+      turnstileToken: "test-turnstile",
+    };
     const conduit = await __testing__.prepareImageConversation(
       config,
       "测试",
-      requirements,
       requestOptions
     );
     await __testing__.startImageGeneration(
@@ -98,11 +155,355 @@ describe("ChatGPT Web 抓包协议回归", () => {
         expect(body).not.toHaveProperty("conversation_origin");
         expect(body).not.toHaveProperty("service_tier");
       }
+      expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("image_model");
     }
-    expect(
-      JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))
-        .force_parallel_switch
-    ).toBe("auto");
+    const prepareBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const submitBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    const responseContracts = [
+      {
+        id: "photo_upload_action.v1",
+        protocol_version: 1,
+        presets: ["cap:image", "cap:file", "placement:end"],
+      },
+    ];
+    expect(prepareBody).toMatchObject({
+      client_prepare_state: "none",
+      client_prepare_dispatch: "debounced",
+      client_prepare_source: "composer_editor_state",
+      local_function_names: ["local.continue_in_work"],
+      model_response_contracts: responseContracts,
+      client_contextual_info: {
+        app_name: "chatgpt.com",
+        has_web_push_capabilities: true,
+        web_push_notification_permission: "default",
+      },
+    });
+    expect(prepareBody).not.toHaveProperty("fork_from_shared_post");
+    expect(prepareBody).not.toHaveProperty("force_parallel_switch");
+    expect(prepareBody).not.toHaveProperty(
+      "paragen_cot_summary_display_override"
+    );
+    expect(prepareBody.partial_query.id).not.toBe(submitBody.messages[0].id);
+    expect(submitBody).toMatchObject({
+      client_prepare_state: "success",
+      force_parallel_switch: "auto",
+      paragen_cot_summary_display_override: "allow",
+      local_function_names: ["local.continue_in_work"],
+      model_response_contracts: responseContracts,
+      client_contextual_info: {
+        app_name: "chatgpt.com",
+        has_web_push_capabilities: true,
+        web_push_notification_permission: "default",
+      },
+    });
+    expect(submitBody).not.toHaveProperty("fork_from_shared_post");
+    expect(prepareBody.parent_message_id).toBe("test-parent");
+    expect(submitBody.parent_message_id).toBe("test-parent");
+    expect(submitBody.messages[0].metadata).toEqual({
+      ...(expected.system_hints.length
+        ? { system_hints: expected.system_hints }
+        : { selected_sources: [] }),
+      serialization_metadata: { custom_symbol_offsets: [] },
+      submission_mode: "manual_send",
+    });
+    const prepareHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    const submitHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(prepareHeaders.get("accept")).toBe("*/*");
+    expect(prepareHeaders.has("openai-sentinel-chat-requirements-token")).toBe(
+      false
+    );
+    expect(prepareHeaders.has("x-conduit-token")).toBe(false);
+    expect(prepareHeaders.get("x-oai-turn-trace-id")).toBe("test-turn-trace");
+    expect(prepareHeaders.get("oai-client-version")).toBe(
+      "prod-0161b0c50546a593fb298ade09215fe186023bb5"
+    );
+    expect(prepareHeaders.get("oai-client-build-number")).toBe("10493622");
+    expect(prepareHeaders.get("oai-genui-client-actions")).toBe(
+      "open_entity_detail"
+    );
+    expect(submitHeaders.get("accept")).toBe("text/event-stream");
+    expect(submitHeaders.get("openai-sentinel-chat-requirements-token")).toBe(
+      "test-requirements"
+    );
+    expect(submitHeaders.get("x-conduit-token")).toBe("test-conduit");
+    expect(submitHeaders.get("openai-sentinel-proof-token")).toBe("test-proof");
+    expect(submitHeaders.get("openai-sentinel-turnstile-token")).toBe(
+      "test-turnstile"
+    );
+    expect(submitHeaders.get("x-oai-turn-trace-id")).toBe("test-turn-trace");
+  });
+
+  it("按最新 Sentinel prepare/finalize 协议生成并回传挑战令牌", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    let requirementsToken = "";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        const requestUrl = String(url);
+        if (requestUrl.endsWith("/chat-requirements/prepare")) {
+          const body = JSON.parse(String(init?.body));
+          requirementsToken = body.p;
+          return Response.json({
+            prepare_token: "test-prepare-token",
+            proofofwork: {
+              required: true,
+              seed: "test-seed",
+              difficulty: "ffffffff",
+            },
+            turnstile: {
+              required: true,
+              dx: xorTurnstileProgram([[3, "test-turnstile"]], body.p),
+            },
+            so: { required: true },
+          });
+        }
+        if (requestUrl.endsWith("/chat-requirements/finalize")) {
+          return Response.json({ token: "test-chat-requirements-token" });
+        }
+        return new Response("unexpected request", { status: 500 });
+      });
+
+    const requirements = await __testing__.getChatRequirements(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "test-token",
+        headers: { "chatgpt-account-id": "test-workspace" },
+      },
+      {
+        scriptSources: ["https://chatgpt.com/backend-api/sentinel/sdk.js"],
+        dataBuild: "test-build",
+      }
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const prepareUrl = String(fetchMock.mock.calls[0]?.[0]);
+    const finalizeUrl = String(fetchMock.mock.calls[1]?.[0]);
+    expect(prepareUrl).toBe(
+      "https://chatgpt.com/backend-api/sentinel/chat-requirements/prepare"
+    );
+    expect(finalizeUrl).toBe(
+      "https://chatgpt.com/backend-api/sentinel/chat-requirements/finalize"
+    );
+    const prepareHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    const finalizeHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(prepareHeaders.get("accept")).toBe("*/*");
+    expect(finalizeHeaders.get("accept")).toBe("*/*");
+    expect(prepareHeaders.get("chatgpt-account-id")).toBe("test-workspace");
+    expect(finalizeHeaders.get("chatgpt-account-id")).toBe("test-workspace");
+    expect(requirementsToken.startsWith("gAAAAAC")).toBe(true);
+    const requirementsConfig = JSON.parse(
+      Buffer.from(requirementsToken.slice(7), "base64").toString("utf8")
+    );
+    expect(requirementsConfig).toHaveLength(25);
+    expect(requirementsConfig[0]).toBe(4000);
+    expect(requirementsConfig[1]).toContain("GMT+0800 (中国标准时间)");
+    expect(requirementsConfig[2]).toBe(4294705152);
+    expect(requirementsConfig[3]).toBe(1);
+    expect(requirementsConfig[7]).toBe("zh-CN");
+    expect(requirementsConfig[8]).toBe("zh-CN,zh,en,en-US");
+    expect(requirementsConfig[16]).toBe(8);
+    expect(requirementsConfig.slice(18)).toEqual(Array(7).fill(0));
+
+    const finalizeBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(finalizeBody).toEqual({
+      prepare_token: "test-prepare-token",
+      proofofwork: expect.stringMatching(/^gAAAAAB.+~S$/),
+      turnstile: Buffer.from("test-turnstile").toString("base64"),
+    });
+    expect(finalizeBody).not.toHaveProperty("proof_token");
+    expect(finalizeBody).not.toHaveProperty("turnstile_token");
+    const proofConfig = JSON.parse(
+      Buffer.from(finalizeBody.proofofwork.slice(7, -2), "base64").toString(
+        "utf8"
+      )
+    );
+    expect(proofConfig).toHaveLength(25);
+    expect(proofConfig[2]).toBe(4294705152);
+    expect(proofConfig[3]).toBe(0);
+    expect(proofConfig[14]).toBe(requirementsConfig[14]);
+    expect(requirements).toEqual({
+      token: "test-chat-requirements-token",
+      proofToken: finalizeBody.proofofwork,
+      turnstileToken: finalizeBody.turnstile,
+      soToken: undefined,
+    });
+  });
+
+  it("必需的 Turnstile 无法解算时停止在 finalize 之前", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        prepare_token: "test-prepare-token",
+        proofofwork: { required: false },
+        turnstile: { required: true, dx: "invalid-dx" },
+      })
+    );
+
+    await expect(
+      __testing__.getChatRequirements(
+        { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+        {
+          scriptSources: ["https://chatgpt.com/backend-api/sentinel/sdk.js"],
+          dataBuild: "test-build",
+        }
+      )
+    ).rejects.toThrow("Turnstile challenge failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("PoW challenge 字段非法时停止在 finalize 之前", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        prepare_token: "test-prepare-token",
+        proofofwork: {
+          required: true,
+          seed: "test-seed",
+          difficulty: "not-hex",
+        },
+        turnstile: { required: false },
+      })
+    );
+
+    await expect(
+      __testing__.getChatRequirements(
+        { baseUrl: "https://chatgpt.com", apiKey: "invalid-pow-token" },
+        {
+          scriptSources: ["https://chatgpt.com/backend-api/sentinel/sdk.js"],
+          dataBuild: "test-build",
+        }
+      )
+    ).rejects.toThrow("proof challenge is incomplete");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("直连请求按账号延续 Sentinel oai-sc cookie", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const cookies = new Map<string, string | null>();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        const requestUrl = String(url);
+        const cookie = new Headers(init?.headers).get("cookie");
+        if (requestUrl.endsWith("/backend-api/f/conversation/prepare")) {
+          cookies.set("conversation-prepare", cookie);
+          return Response.json({ conduit_token: "test-conduit" });
+        }
+        if (requestUrl.endsWith("/chat-requirements/prepare")) {
+          cookies.set("requirements-prepare", cookie);
+          return Response.json(
+            {
+              prepare_token: "test-prepare-token",
+              proofofwork: { required: false },
+              turnstile: { required: false },
+            },
+            {
+              headers: {
+                "Set-Cookie": "oai-sc=requirements-state; Path=/; HttpOnly",
+              },
+            }
+          );
+        }
+        if (requestUrl.endsWith("/chat-requirements/finalize")) {
+          cookies.set("requirements-finalize", cookie);
+          return Response.json(
+            { token: "test-chat-requirements-token" },
+            { headers: { "Set-Cookie": "oai-sc=finalize-state; Path=/" } }
+          );
+        }
+        if (requestUrl.endsWith("/backend-api/f/conversation")) {
+          cookies.set("conversation-submit", cookie);
+          return new Response("data: [DONE]\n\n");
+        }
+        return new Response("unexpected request", { status: 500 });
+      });
+    const config = {
+      baseUrl: "https://chatgpt.com",
+      apiKey: "cookie-test-token",
+    };
+    const options = {
+      gptModel: "gpt-5.5",
+      thinking: "medium" as const,
+      profile: "images" as const,
+      parentMessageId: "test-parent",
+      requestMessageId: "test-request",
+      turnTraceId: "test-turn-trace",
+    };
+
+    const conduitToken = await __testing__.prepareImageConversation(
+      config,
+      "测试",
+      options
+    );
+    const requirements = await __testing__.getChatRequirements(config, {
+      scriptSources: ["https://chatgpt.com/backend-api/sentinel/sdk.js"],
+      dataBuild: "test-build",
+    });
+    await __testing__.startImageGeneration(
+      config,
+      "测试",
+      requirements,
+      conduitToken,
+      options,
+      []
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(cookies).toEqual(
+      new Map([
+        ["conversation-prepare", null],
+        ["requirements-prepare", null],
+        ["requirements-finalize", "oai-sc=requirements-state"],
+        ["conversation-submit", "oai-sc=finalize-state"],
+      ])
+    );
+  });
+
+  it("access token 前缀相同时仍隔离直连 cookie 会话", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const cookies: Array<string | null> = [];
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        cookies.push(new Headers(init?.headers).get("cookie"));
+        if (String(url).endsWith("/chat-requirements/prepare")) {
+          return Response.json(
+            {
+              prepare_token: "test-prepare-token",
+              proofofwork: { required: false },
+              turnstile: { required: false },
+            },
+            cookies.length === 1
+              ? { headers: { "Set-Cookie": "oai-sc=first-account; Path=/" } }
+              : undefined
+          );
+        }
+        return Response.json({ token: "test-requirements-token" });
+      });
+    const sharedPrefix = "same-jwt-prefix".padEnd(24, "x");
+    const resources = {
+      scriptSources: ["https://chatgpt.com/backend-api/sentinel/sdk.js"],
+      dataBuild: "test-build",
+    };
+
+    await __testing__.getChatRequirements(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: `${sharedPrefix}-account-one`,
+      },
+      resources
+    );
+    await __testing__.getChatRequirements(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: `${sharedPrefix}-account-two`,
+      },
+      resources
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(cookies).toEqual([null, "oai-sc=first-account", null, null]);
   });
 
   it("优先读取新版 conversations 消息列表", async () => {
@@ -175,11 +576,24 @@ describe("ChatGPT Web image choices", () => {
     vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) =>
-        String(url) === "https://chatgpt.com/"
+      .mockImplementation(async (url) => {
+        const requestUrl = String(url);
+        if (requestUrl.endsWith("/backend-api/f/conversation/prepare")) {
+          return Response.json({ conduit_token: "test-conduit" });
+        }
+        if (
+          requestUrl.endsWith("/backend-api/sentinel/chat-requirements/prepare")
+        ) {
+          return Response.json({
+            prepare_token: "test-prepare",
+            proofofwork: { required: false },
+            turnstile: { required: false },
+          });
+        }
+        return requestUrl === "https://chatgpt.com/"
           ? new Response("<html></html>")
-          : new Response("mock upstream unauthorized", { status: 401 })
-      );
+          : new Response("mock upstream unauthorized", { status: 401 });
+      });
     try {
       const config = { baseUrl: "https://chatgpt.com", apiKey: "test-token" };
       const results = await Promise.all([
@@ -211,6 +625,25 @@ describe("ChatGPT Web image choices", () => {
           String(url).includes("/backend-api/files")
         )
       ).toBe(true);
+      const prepareIndex = fetchMock.mock.calls.findIndex(([url]) =>
+        String(url).endsWith("/backend-api/f/conversation/prepare")
+      );
+      const requirementsIndex = fetchMock.mock.calls.findIndex(([url]) =>
+        String(url).endsWith("/backend-api/sentinel/chat-requirements/prepare")
+      );
+      const finalizeIndex = fetchMock.mock.calls.findIndex(([url]) =>
+        String(url).endsWith("/backend-api/sentinel/chat-requirements/finalize")
+      );
+      expect(prepareIndex).toBeGreaterThanOrEqual(0);
+      expect(requirementsIndex).toBeGreaterThan(prepareIndex);
+      expect(finalizeIndex).toBeGreaterThan(requirementsIndex);
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) =>
+            String(url) ===
+            "https://chatgpt.com/backend-api/sentinel/chat-requirements"
+        )
+      ).toBe(false);
     } finally {
       fetchMock.mockRestore();
       vi.unstubAllEnvs();
@@ -540,6 +973,80 @@ describe("ChatGPT Web image choices", () => {
 });
 
 describe("ChatGPT Web editable file (ppt/psd)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("文件入口按 bootstrap、prepare、Sentinel、submit 顺序复用会话标识", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          '<html data-build="test-build"><script src="/backend-api/sentinel/sdk.js"></script></html>'
+        )
+      )
+      .mockResolvedValueOnce(Response.json({ conduit_token: "file-conduit" }))
+      .mockResolvedValueOnce(
+        Response.json({
+          prepare_token: "file-prepare-token",
+          proofofwork: { required: false },
+          turnstile: { required: false },
+        })
+      )
+      .mockResolvedValueOnce(Response.json({ token: "file-requirements" }))
+      .mockResolvedValueOnce(new Response("data: [DONE]\n\n"));
+    const config = {
+      baseUrl: "https://chatgpt.com",
+      apiKey: "editable-envelope-token",
+    };
+
+    await expect(
+      generateFileWithChatGptWeb({
+        config,
+        kind: "ppt",
+        prompt: "制作文件",
+        images: [],
+      })
+    ).rejects.toThrow("无 conversation_id");
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://chatgpt.com/",
+      "https://chatgpt.com/backend-api/f/conversation/prepare",
+      "https://chatgpt.com/backend-api/sentinel/chat-requirements/prepare",
+      "https://chatgpt.com/backend-api/sentinel/chat-requirements/finalize",
+      "https://chatgpt.com/backend-api/f/conversation",
+    ]);
+    const prepareInit = fetchMock.mock.calls[1]?.[1];
+    const submitInit = fetchMock.mock.calls[4]?.[1];
+    const prepareHeaders = new Headers(prepareInit?.headers);
+    const submitHeaders = new Headers(submitInit?.headers);
+    const prepareBody = JSON.parse(String(prepareInit?.body));
+    const submitBody = JSON.parse(String(submitInit?.body));
+
+    expect(prepareHeaders.get("accept")).toBe("*/*");
+    expect(
+      prepareHeaders.get("openai-sentinel-chat-requirements-token")
+    ).toBeNull();
+    expect(prepareHeaders.get("x-conduit-token")).toBeNull();
+    expect(submitHeaders.get("accept")).toBe("text/event-stream");
+    expect(submitHeaders.get("x-oai-turn-trace-id")).toBe(
+      prepareHeaders.get("x-oai-turn-trace-id")
+    );
+    expect(submitHeaders.get("x-conduit-token")).toBe("file-conduit");
+    expect(submitHeaders.get("openai-sentinel-chat-requirements-token")).toBe(
+      "file-requirements"
+    );
+    expect(submitBody.parent_message_id).toBe(prepareBody.parent_message_id);
+    expect(prepareBody.partial_query.id).not.toBe(submitBody.messages[0].id);
+    expect(prepareBody.client_prepare_state).toBe("none");
+    expect(prepareBody.client_prepare_dispatch).toBe("debounced");
+    expect(prepareBody.client_prepare_source).toBe("composer_editor_state");
+    expect(submitBody.client_prepare_state).toBe("success");
+    expect(prepareBody).not.toHaveProperty("fork_from_shared_post");
+  });
+
   it("extracts primary + zip artifacts from metadata.attachments", () => {
     const conversation = {
       current_node: "asst_1",

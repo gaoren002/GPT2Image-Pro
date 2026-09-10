@@ -209,9 +209,19 @@ describe("verified Images Web presets", () => {
   });
 
   it.each([
-    "gpt-6-astra",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
+    ["gpt-6-astra", "gpt-6-astra-wm"],
+    ["gpt-5.6-terra", "gpt-5.6-terra-wm"],
+    ["gpt-5.6-luna", "gpt-5.6-luna-wm"],
+  ])("uses the verified Work main-model slug for %s", (gptModel, model) => {
+    expect(resolveImagesWebModel({ gptModel, thinking: "high" })).toEqual({
+      model,
+      thinking_effort: "extended",
+      conversation_origin: "tpp",
+      service_tier: "standard",
+    });
+  });
+
+  it.each([
     "custom-web-model",
     "gpt-6-pro",
   ])("does not fabricate an Images alias for %s", (gptModel) => {

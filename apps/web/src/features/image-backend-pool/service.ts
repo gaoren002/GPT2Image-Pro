@@ -625,17 +625,23 @@ function parseDurationMs(value: string) {
     return Number.parseFloat(trimmed) * 24 * 60 * 60_000;
   }
   const parts = [
-    ...trimmed.matchAll(/(\d+(?:\.\d+)?)\s*(ms|s|m|h|d|day|days)/g),
+    ...trimmed.matchAll(
+      /(\d+(?:\.\d+)?)\s*(ms|毫秒|小时|分钟|秒|分|时|天|s|m|h|d|day|days)/g
+    ),
   ];
   if (!parts.length) return null;
   const total = parts.reduce((sum, match) => {
     const amount = Number.parseFloat(match[1] || "0");
     const unit = match[2];
-    if (unit === "ms") return sum + amount;
-    if (unit === "s") return sum + amount * 1000;
-    if (unit === "m") return sum + amount * 60_000;
-    if (unit === "h") return sum + amount * 60 * 60_000;
-    if (unit === "d" || unit === "day" || unit === "days") {
+    if (unit === "ms" || unit === "毫秒") return sum + amount;
+    if (unit === "s" || unit === "秒") return sum + amount * 1000;
+    if (unit === "m" || unit === "分" || unit === "分钟") {
+      return sum + amount * 60_000;
+    }
+    if (unit === "h" || unit === "时" || unit === "小时") {
+      return sum + amount * 60 * 60_000;
+    }
+    if (unit === "d" || unit === "day" || unit === "days" || unit === "天") {
       return sum + amount * 24 * 60 * 60_000;
     }
     return sum;
@@ -1351,6 +1357,32 @@ function isLocalAbortTimeoutError(error?: string | null) {
 }
 
 /**
+ * 识别 ChatGPT 中文界面返回的账号级图像额度上限。
+ *
+ * 该响应可能只是普通助手文本而没有 HTTP 429 或英文错误码，因此同时要求出现
+ * 图像生成语义与明确的请求/次数/额度耗尽语义，避免把一般中文错误误判为限流。
+ */
+function isChatGptImageQuotaLimitBackendError(error?: string | null) {
+  const normalized = (error || "").toLowerCase();
+  const mentionsImageGeneration =
+    normalized.includes("图像生成") || normalized.includes("图片生成");
+  const mentionsExhaustedQuota =
+    normalized.includes("请求上限") ||
+    normalized.includes("请求已达上限") ||
+    normalized.includes("请求达到上限") ||
+    normalized.includes("次数上限") ||
+    normalized.includes("次数已达上限") ||
+    normalized.includes("使用上限") ||
+    normalized.includes("额度上限") ||
+    ((normalized.includes("额度") || normalized.includes("次数")) &&
+      (normalized.includes("用尽") ||
+        normalized.includes("耗尽") ||
+        normalized.includes("已达到") ||
+        normalized.includes("已达")));
+  return mentionsImageGeneration && mentionsExhaustedQuota;
+}
+
+/**
  * 识别"上游模型缺少 image_generation 工具 / 不具备出图能力"导致只回文字的错误。
  *
  * WHY 单列：这类响应往往以"抱歉…我无法…"开头，会被内容安全拒绝启发式
@@ -1365,6 +1397,8 @@ function isLocalAbortTimeoutError(error?: string | null) {
  * @returns 是否为"后端缺少出图能力"类错误。
  */
 export function isMissingImageToolBackendError(error?: string | null) {
+  // 明确的工具限流代表账号具备工具能力，只是额度暂不可用，不能永久踢出。
+  if (isToolRateLimitBackendError(error)) return false;
   const normalized = (error || "").toLowerCase();
   const mentionsImageTool =
     normalized.includes("图像生成工具") ||
@@ -1468,6 +1502,8 @@ export function isGroupDisabledBackendError(error?: string | null) {
 }
 
 function isUserRequestBackendError(error?: string | null) {
+  // 账号额度耗尽属于可切换的后端状态，不能被助手拒绝文案误判成用户内容问题。
+  if (isToolRateLimitBackendError(error)) return false;
   // 缺图像工具是后端能力问题（非用户内容拒绝）：放行去走"可切换 + 标记 error"，
   // 否则会被下方 isApologyRefusal 误判成用户拒绝而当场失败、不切换。
   if (isMissingImageToolBackendError(error)) return false;
@@ -1579,6 +1615,7 @@ function isInvalidBackendCredentialError(error?: string | null) {
 function isUsageLimitBackendError(error?: string | null) {
   const normalized = (error || "").toLowerCase();
   return (
+    isChatGptImageQuotaLimitBackendError(error) ||
     normalized.includes("usage limit") ||
     normalized.includes("usage_limit") ||
     normalized.includes("limit has been reached") ||
@@ -1607,18 +1644,16 @@ function isUsageLimitBackendError(error?: string | null) {
 }
 
 /**
- * 识别 ChatGPT 账号侧"画图工具被限流"——image_gen.text2im 工具级 RateLimitException。
+ * 识别 ChatGPT 账号侧的画图额度限流。
  *
- * WHY 单列:ChatGPT 在该账号画图额度用满时不会返回图片,而是回一条
- * content_type=system_error、name=ChatGPTAgentToolRateLimitException 的消息
- * (chatgpt-web.ts 的 extractWebSystemError 已把它从 o/v 流里抽成错误文案)。它是
- * 账号级的滚动限流、恢复快,必须按限流处理(短冷却 + 换号重试),不能被当成
- * 通用 "no image output" 落进 15 分钟临时桶,也利于 SLA 把它归类为限流而非平台故障。
- * "ratelimitexception"(小写)即可命中 ChatGPTAgentToolRateLimitException。
+ * ChatGPT 可能返回 image_gen.text2im 的 RateLimitException，也可能只返回中文
+ * 助手提示且没有错误码。两种形式都表示账号暂时无额度，应按上游重置时间冷却并
+ * 换号重试，不能归为缺少工具或普通 no-image 故障。
  */
 function isToolRateLimitBackendError(error?: string | null) {
   const normalized = (error || "").toLowerCase();
   return (
+    isChatGptImageQuotaLimitBackendError(error) ||
     normalized.includes("ratelimitexception") ||
     (normalized.includes("image_gen.text2im") &&
       (normalized.includes("right now") || normalized.includes("rate limit")))
@@ -1757,6 +1792,18 @@ function parseResetDateFromError(error?: string | null) {
     if (parsed) return parsed;
   }
 
+  const chineseProseMatch = normalized.match(
+    /(?:将在|将于|在)\s*((?:\d+(?:\.\d+)?\s*(?:天|小时|分钟|分|秒)\s*(?:和|又)?\s*)+?)(?:后)?(?:重置|恢复)/
+  )?.[1];
+  const chineseProseReset = parseDateValue(chineseProseMatch);
+  if (chineseProseReset) return chineseProseReset;
+
+  const chineseRetryMatch = normalized.match(
+    /(?:请\s*)?(?:在\s*)?((?:\d+(?:\.\d+)?\s*(?:天|小时|分钟|分|秒)\s*(?:和|又)?\s*)+?)(?:后|内)(?:再)?(?:重试|尝试)/
+  )?.[1];
+  const chineseRetryReset = parseDateValue(chineseRetryMatch);
+  if (chineseRetryReset) return chineseRetryReset;
+
   const proseMatch = normalized.match(
     /(?:reset|resets|restore|available again|try again)(?:\s+\w+){0,4}\s+(?:at|after|on|in)[:\s]+([^"',}\]\n]+)/i
   )?.[1];
@@ -1845,6 +1892,22 @@ export async function classifyFailure(
   cooldownUntil?: Date | null;
 }> {
   const normalized = (error || "").toLowerCase();
+  // 明确的 ChatGPT 工具限流优先于拒绝、缺工具及自定义终态关键词判断。
+  // 中文本地化提示可能同时含“无法调用图像生成工具”，但账号实际具备该能力。
+  if (isToolRateLimitBackendError(error)) {
+    const minutes = await getBackendCooldownMinutes(
+      "IMAGE_BACKEND_TOOL_RATE_LIMIT_COOLDOWN_MINUTES"
+    );
+    return {
+      status: "limited",
+      cooldownUntil: resolveCooldownDate(
+        error || null,
+        cooldownFromMinutes(minutes),
+        input,
+        { useUpstreamReset: true }
+      ),
+    };
+  }
   if (isUserRequestBackendError(error)) {
     return {};
   }
@@ -1870,24 +1933,6 @@ export async function classifyFailure(
     isInvalidBackendCredentialError(error)
   ) {
     return { status: "error", cooldownUntil: null };
-  }
-  // ChatGPT 画图工具级限流(image_gen.text2im / ChatGPTAgentToolRateLimitException):
-  // 账号级滚动限流、恢复快,按限流标 limited(管理后台可见)+ 独立短冷却(默认 3 分钟),
-  // 上游若给出 reset 时间则优先。仍属可切换错误(见 isRecoverableBackendError),换号重试。
-  // 放在 usage-limit 之前:即便文案同时带通用 "limit" 字样,也走 3 分钟工具桶而非 15 分钟额度桶。
-  if (isToolRateLimitBackendError(error)) {
-    const minutes = await getBackendCooldownMinutes(
-      "IMAGE_BACKEND_TOOL_RATE_LIMIT_COOLDOWN_MINUTES"
-    );
-    return {
-      status: "limited",
-      cooldownUntil: resolveCooldownDate(
-        error || null,
-        cooldownFromMinutes(minutes),
-        input,
-        { useUpstreamReset: true }
-      ),
-    };
   }
   if (isUsageLimitBackendError(error)) {
     const minutes = await getBackendCooldownMinutes(

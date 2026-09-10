@@ -367,6 +367,49 @@ describe("image backend error classification", () => {
     expect(remainMin).toBeLessThan(22 * 60);
   });
 
+  it("把中文 ChatGPT 生图额度上限归类为 limited,并按文案中的小时数冷却", async () => {
+    const svc = await loadService();
+    const err =
+      "你已达到 Free 套餐的图像生成请求上限。上限将在 22小时 后重置。";
+
+    expect(svc.isImageBackendSwitchableError(err)).toBe(true);
+    const failure = await svc.classifyFailure(err);
+    expect(failure.status).toBe("limited");
+    expect(failure.cooldownUntil).toBeInstanceOf(Date);
+    const remainMin =
+      ((failure.cooldownUntil as Date).getTime() - Date.now()) / 60_000;
+    expect(remainMin).toBeGreaterThan(21 * 60 + 55);
+    expect(remainMin).toBeLessThanOrEqual(22 * 60);
+  });
+
+  it("中文额度提示即使包含无法调用图像工具,也不归为缺少工具的永久错误", async () => {
+    const svc = await loadService();
+    const err =
+      "ChatGPTAgentToolRateLimitException：目前无法调用图像生成工具。你已达到 Free 套餐的图像生成请求上限，上限将在 21小时26分钟后重置。";
+
+    expect(svc.isMissingImageToolBackendError(err)).toBe(false);
+    expect(svc.isImageBackendSwitchableError(err)).toBe(true);
+    const failure = await svc.classifyFailure(err);
+    expect(failure.status).toBe("limited");
+    const remainMin =
+      ((failure.cooldownUntil as Date).getTime() - Date.now()) / 60_000;
+    expect(remainMin).toBeGreaterThan(21 * 60 + 20);
+    expect(remainMin).toBeLessThanOrEqual(21 * 60 + 26);
+  });
+
+  it("从中文文件上传 429 文案解析真实重试小时数", async () => {
+    const svc = await loadService();
+    const err =
+      "ChatGPT Web file upload failed (429)：你已达到文件上传上限。请23小时内重试。";
+
+    const failure = await svc.classifyFailure(err);
+    expect(failure.status).toBe("active");
+    const remainMin =
+      ((failure.cooldownUntil as Date).getTime() - Date.now()) / 60_000;
+    expect(remainMin).toBeGreaterThan(22 * 60 + 55);
+    expect(remainMin).toBeLessThanOrEqual(23 * 60);
+  });
+
   it("上游不可用 502(service temporarily unavailable)标 error 踢出,且仍可换号重试", async () => {
     const svc = await loadService();
     const err =

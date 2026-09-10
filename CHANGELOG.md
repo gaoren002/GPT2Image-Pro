@@ -33,7 +33,7 @@
 
 - **ChatGPT Web 新协议兼容**：按最新 HAR 对齐 Sentinel prepare/finalize、PoW、Turnstile、workspace 请求头、模型 slug、思考档位、会话消息列表、历史续接及多图选择元数据，修复协议变化造成的无图、模型错配和续接失败。
 - **额度状态误判**：只检查当前请求后的已完成 assistant/tool 节点，忽略用户提示词、历史消息和 analysis；同一响应已有图片时优先返回图片。额度账号标记为 `limited`，不再因“无法调用图像生成工具”被永久记为 `error`。
-- **输出分辨率与超分依赖**：完整执行请求尺寸校准，并补齐 standalone/Docker 中 Worker 所需的 Next.js、Sharp 与 ONNX Runtime 依赖。
+- **输出分辨率与超分依赖**：功能开启时完整执行请求尺寸校准，并补齐 standalone/Docker 中 Worker 所需的 Next.js、Sharp 与 ONNX Runtime 依赖。
 - **报价与账单一致性**：Mixed 分组按预测子组展示有效积分倍率，账单筛选在分页前执行，套餐详情在首页、购买页和账单页保持一致。
 - **图片保留策略展示**：营销页读取实际配置的图片保留策略，避免静态文案与后台设置不一致。
 - **构建与样式稳定性**：修复全局样式层括号损坏、Skeleton 缺少工具函数导入及现有 Biome 阻断错误。

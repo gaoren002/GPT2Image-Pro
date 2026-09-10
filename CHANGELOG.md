@@ -4,9 +4,46 @@
 
 ## 未发布
 
+## v0.9.0 (2026-09-10)
+
+本版将默认图片模型升级至 GPT Image 2.5，重建文本模型权限与 ChatGPT Web 模型映射，并集中改善 Web 生图的协议兼容、额度切换速度、计费展示和部署稳定性。
+
+### 新增
+
+- **GPT Image 2.5 成为默认图片模型**：新增 `gpt-image-2.5`、`gpt-image-2.5-sunburst` 和 `gpt-image-2.5-flare`；默认别名向 Images API 和 Responses 图像工具出站时解析为 Sunburst，同时保留 `gpt-image-2` 供兼容调用。
+- **新增更高质量档位**：GPT Image 2.5 支持 `xhigh` 和 `max`，创作页及 Images、Chat Completions、Responses 等接口使用同一套参数校验。
+- **更新文本主模型目录**：GPT-5.5 成为基础模型；Ultra 及以上套餐新增 GPT-6 Astra、GPT-5.6 Sol、GPT-5.6 Terra 和 GPT-5.6 Luna。具备相应接口权限但未解锁高级模型的用户仅可使用 GPT-5.5。
+- **ChatGPT Web 主模型选择**：按实测的 Work 与 Images 模型目录映射主模型及推理强度，支持 GPT-5.5、GPT-6 Astra 和三款 GPT-5.6 模型。
+- **Chat Completions 可使用 Images 上游**：自定义 API 和池 API 新增原生 Images 模式，可将适用的 Chat 请求转换为图片生成或编辑请求。
+- **注册与支付配置**：新增注册邮箱域名白名单及邮箱别名限制；易支付支持套餐续购；积分包支持中文名称与说明；管理员是否允许给自己充值可由站长控制。
+
+### 变更
+
+- **纯 Web 分组统一使用 2.5**：纯 ChatGPT Web 分组忽略客户端传入的图片版本，统一路由到 GPT Image 2.5；文本主模型仍可独立选择，生成记录、报价和实际执行使用同一解析结果。Adobe 与 Mixed 分组继续使用各自路由规则。
+- **旗舰模型权限调整**：GPT-6 Astra 与三款 GPT-5.6 模型归入旗舰能力，GPT-5.5 作为基础文本模型；站内选择器、`/v1/models`、Chat Completions 与 Responses 权限保持一致。原 `models.gpt55` 设置会兼容迁移到 `models.premium`。
+- **界面规格统一**：统一营销区、创作页、设置页、管理后台、标签页、骨架屏、套餐徽章与交互动效，补齐深色主题和减少动画偏好支持。
+
 ### 性能
 
+- **额度耗尽快速切换**：ChatGPT Web 的中文、英文额度终稿和工具限流可从 SSE 或首次会话快照立即识别，按真实重置时间冷却并切换账号；常见额度失败由约 5 分钟缩短到数秒，未知无图请求不再连续等待两个 120 秒窗口。
 - **Real-ESRGAN 独立 Worker**:超分 ONNX 推理从 Next.js 页面/API 进程迁移到独立 HTTP Worker，两个 Web 实例共享单并发队列；32 核生产节点默认允许 ONNX 使用 24 线程，配合 `CPUQuota=2400%` 与低调度优先级保留页面响应能力。Worker 失败仍回退原图，不阻断出图。
+- **图片维护任务全量收敛**：定时维护取消默认 500 条限制，单轮处理全部目标记录；显式指定 `limit` 的调用仍可限量。
+
+### 修复
+
+- **ChatGPT Web 新协议兼容**：按最新 HAR 对齐 Sentinel prepare/finalize、PoW、Turnstile、workspace 请求头、模型 slug、思考档位、会话消息列表、历史续接及多图选择元数据，修复协议变化造成的无图、模型错配和续接失败。
+- **额度状态误判**：只检查当前请求后的已完成 assistant/tool 节点，忽略用户提示词、历史消息和 analysis；同一响应已有图片时优先返回图片。额度账号标记为 `limited`，不再因“无法调用图像生成工具”被永久记为 `error`。
+- **输出分辨率与超分依赖**：完整执行请求尺寸校准，并补齐 standalone/Docker 中 Worker 所需的 Next.js、Sharp 与 ONNX Runtime 依赖。
+- **报价与账单一致性**：Mixed 分组按预测子组展示有效积分倍率，账单筛选在分页前执行，套餐详情在首页、购买页和账单页保持一致。
+- **图片保留策略展示**：营销页读取实际配置的图片保留策略，避免静态文案与后台设置不一致。
+- **构建与样式稳定性**：修复全局样式层括号损坏、Skeleton 缺少工具函数导入及现有 Biome 阻断错误。
+
+### 升级说明
+
+- 本版本不包含数据库迁移。
+- Docker Compose 新增 `super-resolution-worker` 服务。源码部署若启用分辨率超分，需要配置并启动该 Worker；Worker 不可用时仍会回退原图。
+- 文本模型白名单已移除 GPT-5.4、GPT-5.4 Mini、GPT-5.2 及 GPT-5.3 Codex 系列；调用方应改用 GPT-5.5，或在具备旗舰权限时使用 GPT-6 Astra 与 GPT-5.6 系列。
+- Chat Completions 的 Images 上游模式适用于单轮、非 Agent、无历史记录的请求；多轮、Agent 和原样 Responses 请求继续使用对应上游。
 
 ## v0.8.3 (2026-07-31)
 

@@ -219,6 +219,8 @@ docker compose up -d
 
 `GPT2IMAGE_IMAGE_TAG` 同时控制 Web、数据库迁移、超分 Worker 和两个 sidecar 的镜像版本。升级时不要只改其中一个镜像；让所有服务使用同一个 tag，避免 Web 新版本启动但迁移任务或 sidecar 仍停留在旧版本。
 
+镜像命名空间由 `GPT2IMAGE_IMAGE_NAMESPACE` 控制，默认是 `gaoren002`。如需用新版 compose 回滚到 v0.8.3 或更早版本，请同时设为 `meowfree`。
+
 启动后查看状态：
 
 ```bash

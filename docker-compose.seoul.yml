@@ -29,7 +29,7 @@ services:
     logging: *default-logging
 
   migrate:
-    image: ghcr.io/gaoren002/gpt2image-pro-migrate:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
+    image: ghcr.io/${GPT2IMAGE_IMAGE_NAMESPACE:-gaoren002}/gpt2image-pro-migrate:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
     env_file:
       - ${GPT2IMAGE_ENV_FILE:-.env}
     environment:
@@ -43,7 +43,7 @@ services:
     logging: *default-logging
 
   web:
-    image: ghcr.io/gaoren002/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
+    image: ghcr.io/${GPT2IMAGE_IMAGE_NAMESPACE:-gaoren002}/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
     restart: unless-stopped
     init: true
     env_file:
@@ -84,7 +84,7 @@ services:
     logging: *default-logging
 
   super-resolution-worker:
-    image: ghcr.io/gaoren002/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
+    image: ghcr.io/${GPT2IMAGE_IMAGE_NAMESPACE:-gaoren002}/gpt2image-pro-web:${GPT2IMAGE_IMAGE_TAG:?GPT2IMAGE_IMAGE_TAG is required}
     restart: unless-stopped
     init: true
     env_file:

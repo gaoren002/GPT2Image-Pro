@@ -41,7 +41,7 @@
 ### 升级说明
 
 - 本版本不包含数据库迁移。
-- GHCR 镜像随仓库迁移改为 `ghcr.io/gaoren002/*`；旧 `ghcr.io/meowfree/*` 镜像停留在既有版本。使用 Docker Compose 升级时请先获取本版 compose 文件或发布附件。
+- GHCR 镜像随仓库迁移改为 `ghcr.io/gaoren002/*`；旧 `ghcr.io/meowfree/*` 镜像停留在既有版本。使用 Docker Compose 升级时请先获取本版 compose 文件或发布附件；若用新版 compose 回滚到 v0.8.3 或更早版本，请设置 `GPT2IMAGE_IMAGE_NAMESPACE=meowfree`。
 - Docker Compose 新增 `super-resolution-worker` 服务。源码部署若启用分辨率超分，需要配置并启动该 Worker；Worker 不可用时仍会回退原图。
 - 文本模型白名单已移除 GPT-5.4、GPT-5.4 Mini、GPT-5.2 及 GPT-5.3 Codex 系列；调用方应改用 GPT-5.5，或在具备旗舰权限时使用 GPT-6 Astra 与 GPT-5.6 系列。
 - Chat Completions 的 Images 上游模式适用于单轮、非 Agent、无历史记录的请求；多轮、Agent 和原样 Responses 请求继续使用对应上游。

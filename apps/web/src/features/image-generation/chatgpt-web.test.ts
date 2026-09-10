@@ -1675,6 +1675,20 @@ describe("ChatGPT Web editable file (ppt/psd)", () => {
 
 describe("ChatGPT Web chat (text answer extraction)", () => {
   it.each([
+    ["ChatGPT Web conversation failed: HTTP 404", true],
+    ["ChatGPT Web conversation failed: HTTP 410", true],
+    ["Conversation is temporarily inaccessible", true],
+    ["ChatGPT Web conversation failed: HTTP 401 Unauthorized", false],
+    ["ChatGPT Web conversation failed: HTTP 429 Too Many Requests", false],
+    ["ChatGPT Web conversation failed: HTTP 503", false],
+    ["fetch failed", false],
+  ])("短任务轮询错误 %s 的交接期判定为 %s", (message, expected) => {
+    expect(
+      __testing__.isTransientWebConversationHandoffError(new Error(message))
+    ).toBe(expected);
+  });
+
+  it.each([
     "",
     "本轮答案",
   ])("新版 messages 按轮次提取最终答案 %j，不串入前后轮次或思考", (answer) => {

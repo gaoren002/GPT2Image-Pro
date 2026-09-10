@@ -80,6 +80,7 @@ import {
   getImageModel,
   getImageModelForGroup,
   getUpstreamImageModel,
+  IMAGE_PROMPT_MAX_CHARACTERS,
   isImageModel,
   normalizeImageModel,
   parseImageSize,
@@ -869,6 +870,9 @@ async function reportPoolBackendResult(
       upstreamResetAt: result.upstreamResetAt,
       retryAfterSeconds: result.retryAfterSeconds,
       durationMs,
+      // ChatGPT Web 的本地 quota 表示 image_gen 次数；纯文字 Chat/提示词修剪成功
+      // 不能误扣图片额度。真正带图的结果仍沿用原扣减口径。
+      consumeWebImageQuota: hasRequiredImageOutput(result),
     });
     return outcome.switchable;
   } catch (error) {
@@ -1063,6 +1067,9 @@ async function retryPoolBackendResult(
     accountBackendPreference?: ImageBackendAccountBackend;
     accountBackendPreferenceMode?: ImageBackendPreferenceMode;
     allowAnyResponsesBackend?: boolean;
+    spanGroupsForWeb?: boolean;
+    webRequestMode?: "image" | "text";
+    signal?: AbortSignal;
   }
 ) {
   // 仅"不需要上报"的后端直接跑一次返回。pool-adobe 等带 reportResult 的池后端必须进入
@@ -1133,6 +1140,8 @@ async function retryPoolBackendResult(
         accountBackendPreference,
         accountBackendPreferenceMode: options?.accountBackendPreferenceMode,
         allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
+        spanGroupsForWeb: options?.spanGroupsForWeb,
+        webRequestMode: options?.webRequestMode,
         forceFirefly: fireflyRequest,
       });
     } catch (fallbackError) {
@@ -1180,11 +1189,6 @@ async function retryPoolBackendResult(
       }
     }
     const durationMs = Date.now() - startedAt;
-    const shouldRetry = await reportPoolBackendResult(
-      candidate,
-      result,
-      durationMs
-    );
     backendAttempts.push({
       attempt,
       backendType: currentBackend?.type,
@@ -1193,6 +1197,19 @@ async function retryPoolBackendResult(
       durationMs,
       ...(result.error ? { error: result.error.slice(0, 500) } : {}),
     });
+    // 调用方总超时属于本地取消，不应记成账号失败、写入冷却或继续换号。
+    if (options?.signal?.aborted) {
+      return withAttemptDiagnostics(
+        result.error
+          ? result
+          : { ...result, error: "The operation was aborted due to timeout" }
+      );
+    }
+    const shouldRetry = await reportPoolBackendResult(
+      candidate,
+      result,
+      durationMs
+    );
     if (isNoImageOutputError(result.error)) noImageOutputAttempts += 1;
     lastResult = result;
 
@@ -1271,6 +1288,8 @@ async function retryPoolBackendResult(
         accountBackendPreference,
         accountBackendPreferenceMode: options?.accountBackendPreferenceMode,
         allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
+        spanGroupsForWeb: options?.spanGroupsForWeb,
+        webRequestMode: options?.webRequestMode,
         forceFirefly: fireflyRequest,
       });
     } catch (error) {
@@ -1410,6 +1429,7 @@ function requireImageOutput(result: GenerateImageResult): GenerateImageResult {
   };
 }
 
+/** 清除模型常见的代码围栏、说明标签和成对外引号，只保留可重试的提示词正文。 */
 function sanitizePromptRepairOutput(value?: string) {
   const trimmed = (value || "").trim();
   if (!trimmed) return "";
@@ -1417,92 +1437,299 @@ function sanitizePromptRepairOutput(value?: string) {
     .replace(/^```(?:text|prompt|markdown)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-  return withoutFence
-    .replace(/^修剪(?:后)?提示词[:：]\s*/i, "")
-    .replace(/^rewritten prompt[:：]\s*/i, "")
+  const withoutLabel = withoutFence
+    .replace(/^(?:修剪|改写|优化)(?:后)?(?:的)?提示词[:：]\s*/i, "")
+    .replace(/^(?:rewritten|revised|optimized|safe) prompt[:：]\s*/i, "")
+    .replace(/^prompt[:：]\s*/i, "")
     .trim();
+  const quote = withoutLabel.at(0);
+  if (
+    withoutLabel.length >= 2 &&
+    (quote === '"' || quote === "'" || quote === "“") &&
+    withoutLabel.at(-1) === (quote === "“" ? "”" : quote)
+  ) {
+    return withoutLabel.slice(1, -1).trim();
+  }
+  return withoutLabel;
 }
 
-export async function repairModerationBlockedPromptWithResponses(
+/** 构造 Responses 与 Web 共用的纯文本安全修剪指令，限制失败原因长度避免输入膨胀。 */
+function buildModerationPromptRepairRequest(params: {
+  prompt: string;
+  failureReason: string;
+  mode: "generate" | "edit" | "chat";
+  size?: string;
+}) {
+  return [
+    "You are a prompt safety editor.",
+    "Rewrite this image prompt so it is more likely to pass image safety moderation.",
+    "Preserve the user's benign intent, subject, style, composition, language, aspect ratio, and useful details.",
+    "Remove or soften only the risky content implied by the failure reason.",
+    "Do not add new unsafe content. Do not use tools or generate an image.",
+    "Return only the rewritten image prompt text, with no explanations, markdown, labels, or quotes.",
+    `Mode: ${params.mode}`,
+    params.size ? `Requested size: ${params.size}` : "",
+    `Moderation failure: ${params.failureReason.slice(0, 1200)}`,
+    "Original prompt:",
+    params.prompt,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+type ModerationPromptRepairParams = {
+  prompt: string;
+  failureReason: string;
+  allowPremiumModels?: boolean;
+  mode: "generate" | "edit" | "chat";
+  size?: string;
+  signal?: AbortSignal;
+};
+
+type ModerationPromptRepairResult = {
+  prompt?: string;
+  error?: string;
+  backendMember?: GenerateImageResult["backendMember"];
+};
+
+/**
+ * 用已选中的 Responses 或 ChatGPT Web 后端修剪被审核拦截的提示词。
+ * Web 分支固定使用 GPT-5.5 低思考纯文字会话，避免依赖旗舰权限或误触发出图。
+ */
+export async function repairModerationBlockedPrompt(
   config: ApiConfig,
-  params: {
-    prompt: string;
-    failureReason: string;
-    allowPremiumModels?: boolean;
-    mode: "generate" | "edit" | "chat";
-    size?: string;
-    signal?: AbortSignal;
-  }
-): Promise<{ prompt?: string; error?: string }> {
+  params: ModerationPromptRepairParams
+): Promise<ModerationPromptRepairResult> {
   const originalPrompt = params.prompt.trim();
   if (!originalPrompt) return { error: "Prompt is empty" };
+  const repairRequest = buildModerationPromptRepairRequest({
+    ...params,
+    prompt: originalPrompt,
+  });
+  const useWeb = isPoolAccountBackend(config, "web");
 
   const result = await retryPoolBackendResult(
     config,
     async (candidate) => {
-      const model = await getResponsesModel(candidate, undefined, {
-        allowPremiumModels: params.allowPremiumModels,
-      });
-      const input: ResponsesRequestInputItem[] = [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: [
-                "Rewrite this image prompt so it is more likely to pass image safety moderation.",
-                "Preserve the user's benign intent, subject, style, composition, language, aspect ratio, and useful details.",
-                "Remove or soften only the risky content implied by the failure reason.",
-                "Do not add new unsafe content. Do not add explanations, markdown, labels, or quotes.",
-                `Mode: ${params.mode}`,
-                params.size ? `Requested size: ${params.size}` : "",
-                `Moderation failure: ${params.failureReason.slice(0, 1200)}`,
-                "Original prompt:",
-                originalPrompt,
-              ]
-                .filter(Boolean)
-                .join("\n"),
-            },
-          ],
-        },
-      ];
-      const repaired = await fetchResponses(
-        candidate,
-        {
-          model,
-          input,
-          instructions:
-            "You are a prompt safety editor. Return only the rewritten image prompt text, with no commentary.",
-          store: false,
-          stream: Boolean(candidate.useStream),
-        },
-        {
-          signal: params.signal,
-          stream: Boolean(candidate.useStream),
-        }
-      );
-      if (repaired.error) return { error: repaired.error };
+      const candidateUsesWeb = isPoolAccountBackend(candidate, "web");
+      if (candidateUsesWeb !== useWeb) {
+        return {
+          error: `Prompt repair selected an incompatible ${
+            candidateUsesWeb ? "Web" : "Responses"
+          } backend`,
+        };
+      }
+      let repaired: GenerateImageResult;
+      try {
+        const model = await getResponsesModel(
+          candidate,
+          candidateUsesWeb ? GPT55_CHAT_MODEL : undefined,
+          {
+            allowPremiumModels: params.allowPremiumModels,
+          }
+        );
+        repaired = candidateUsesWeb
+          ? await chatWithChatGptWeb(
+              candidate,
+              {
+                prompt: repairRequest,
+                gptModel: model,
+                thinking: "low",
+                promptOptimization: false,
+                failFastConversationPolling: true,
+                signal: params.signal,
+              },
+              []
+            )
+          : await fetchResponses(
+              candidate,
+              {
+                model,
+                input: [
+                  {
+                    role: "user",
+                    content: [{ type: "input_text", text: repairRequest }],
+                  },
+                ],
+                instructions:
+                  "You are a prompt safety editor. Return only the rewritten image prompt text, with no commentary.",
+                store: false,
+                stream: Boolean(candidate.useStream),
+              },
+              {
+                signal: params.signal,
+                stream: Boolean(candidate.useStream),
+              }
+            );
+      } catch (error) {
+        return {
+          error: params.signal?.aborted
+            ? "The operation was aborted due to timeout"
+            : error instanceof Error
+              ? error.message
+              : "Prompt repair failed",
+        };
+      }
+      if (params.signal?.aborted) {
+        return { error: "The operation was aborted due to timeout" };
+      }
+      if (repaired.error) return repaired;
       const repairedPrompt = sanitizePromptRepairOutput(repaired.responseText);
       if (!repairedPrompt) {
-        return { error: "Responses prompt repair returned empty text" };
+        return { ...repaired, error: "Prompt repair returned empty text" };
       }
-      return { responseText: repairedPrompt };
+      if (repairedPrompt.length > IMAGE_PROMPT_MAX_CHARACTERS) {
+        return {
+          ...repaired,
+          error: `Prompt repair exceeded the ${IMAGE_PROMPT_MAX_CHARACTERS} character limit`,
+        };
+      }
+      return { ...repaired, responseText: repairedPrompt };
     },
-    {
-      accountBackendPreference: "responses",
-      allowAnyResponsesBackend: true,
-    }
+    useWeb
+      ? {
+          accountBackendPreference: "web",
+          spanGroupsForWeb: true,
+          webRequestMode: "text",
+          signal: params.signal,
+        }
+      : {
+          accountBackendPreference: "responses",
+          allowAnyResponsesBackend: true,
+          signal: params.signal,
+        }
   );
-  if (result.error) return { error: result.error };
+  if (result.error) {
+    return { error: result.error, backendMember: result.backendMember };
+  }
 
   const repairedPrompt = sanitizePromptRepairOutput(result.responseText);
   if (!repairedPrompt) {
-    return { error: "Responses prompt repair returned empty text" };
+    return {
+      error: "Prompt repair returned empty text",
+      backendMember: result.backendMember,
+    };
   }
-  if (repairedPrompt === originalPrompt) {
-    return { prompt: repairedPrompt };
+  return { prompt: repairedPrompt, backendMember: result.backendMember };
+}
+
+/**
+ * 为审核提示词修剪选择后端：全局 Responses 优先；无可用成员时跨组借用真 Web 账号。
+ * 用户自接 API 不参与该内部辅助步骤，避免把平台自动改写流量发送到用户配置。
+ */
+export async function getModerationPromptRepairConfig(params: {
+  userId: string;
+  apiKeyId?: string;
+}) {
+  try {
+    return await getEffectiveConfig(null, {
+      userId: params.userId,
+      apiKeyId: params.apiKeyId,
+      requestKind: "responses",
+      accountBackendPreference: "responses",
+      ignoreUserConfig: true,
+      allowAnyResponsesBackend: true,
+    });
+  } catch (error) {
+    if (!(error instanceof ImageBackendPoolUnavailableError)) throw error;
   }
-  return { prompt: repairedPrompt };
+
+  return await getModerationPromptRepairWebConfig(params);
+}
+
+async function getModerationPromptRepairWebConfig(params: {
+  userId: string;
+  apiKeyId?: string;
+}) {
+  return await getEffectiveConfig(null, {
+    userId: params.userId,
+    apiKeyId: params.apiKeyId,
+    requestKind: "chat",
+    accountBackendPreference: "web",
+    ignoreUserConfig: true,
+    allowAnyWebBackend: true,
+    webRequestMode: "text",
+  });
+}
+
+async function releaseModerationPromptRepairLease(config?: ApiConfig | null) {
+  const backend = config?.backend;
+  if (
+    !backend?.inflightLease ||
+    (backend.type !== "pool-api" && backend.type !== "pool-account")
+  ) {
+    return;
+  }
+  await releaseImageBackendInflightLease({
+    memberType: poolBackendMemberType(backend.type),
+    memberId: backend.id,
+    leaseId: backend.inflightLeaseId,
+    leasePersisted: backend.inflightLeasePersisted,
+  });
+  backend.inflightLease = false;
+}
+
+/**
+ * 完成后端选择和修剪：Responses 在实际调用中全部失败时，再给 Web 一次接管机会。
+ * 这样刚失效但尚未被调度状态淘汰的 Codex 账号，也不会让本轮修剪提前结束。
+ */
+export async function repairModerationBlockedPromptWithFallback(
+  params: ModerationPromptRepairParams & {
+    userId: string;
+    apiKeyId?: string;
+  }
+): Promise<ModerationPromptRepairResult> {
+  let primaryConfig: ApiConfig | null = null;
+  let primaryResult: ModerationPromptRepairResult;
+  try {
+    primaryConfig = (
+      await getModerationPromptRepairConfig({
+        userId: params.userId,
+        apiKeyId: params.apiKeyId,
+      })
+    ).config;
+    primaryResult = await repairModerationBlockedPrompt(primaryConfig, params);
+  } catch (error) {
+    if (!primaryConfig) throw error;
+    primaryResult = {
+      error: error instanceof Error ? error.message : "Prompt repair failed",
+    };
+  } finally {
+    await releaseModerationPromptRepairLease(primaryConfig);
+  }
+
+  if (
+    !primaryResult.error ||
+    isPoolAccountBackend(primaryConfig, "web") ||
+    params.signal?.aborted
+  ) {
+    return primaryResult;
+  }
+
+  let webConfig: ApiConfig | null = null;
+  try {
+    webConfig = (
+      await getModerationPromptRepairWebConfig({
+        userId: params.userId,
+        apiKeyId: params.apiKeyId,
+      })
+    ).config;
+    const webResult = await repairModerationBlockedPrompt(webConfig, params);
+    if (!webResult.error) return webResult;
+    return {
+      ...webResult,
+      error: `Responses repair failed: ${primaryResult.error}; Web fallback failed: ${webResult.error}`,
+    };
+  } catch (error) {
+    const fallbackError =
+      error instanceof Error ? error.message : "Web fallback unavailable";
+    return {
+      ...primaryResult,
+      error: `Responses repair failed: ${primaryResult.error}; Web fallback unavailable: ${fallbackError}`,
+    };
+  } finally {
+    await releaseModerationPromptRepairLease(webConfig);
+  }
 }
 
 type ChatCompletionImageItem = {
@@ -3896,6 +4123,10 @@ export async function getEffectiveConfig(
     forceFirefly?: boolean;
     ignoreUserConfig?: boolean;
     allowAnyResponsesBackend?: boolean;
+    /** 内部能力可跨越用户偏好/密钥分组，只选择真正的 ChatGPT Web 账号。 */
+    allowAnyWebBackend?: boolean;
+    /** 纯文字 Web 请求不依赖 image_gen 额度，也不会在成功上报时消耗该额度。 */
+    webRequestMode?: "image" | "text";
   }
 ): Promise<{
   config: ApiConfig;
@@ -3920,6 +4151,8 @@ export async function getEffectiveConfig(
         accountBackendPreferenceMode: options.accountBackendPreferenceMode,
         forceFirefly: options.forceFirefly,
         allowAnyResponsesBackend: options.allowAnyResponsesBackend,
+        spanGroupsForWeb: options.allowAnyWebBackend,
+        webRequestMode: options.webRequestMode,
       });
     } catch (error) {
       if (error instanceof ImageBackendPoolUnavailableError) {

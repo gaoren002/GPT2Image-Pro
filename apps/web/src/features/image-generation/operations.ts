@@ -85,7 +85,7 @@ import {
   getResponsesModel,
   getUserApiConfig,
   poolBackendMemberType,
-  repairModerationBlockedPromptWithResponses,
+  repairModerationBlockedPromptWithFallback,
 } from "./service";
 import { isContentSafetyRejection } from "./sla-classification";
 import {
@@ -1970,32 +1970,22 @@ async function runQueuedImageGenerationForUser({
     };
     repairAttempts.push(attempt);
 
-    let repairConfig: Awaited<ReturnType<typeof getEffectiveConfig>> | null =
-      null;
     try {
-      repairConfig = await getEffectiveConfig(null, {
+      const repaired = await repairModerationBlockedPromptWithFallback({
         userId: input.userId,
         apiKeyId: input.apiKeyId,
-        requestKind: "responses",
-        accountBackendPreference: "responses",
-        ignoreUserConfig: true,
-        allowAnyResponsesBackend: true,
+        prompt: currentApiPrompt || currentPrompt,
+        failureReason: reason,
+        mode: input.mode,
+        size,
+        allowPremiumModels,
+        signal: generationSignal,
       });
-      const repaired = await repairModerationBlockedPromptWithResponses(
-        repairConfig.config,
-        {
-          prompt: currentApiPrompt || currentPrompt,
-          failureReason: reason,
-          mode: input.mode,
-          size,
-          allowPremiumModels,
-          signal: generationSignal,
-        }
-      );
+      attempt.backendMember = repaired.backendMember;
       if (repaired.error || !repaired.prompt?.trim()) {
         attempt.status = "failed";
         attempt.error = truncateMetadataText(
-          repaired.error || "Responses prompt repair returned empty text"
+          repaired.error || "Prompt repair returned empty text"
         );
         return false;
       }
@@ -2012,7 +2002,6 @@ async function runQueuedImageGenerationForUser({
       );
       return false;
     } finally {
-      await releasePoolBackendConfigLease(repairConfig?.config);
       await db
         .update(generation)
         .set({

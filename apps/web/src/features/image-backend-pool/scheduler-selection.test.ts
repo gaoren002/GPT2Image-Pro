@@ -433,6 +433,7 @@ vi.mock("drizzle-orm", () => {
     desc: (...values: unknown[]) => predicate("desc", values),
     eq: (...values: unknown[]) => predicate("eq", values),
     gt: (...values: unknown[]) => predicate("gt", values),
+    ilike: (...values: unknown[]) => predicate("ilike", values),
     inArray: (...values: unknown[]) => predicate("inArray", values),
     isNull: (...values: unknown[]) => predicate("isNull", values),
     lt: (...values: unknown[]) => predicate("lt", values),
@@ -1090,6 +1091,159 @@ describe("image backend pool scheduler selection", () => {
     expect(result?.memberType).toBe("account");
     expect(result?.memberId).toBe("acct-1");
     expect(result?.groupId).toBe("codex-group");
+  });
+
+  it("continues within the same group after a non-Web member when spanning groups", async () => {
+    dbMock.state.groups = [
+      {
+        ...dbMock.state.groups[0],
+        name: "Web prompt repair",
+        metadata: { backendType: "web" },
+      },
+    ];
+    dbMock.state.accounts = [
+      {
+        ...makeAccount(1),
+        implementationMode: "web",
+        priority: 2,
+        metadata: {
+          webAccount: { type: "plus", quota: 3, status: "active" },
+        },
+      },
+    ];
+    dbMock.state.apis = [
+      {
+        id: "api-first",
+        matchedGroupId: "group-a",
+        groupId: "group-a",
+        name: "Web group API",
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "key",
+        model: null,
+        interfaceMode: "mixed",
+        chatCompletionsUpstreamMode: "responses",
+        imageUpstreamMode: "responses",
+        useStream: false,
+        adobeSourced: false,
+        billingMultiplier: 1,
+        contentSafetyEnabled: true,
+        alwaysActive: false,
+        priority: 1,
+        concurrency: 1,
+        lastUsedAt: null,
+        lastAcquiredAt: null,
+        createdAt: new Date(2026, 0, 1),
+        metadata: null,
+      },
+    ];
+
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "chat",
+      spanGroupsForWeb: true,
+      webRequestMode: "text",
+    });
+
+    expect(result?.memberType).toBe("account");
+    expect(result?.memberId).toBe("acct-1");
+  });
+
+  it("lets Web text requests use an image-quota-limited account", async () => {
+    dbMock.state.groups = [
+      {
+        ...dbMock.state.groups[0],
+        name: "Web prompt repair",
+        metadata: { backendType: "web" },
+      },
+    ];
+    dbMock.state.accounts = [
+      {
+        ...makeAccount(1),
+        implementationMode: "web",
+        status: "limited",
+        cooldownUntil: new Date(Date.now() + 60_000),
+        metadata: {
+          webAccount: {
+            type: "plus",
+            quota: 0,
+            status: "limited",
+            restoreAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      },
+    ];
+
+    await expect(
+      resolveImageBackendPoolConfig({
+        userId: "user-a",
+        requestKind: "chat",
+        spanGroupsForWeb: true,
+      })
+    ).resolves.toBeNull();
+
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "chat",
+      spanGroupsForWeb: true,
+      webRequestMode: "text",
+    });
+
+    expect(result?.memberType).toBe("account");
+    expect(result?.memberId).toBe("acct-1");
+    const leaseTouch = dbMock.state.updates.find(
+      (item) =>
+        item.tableName === "image_backend_account" &&
+        "lastAcquiredAt" in item.values
+    );
+    expect(leaseTouch?.values).not.toHaveProperty("status");
+    expect(leaseTouch?.values).not.toHaveProperty("cooldownUntil");
+    expect(dbMock.state.accounts[0]).toMatchObject({
+      status: "limited",
+      cooldownUntil: expect.any(Date),
+    });
+  });
+
+  it("does not consume cached Web image quota after a text-only success", async () => {
+    dbMock.state.accounts = [
+      {
+        ...makeAccount(1),
+        implementationMode: "web",
+        status: "limited",
+        cooldownUntil: new Date(Date.now() + 60_000),
+        lastError:
+          "ChatGPTAgentToolRateLimitException image_gen.text2im rate limit",
+        metadata: {
+          webAccount: { type: "plus", quota: 3, status: "active" },
+        },
+      },
+    ];
+
+    await reportImageBackendResult({
+      memberType: "account",
+      memberId: "acct-1",
+      success: true,
+      consumeWebImageQuota: false,
+    });
+
+    const update = dbMock.state.updates.find(
+      (item) => item.tableName === "image_backend_account"
+    );
+    expect(update?.values.metadata).toMatchObject({
+      webAccount: {
+        type: "plus",
+        quota: 3,
+        status: "active",
+      },
+    });
+    expect(update?.values).not.toHaveProperty("status");
+    expect(update?.values).not.toHaveProperty("cooldownUntil");
+    expect(update?.values).not.toHaveProperty("lastError");
+    expect(dbMock.state.accounts[0]).toMatchObject({
+      status: "limited",
+      cooldownUntil: expect.any(Date),
+      lastError:
+        "ChatGPTAgentToolRateLimitException image_gen.text2im rate limit",
+    });
   });
 
   it("reactivates limited accounts after a successful retry", async () => {

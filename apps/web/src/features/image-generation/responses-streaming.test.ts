@@ -132,9 +132,7 @@ describe("Responses streaming parser", () => {
   it("repairs moderation-blocked prompts through a text-only Responses request", async () => {
     process.env.DATABASE_URL =
       process.env.DATABASE_URL || "postgresql://test:test@127.0.0.1:5432/test";
-    const { repairModerationBlockedPromptWithResponses } = await import(
-      "./service"
-    );
+    const { repairModerationBlockedPrompt } = await import("./service");
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
       return new Response(
         JSON.stringify({
@@ -156,7 +154,7 @@ describe("Responses streaming parser", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await repairModerationBlockedPromptWithResponses(
+    const result = await repairModerationBlockedPrompt(
       {
         baseUrl: "https://api.example.test/v1",
         apiKey: "test-key",

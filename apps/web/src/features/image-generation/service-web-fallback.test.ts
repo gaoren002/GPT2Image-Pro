@@ -51,6 +51,300 @@ describe("image service Web-first fallback", () => {
     vi.clearAllMocks();
   });
 
+  it("uses Responses for prompt repair when a compatible backend is available", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { getModerationPromptRepairConfig } = await import("./service");
+    backendPoolMock.resolveImageBackendPoolConfig.mockResolvedValueOnce({
+      config: {
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "codex-key",
+        backend: {
+          type: "pool-account",
+          id: "codex-1",
+          accountBackend: "responses",
+        },
+      },
+    });
+
+    const result = await getModerationPromptRepairConfig({
+      userId: "user-1",
+      apiKeyId: "key-1",
+    });
+
+    expect(result.config.backend?.accountBackend).toBe("responses");
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        userId: "user-1",
+        apiKeyId: "key-1",
+        requestKind: "responses",
+        accountBackendPreference: "responses",
+        allowAnyResponsesBackend: true,
+      })
+    );
+  });
+
+  it("falls back to a cross-group Web text account only when Responses is unavailable", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { getModerationPromptRepairConfig } = await import("./service");
+    backendPoolMock.resolveImageBackendPoolConfig
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        config: {
+          baseUrl: "https://chatgpt.com",
+          apiKey: "web-key",
+          backend: {
+            type: "pool-account",
+            id: "web-1",
+            accountBackend: "web",
+          },
+        },
+      });
+
+    const result = await getModerationPromptRepairConfig({
+      userId: "user-1",
+      apiKeyId: "key-1",
+    });
+
+    expect(result.config.backend?.accountBackend).toBe("web");
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        requestKind: "chat",
+        accountBackendPreference: "web",
+        spanGroupsForWeb: true,
+        webRequestMode: "text",
+      })
+    );
+  });
+
+  it("falls back to Web when selected Responses backends fail at runtime", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { repairModerationBlockedPromptWithFallback } = await import(
+      "./service"
+    );
+    const { chatWithChatGptWeb } = await import("./chatgpt-web");
+    vi.mocked(chatWithChatGptWeb).mockResolvedValueOnce({
+      responseText: "safe Web rewrite",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      })
+    );
+    backendPoolMock.resolveImageBackendPoolConfig
+      .mockResolvedValueOnce({
+        config: {
+          baseUrl: "https://api.example.test/v1",
+          apiKey: "stale-codex-key",
+          backend: {
+            type: "pool-account",
+            id: "codex-stale",
+            groupId: "codex-group",
+            userId: "user-1",
+            requestKind: "responses",
+            accountBackend: "responses",
+            reportResult: true,
+            inflightLease: true,
+          },
+        },
+      })
+      // Responses 池已重试耗尽。
+      .mockResolvedValueOnce(null)
+      // 编排层随后跨组选择 Web。
+      .mockResolvedValueOnce({
+        config: {
+          baseUrl: "https://chatgpt.com",
+          apiKey: "web-key",
+          backend: {
+            type: "pool-account",
+            id: "web-fallback",
+            groupId: "web-group",
+            userId: "user-1",
+            requestKind: "chat",
+            accountBackend: "web",
+            reportResult: true,
+            inflightLease: true,
+          },
+        },
+      });
+
+    const result = await repairModerationBlockedPromptWithFallback({
+      userId: "user-1",
+      apiKeyId: "key-1",
+      prompt: "blocked prompt",
+      failureReason: "Content failed moderation",
+      mode: "generate",
+    });
+
+    expect(result.prompt).toBe("safe Web rewrite");
+    expect(chatWithChatGptWeb).toHaveBeenCalledOnce();
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        requestKind: "chat",
+        accountBackendPreference: "web",
+        spanGroupsForWeb: true,
+        webRequestMode: "text",
+      })
+    );
+  });
+
+  it("repairs a prompt through a low-thinking GPT-5.5 Web text turn", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { repairModerationBlockedPrompt } = await import("./service");
+    const { chatWithChatGptWeb } = await import("./chatgpt-web");
+    vi.mocked(chatWithChatGptWeb).mockResolvedValueOnce({
+      responseText: '```text\n优化后的提示词："一幅安全的电影感人物肖像"\n```',
+    });
+
+    const result = await repairModerationBlockedPrompt(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key",
+        backend: {
+          type: "pool-account",
+          id: "web-1",
+          accountBackend: "web",
+          reportResult: false,
+        },
+      },
+      {
+        prompt: "被拦截的人物提示词",
+        failureReason: "Content failed moderation",
+        mode: "generate",
+        size: "1024x1024",
+      }
+    );
+
+    expect(result.prompt).toBe("一幅安全的电影感人物肖像");
+    expect(chatWithChatGptWeb).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        gptModel: "gpt-5.5",
+        thinking: "low",
+        promptOptimization: false,
+        failFastConversationPolling: true,
+        prompt: expect.stringMatching(
+          /Do not use tools or generate an image[\s\S]*被拦截的人物提示词/
+        ),
+      }),
+      []
+    );
+  });
+
+  it("does not penalize or switch Web accounts after the local repair timeout", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { repairModerationBlockedPrompt } = await import("./service");
+    const { chatWithChatGptWeb } = await import("./chatgpt-web");
+    const controller = new AbortController();
+    vi.mocked(chatWithChatGptWeb).mockImplementationOnce(async () => {
+      controller.abort();
+      return { error: "Image generation timed out after 20 minutes" };
+    });
+
+    const result = await repairModerationBlockedPrompt(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key",
+        backend: {
+          type: "pool-account",
+          id: "web-timeout",
+          groupId: "web-group",
+          userId: "user-1",
+          requestKind: "chat",
+          accountBackend: "web",
+          reportResult: true,
+          inflightLease: true,
+        },
+      },
+      {
+        prompt: "blocked prompt",
+        failureReason: "Content failed moderation",
+        mode: "generate",
+        signal: controller.signal,
+      }
+    );
+
+    expect(result.error).toBe("The operation was aborted due to timeout");
+    expect(backendPoolMock.reportImageBackendResult).not.toHaveBeenCalled();
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).not.toHaveBeenCalled();
+  });
+
+  it("switches Web text accounts and does not consume image quota for prompt repair", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { repairModerationBlockedPrompt } = await import("./service");
+    const { chatWithChatGptWeb } = await import("./chatgpt-web");
+    vi.mocked(chatWithChatGptWeb)
+      .mockResolvedValueOnce({ error: "terminated" })
+      .mockResolvedValueOnce({ responseText: "safe rewritten prompt" });
+    backendPoolMock.resolveImageBackendPoolConfig.mockResolvedValueOnce({
+      config: {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key-2",
+        backend: {
+          type: "pool-account",
+          id: "web-2",
+          groupId: "web-group-2",
+          userId: "user-1",
+          requestKind: "chat",
+          accountBackend: "web",
+          reportResult: true,
+          inflightLease: true,
+        },
+      },
+    });
+
+    const result = await repairModerationBlockedPrompt(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key-1",
+        backend: {
+          type: "pool-account",
+          id: "web-1",
+          groupId: "web-group-1",
+          userId: "user-1",
+          requestKind: "chat",
+          accountBackend: "web",
+          reportResult: true,
+          inflightLease: true,
+        },
+      },
+      {
+        prompt: "blocked prompt",
+        failureReason: "Content failed moderation",
+        mode: "generate",
+      }
+    );
+
+    expect(result).toMatchObject({
+      prompt: "safe rewritten prompt",
+      backendMember: { id: "web-2", accountBackend: "web" },
+    });
+    expect(backendPoolMock.resolveImageBackendPoolConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        spanGroupsForWeb: true,
+        webRequestMode: "text",
+        excludedMemberKeys: ["account:web-1"],
+      })
+    );
+    expect(backendPoolMock.reportImageBackendResult).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        memberId: "web-2",
+        success: true,
+        consumeWebImageQuota: false,
+      })
+    );
+  });
+
   it.each([
     "gpt-image-2",
     "gpt-image-2.5-flare",

@@ -934,7 +934,7 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     key: "IMAGE_MODERATION_PROMPT_REPAIR_ENABLED",
     label: "审核失败自动修剪重试",
     description:
-      "检测到审核拦截后，使用可用的 Codex/Responses 账号或外接 /responses API 修剪提示词，并在同一任务内重新发起请求。",
+      "检测到审核拦截后，优先使用 Codex/Responses 或外接 /responses API 修剪提示词；没有可用后端或 Responses 运行时重试耗尽时，自动改用 ChatGPT Web 纯文本会话，并在同一任务内重试。",
     category: "moderation",
     valueType: "boolean",
     defaultValue: true,

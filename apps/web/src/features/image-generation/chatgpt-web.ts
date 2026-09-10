@@ -96,6 +96,8 @@ type WebProxyResponsePayload = {
 type WebImageParams = (GenerateImageParams | EditImageParams) & {
   history?: ChatHistoryMessage[];
   files?: ResponsesInputFile[];
+  /** 内部短任务遇到确定性轮询错误时立即返回，让账号池换号。 */
+  failFastConversationPolling?: boolean;
 };
 
 function throwIfAborted(signal?: AbortSignal) {
@@ -2648,6 +2650,15 @@ export async function editImageWithChatGptWeb(
 const WEB_CHAT_POLL_TIMEOUT_MS = 180_000;
 const WEB_CHAT_STALL_MS = 45_000;
 
+function isTransientWebConversationHandoffError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/\bHTTP\s+(?:401|429|5\d\d)\b/i.test(message)) return false;
+  if (/\bHTTP\s+(?:404|405|410)\b/i.test(message)) return true;
+  return /(?:conversation|会话).{0,48}(?:inaccessible|not found|尚不可用|无法访问)/i.test(
+    message
+  );
+}
+
 /**
  * 轮询会话直到 assistant turn 收尾(或长时间停滞/超时),抽出文字答复与"是否出了图"。
  * WHY 轮询而非解析 SSE:web SSE 是 o/v 增量协议,直接拼文本易错;轮询 mapping 取定稿节点更稳,
@@ -2657,7 +2668,8 @@ async function pollWebChatResult(
   config: ApiConfig,
   conversationId: string,
   requestMessageId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { failFastErrors?: boolean }
 ): Promise<{
   responseText: string;
   hasImage: boolean;
@@ -2674,9 +2686,15 @@ async function pollWebChatResult(
     let text: string;
     try {
       text = await getConversationText(config, conversationId, signal);
-    } catch {
+    } catch (error) {
       // 交接期瞬时 404/inaccessible 视为未就绪继续轮询;真 abort/超时上抛。
       throwIfAborted(signal);
+      if (
+        options?.failFastErrors &&
+        !isTransientWebConversationHandoffError(error)
+      ) {
+        throw error;
+      }
       await sleep(IMAGE_POLL_INTERVAL_MS);
       continue;
     }
@@ -2825,7 +2843,8 @@ async function runWebChat(
       configWithSignal,
       conversationId,
       requestMessageId,
-      abortController.signal
+      abortController.signal,
+      { failFastErrors: params.failFastConversationPolling }
     );
     let parentMessageId = chat.parentMessageId || extractLastMessageId(text);
     let imageOutputs: NonNullable<GenerateImageResult["imageOutputs"]> = [];
@@ -3453,4 +3472,5 @@ export const __testing__ = {
   extractEditableArtifacts,
   editableFilePrompt,
   extractAssistantAnswer,
+  isTransientWebConversationHandoffError,
 };

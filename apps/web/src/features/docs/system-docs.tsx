@@ -272,13 +272,14 @@ const sections = {
     moderationRepair: {
       title: "审核失败自动修剪重试",
       description:
-        "开启后，系统检测到本地审核拦截、上游安全拒绝或安全拒绝导致的无图输出时，会先用 Responses 纯文本请求修剪提示词，再在同一个生成任务内重新审核并重新发起生图。",
+        "开启后，系统检测到本地审核拦截、上游安全拒绝或安全拒绝导致的无图输出时，会优先用 Responses 纯文本请求修剪提示词；初始没有可用后端或 Responses 运行时重试耗尽时改用 ChatGPT Web 纯文本会话，再在同一个生成任务内重新审核并重新发起生图。",
       valid: [
-        "该能力需要至少一个可用的 Codex/Responses 账号，或一个支持 /responses 的外接 API 后端；纯 Web 分组也会临时借用 Responses 后端完成提示词修剪。",
+        "系统会先跨组选择可用的 Codex/Responses 账号或支持 /responses 的外接 API 后端；若没有可用成员，再跨组选择真正的 ChatGPT Web 账号，并以 GPT-5.5 低思考档完成纯文本修剪。",
+        "ChatGPT Web 纯文本修剪不依赖 image_gen 图片额度；图片额度为 0 或仅图片工具受限的有效 Web 账号仍可参与，文本成功不会扣减额度，也不会清除图片侧的冷却和错误状态。鉴权、普通限流或服务错误会立即交给账号池换号。",
         "最大重试轮数由 IMAGE_MODERATION_PROMPT_REPAIR_MAX_RETRIES 控制，0 表示关闭；IMAGE_MODERATION_PROMPT_REPAIR_ENABLED 可控制总开关。",
         "修剪重试不会新建第二条生成记录，成功后仍按最终图片和原任务计费；状态监控会按第几次修剪统计尝试、成功和失败。",
         "修剪成功时，页面和外接 API 会通过独立说明提示用户“原提示词因审核被拒，系统已进行更多修改后生成本次结果”；该说明不会写入 revised_prompt。",
-        "如果没有可用 Responses 后端，或修剪后仍被审核拦截，系统会保留原审核失败信息并按失败结算规则处理。",
+        "如果 Responses 与 ChatGPT Web 修剪后端都不可用，或修剪后仍被审核拦截，系统会保留原审核失败信息并按失败结算规则处理。",
       ],
       invalid: [
         "审核服务本身不可用、上游限流、余额不足、模型权限不足等平台或用户请求错误不会触发提示词修剪。",
@@ -1152,7 +1153,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               requirement: "可选",
               custom: true,
               description:
-                "审核改写重试开关（issue #24）。默认按平台设置（通常启用）：本地审核拦截或上游安全拒绝导致无图输出时，系统会先用 Responses 改写提示词，再在同一生成任务内重新审核并重试；显式传 false 时关闭该自动改写重试，审核失败直接返回真实错误，不再改写提示词。详见下方“审核失败自动修剪重试”说明。",
+                "审核改写重试开关（issue #24）。默认按平台设置（通常启用）：本地审核拦截或上游安全拒绝导致无图输出时，系统优先用 Responses 改写提示词；初始没有可用后端或 Responses 运行时重试耗尽时自动改用 ChatGPT Web 纯文本会话，再在同一生成任务内重新审核并重试。显式传 false 时关闭该自动改写重试，审核失败直接返回真实错误。详见下方“审核失败自动修剪重试”说明。",
             },
             {
               name: "gptModel / gpt_model",
@@ -1486,7 +1487,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               requirement: "可选",
               custom: true,
               description:
-                "审核改写重试开关（issue #24）。默认按平台设置（通常启用）：本地审核拦截或上游安全拒绝导致无图输出时，系统会先用 Responses 改写提示词，再在同一生成任务内重新审核并重试；显式传 false 时关闭该自动改写重试，审核失败直接返回真实错误，不再改写提示词。详见下方“审核失败自动修剪重试”说明。",
+                "审核改写重试开关（issue #24）。默认按平台设置（通常启用）：本地审核拦截或上游安全拒绝导致无图输出时，系统优先用 Responses 改写提示词；初始没有可用后端或 Responses 运行时重试耗尽时自动改用 ChatGPT Web 纯文本会话，再在同一生成任务内重新审核并重试。显式传 false 时关闭该自动改写重试，审核失败直接返回真实错误。详见下方“审核失败自动修剪重试”说明。",
             },
             {
               name: "gptModel / gpt_model",
@@ -2715,13 +2716,14 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
     moderationRepair: {
       title: "Safety Prompt Repair Retry",
       description:
-        "When local moderation, upstream safety refusal, or safety-refusal text without an image is detected, the system can rewrite the prompt through a text-only Responses request and retry generation inside the same task.",
+        "When local moderation, an upstream safety refusal, or safety-refusal text without an image is detected, the system first tries a text-only Responses rewrite. If no Responses backend is initially available or all selected Responses backends fail at runtime, it uses a ChatGPT Web text turn before re-moderating and retrying inside the same task.",
       valid: [
-        "Requires at least one usable Codex/Responses account or an external API backend that supports /responses. Even a Web-only generation group can borrow a Responses backend for the rewrite step.",
+        "The system first searches across groups for a Codex/Responses account or external /responses backend. If none is available, it searches across groups for a real ChatGPT Web account and performs the text-only rewrite with low-thinking GPT-5.5.",
+        "A ChatGPT Web text-only repair does not require image_gen quota. A valid Web account with zero quota or an image-tool-only limit can still participate. Text success preserves image quota and cooldown state; authentication, general rate-limit, and service errors immediately return the account to pool failover.",
         "IMAGE_MODERATION_PROMPT_REPAIR_ENABLED controls the feature; IMAGE_MODERATION_PROMPT_REPAIR_MAX_RETRIES controls the maximum rewrite rounds. Set retries to 0 to disable.",
         "Retries do not create a second generation record. Billing remains attached to the original task and final output; the status page reports attempts, successes, and failures by retry number.",
         "When a rewrite succeeds, the UI and external API return a separate notice that the original prompt was rejected by safety checks and generated after additional adjustments. This notice is not written into revised_prompt.",
-        "If no Responses backend is available, or the rewritten prompt is still blocked, the original moderation failure is kept and normal failed-settlement rules apply.",
+        "If neither Responses nor ChatGPT Web repair is available, or the rewritten prompt is still blocked, the original moderation failure is kept and normal failed-settlement rules apply.",
       ],
       invalid: [
         "Moderation-service outages, upstream rate limits, insufficient credits, and model permission errors are not prompt-repair cases.",
@@ -3448,7 +3450,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               requirement: "Optional",
               custom: true,
               description:
-                'Safety prompt-repair retry toggle (issue #24). Defaults to the platform setting (usually enabled): when local moderation or an upstream safety refusal yields no image, the system rewrites the prompt through Responses and re-moderates and retries inside the same task. When explicitly false, this automatic rewrite-retry is disabled and a moderation failure returns the real error without rewriting the prompt. See "Safety Prompt Repair Retry" below.',
+                'Safety prompt-repair retry toggle (issue #24). Defaults to the platform setting (usually enabled): when local moderation or an upstream safety refusal yields no image, the system tries Responses first and falls back to a ChatGPT Web text turn when no Responses backend is initially available or all selected Responses backends fail at runtime, then re-moderates and retries inside the same task. When explicitly false, automatic rewrite-retry is disabled and the original moderation error is returned. See "Safety Prompt Repair Retry" below.',
             },
             {
               name: "gptModel / gpt_model",
@@ -3777,7 +3779,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               requirement: "Optional",
               custom: true,
               description:
-                'Safety prompt-repair retry toggle (issue #24). Defaults to the platform setting (usually enabled): when local moderation or an upstream safety refusal yields no image, the system rewrites the prompt through Responses and re-moderates and retries inside the same task. When explicitly false, this automatic rewrite-retry is disabled and a moderation failure returns the real error without rewriting the prompt. See "Safety Prompt Repair Retry" below.',
+                'Safety prompt-repair retry toggle (issue #24). Defaults to the platform setting (usually enabled): when local moderation or an upstream safety refusal yields no image, the system tries Responses first and falls back to a ChatGPT Web text turn when no Responses backend is initially available or all selected Responses backends fail at runtime, then re-moderates and retries inside the same task. When explicitly false, automatic rewrite-retry is disabled and the original moderation error is returned. See "Safety Prompt Repair Retry" below.',
             },
             {
               name: "gptModel / gpt_model",

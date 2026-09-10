@@ -137,6 +137,9 @@ type ResolveBackendOptions = {
   userId: string;
   apiKeyId?: string;
   requestKind: ImageBackendRequestKind;
+  // Web 请求用途。text 只使用 ChatGPT 文本能力，不受图片生成额度及其冷却状态限制；
+  // 缺省保持现有图片请求行为。
+  webRequestMode?: "image" | "text";
   // 请求模型：纯 Web 主组的图片请求统一用 GPT Image 2.5；其他组保留 Firefly 前缀路由。
   // chat 的顶层模型是文本模型，不随图片型号归一而更改。
   requestedModel?: string;
@@ -152,10 +155,9 @@ type ResolveBackendOptions = {
   // 非纯 Web 主组可强制走 Adobe；纯 Web 主组固定图片型号的规则优先于此标志。
   forceFirefly?: boolean;
   allowAnyResponsesBackend?: boolean;
-  // 跨组选真 web 账号(忽略 apiKeyId/用户偏好的分组作用域):PPT/PSD 可编辑文件生成必须用
-  // ChatGPT 网页(付费)账号,而付费 web 账号集中在专用分组(如 Pro-Web),外部 API key 绑定
-  // 的分组往往够不到。开启后遍历全部启用分组、只取 accountBackend==="web" 的成员(配合
-  // accountPlanFilter="paid"),使 editable-file 像站内 UI 一样稳定命中付费 web,不受 key 分组限制。
+  // 跨组选真 web 账号(忽略 apiKeyId/用户偏好的分组作用域)：PPT/PSD 用 paid 过滤寻找付费
+  // Web；审核提示词修剪用 text 模式寻找任意有效 Web。开启后遍历全部启用分组，只返回
+  // accountBackend==="web" 的账号成员，不受外部 key 所绑分组限制。
   spanGroupsForWeb?: boolean;
 };
 
@@ -289,6 +291,9 @@ export type ImageBackendReportResultInput = {
   upstreamResetAt?: string | Date | null;
   retryAfterSeconds?: number | null;
   durationMs?: number | null;
+  // Web 账号成功时是否消耗一份缓存的图片额度；纯文本请求传 false。
+  // 缺省为 true，保持所有既有调用方行为不变。
+  consumeWebImageQuota?: boolean;
 };
 
 export type ImageBackendReportResultOutcome = {
@@ -1018,7 +1023,10 @@ async function pruneExpiredBackendLeases(
 
 async function acquirePoolMemberInflightLease(
   member: PoolMember,
-  options?: { enforceLastAcquiredSnapshot?: boolean }
+  options?: {
+    enforceLastAcquiredSnapshot?: boolean;
+    preserveAvailabilityState?: boolean;
+  }
 ): Promise<BackendLeaseAcquireResult> {
   if (!hasBackendCapacity(member)) return "full";
   const leaseId = nanoid();
@@ -1130,13 +1138,21 @@ async function acquirePoolMemberInflightLease(
       } else {
         await tx
           .update(imageBackendAccount)
-          .set({
-            status: "active",
-            cooldownUntil: null,
-            lastUsedAt: now,
-            lastAcquiredAt: now,
-            updatedAt: now,
-          })
+          .set(
+            options?.preserveAvailabilityState
+              ? {
+                  lastUsedAt: now,
+                  lastAcquiredAt: now,
+                  updatedAt: now,
+                }
+              : {
+                  status: "active",
+                  cooldownUntil: null,
+                  lastUsedAt: now,
+                  lastAcquiredAt: now,
+                  updatedAt: now,
+                }
+          )
           .where(eq(imageBackendAccount.id, member.id));
       }
       touchedMember = true;
@@ -2157,9 +2173,11 @@ function parseMetadataDate(value: string | null | undefined) {
 function isWebAccountQuotaAvailable(
   backend: ImageBackendAccountBackend,
   metadata: Record<string, unknown> | null | undefined,
-  now: Date
+  now: Date,
+  webRequestMode: "image" | "text" = "image"
 ) {
   if (backend !== "web") return true;
+  if (webRequestMode === "text") return true;
   const webAccount = normalizeWebAccountMetadata(metadata);
   if (!webAccount) return true;
   if (webAccount.quota > 0) return true;
@@ -2339,7 +2357,8 @@ async function selectPoolMember(
   forceFirefly = false,
   staleRetryCount = 0,
   capacityWaitCount = 0,
-  accountPlanFilter: ImageBackendAccountPlanFilter = "any"
+  accountPlanFilter: ImageBackendAccountPlanFilter = "any",
+  webRequestMode: "image" | "text" = "image"
 ): Promise<PoolMember | null> {
   // 只看目标主组；mixed 组选中 Web 子组时仍保留其原始模型与 Adobe 路由规则。
   const modelRouting = resolvePoolModelRouting({
@@ -2403,29 +2422,78 @@ async function selectPoolMember(
         )`
       : sql`true`;
   const now = new Date();
+  const normalAccountAvailabilityWhere = or(
+    and(
+      eq(imageBackendAccount.alwaysActive, true),
+      sql`${imageBackendAccount.status} <> 'error'`
+    ),
+    and(
+      isBackendAvailableStatus(
+        imageBackendAccount.status,
+        imageBackendAccount.cooldownUntil,
+        now
+      ),
+      or(
+        sql`${imageBackendAccount.cooldownUntil} IS NULL`,
+        sql`${imageBackendAccount.cooldownUntil} <= ${now}`
+      )
+    )
+  );
+  const accountAvailabilityWhere =
+    webRequestMode === "text"
+      ? or(
+          // 图片额度耗尽会把 Web 账号置为 limited/cooldown，但不影响其文本能力。
+          // 仅在缓存明确记录 quota=0 或错误明确指向图片工具额度时绕过；普通
+          // Chat 429/过载冷却仍须遵守。
+          and(
+            eq(imageBackendAccount.implementationMode, "web"),
+            sql`${imageBackendAccount.status} <> 'error'`,
+            or(
+              and(
+                // quota 刷新/成功扣减造成的冷却会清空 lastError；若仍有请求错误，
+                // 不能仅凭旧 quota=0 绕过文本侧的 429/过载。
+                isNull(imageBackendAccount.lastError),
+                sql`CASE
+                  WHEN COALESCE(${imageBackendAccount.metadata}->'webAccount'->>'quota', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+                  THEN (${imageBackendAccount.metadata}->'webAccount'->>'quota')::numeric <= 0
+                  ELSE false
+                END`
+              ),
+              and(
+                // 上游可能先于额度接口返回 image_gen 工具限流，此时缓存 quota 仍大于 0。
+                // 同时要求图片语义与额度语义，避免把普通 Chat 429 当成图片专属冷却。
+                or(
+                  ilike(imageBackendAccount.lastError, "%image_gen.text2im%"),
+                  ilike(imageBackendAccount.lastError, "%image generation%"),
+                  ilike(imageBackendAccount.lastError, "%create more images%"),
+                  ilike(imageBackendAccount.lastError, "%image request%"),
+                  ilike(imageBackendAccount.lastError, "%图像生成%"),
+                  ilike(imageBackendAccount.lastError, "%图片生成%")
+                ),
+                or(
+                  ilike(imageBackendAccount.lastError, "%ratelimitexception%"),
+                  ilike(imageBackendAccount.lastError, "%rate limit%"),
+                  ilike(imageBackendAccount.lastError, "%rate-limit%"),
+                  ilike(imageBackendAccount.lastError, "%usage limit%"),
+                  ilike(imageBackendAccount.lastError, "%quota%"),
+                  ilike(imageBackendAccount.lastError, "%上限%"),
+                  ilike(imageBackendAccount.lastError, "%额度%"),
+                  ilike(imageBackendAccount.lastError, "%耗尽%"),
+                  ilike(imageBackendAccount.lastError, "%用尽%")
+                )
+              )
+            )
+          ),
+          normalAccountAvailabilityWhere
+        )
+      : normalAccountAvailabilityWhere;
   const accountBaseWhere = and(
     eq(imageBackendAccount.isEnabled, true),
     accountBackendFilter,
     accountPlanWhere,
     // always_active 的账号无视 cooldown 与临时故障始终入选,但 status="error"（终态/鉴权类:
     // 死号/封号/凭据失效）仍踢出轮换——避免死号常驻形成黑洞。其余维持原"健康且未冷却"判定。
-    or(
-      and(
-        eq(imageBackendAccount.alwaysActive, true),
-        sql`${imageBackendAccount.status} <> 'error'`
-      ),
-      and(
-        isBackendAvailableStatus(
-          imageBackendAccount.status,
-          imageBackendAccount.cooldownUntil,
-          now
-        ),
-        or(
-          sql`${imageBackendAccount.cooldownUntil} IS NULL`,
-          sql`${imageBackendAccount.cooldownUntil} <= ${now}`
-        )
-      )
-    )
+    accountAvailabilityWhere
   );
   const accountRowsPromise = groupIds.length
     ? db
@@ -2769,7 +2837,7 @@ async function selectPoolMember(
           backend,
           requestKind || "image_generation"
         ) &&
-        isWebAccountQuotaAvailable(backend, row.metadata, now)
+        isWebAccountQuotaAvailable(backend, row.metadata, now, webRequestMode)
       );
     })
     .map((row) => ({
@@ -2979,6 +3047,12 @@ async function selectPoolMember(
     const leaseResult = await acquirePoolMemberInflightLease(member, {
       enforceLastAcquiredSnapshot:
         (member.schedulerLayer || "load_balance") === "load_balance",
+      // Web 纯文字借用可能刻意选中仅图片额度受限的账号；租约不能顺手清除其
+      // image_gen 状态，否则该账号会被图片调度误认为已经恢复。
+      preserveAvailabilityState:
+        webRequestMode === "text" &&
+        member.type === "account" &&
+        member.implementationMode === "web",
     });
     if (leaseResult === "stale") {
       sawStaleCandidate = true;
@@ -3019,7 +3093,8 @@ async function selectPoolMember(
       modelRouting.forceFirefly,
       staleRetryCount + 1,
       capacityWaitCount,
-      accountPlanFilter
+      accountPlanFilter,
+      webRequestMode
     );
   }
 
@@ -3049,14 +3124,18 @@ async function selectPoolMember(
       modelRouting.forceFirefly,
       staleRetryCount,
       capacityWaitCount + 1,
-      accountPlanFilter
+      accountPlanFilter,
+      webRequestMode
     );
   }
 
   return null;
 }
 
-async function touchSelectedMember(member: PoolMember) {
+async function touchSelectedMember(
+  member: PoolMember,
+  options?: { preserveAvailabilityState?: boolean }
+) {
   const now = new Date();
   if (member.type === "api") {
     await db
@@ -3088,13 +3167,21 @@ async function touchSelectedMember(member: PoolMember) {
 
   await db
     .update(imageBackendAccount)
-    .set({
-      status: "active",
-      cooldownUntil: null,
-      lastUsedAt: now,
-      lastAcquiredAt: now,
-      updatedAt: now,
-    })
+    .set(
+      options?.preserveAvailabilityState
+        ? {
+            lastUsedAt: now,
+            lastAcquiredAt: now,
+            updatedAt: now,
+          }
+        : {
+            status: "active",
+            cooldownUntil: null,
+            lastUsedAt: now,
+            lastAcquiredAt: now,
+            updatedAt: now,
+          }
+    )
     .where(eq(imageBackendAccount.id, member.id));
 }
 
@@ -3330,7 +3417,8 @@ async function resolvePoolMember(
     modelRouting.forceFirefly,
     0,
     0,
-    options.accountPlanFilter ?? "any"
+    options.accountPlanFilter ?? "any",
+    options.webRequestMode ?? "image"
   );
   if (!member) {
     const fallback = await resolveAnyResponsesMember();
@@ -3353,8 +3441,8 @@ async function resolvePoolMember(
 /**
  * 跨组选一个真 web 账号(accountBackend==="web"),忽略 apiKeyId/用户偏好的分组作用域。
  * 供 PPT/PSD 可编辑文件生成用:付费 web 账号集中在专用分组,外部 key 绑定组常够不到;这里
- * 遍历全部启用分组(按 priority),对每组按 web 偏好选号,只接受真 web 成员;选到非 web(混合组
- * 里的 api/responses)则释放其租约、继续下一组,避免占着不放。
+ * 遍历全部启用分组(按 priority),对每组按 web 偏好选号,只接受真 web 成员;选到非 web
+ * (混合组里的 api/responses)则释放其租约并在同组继续选号，直到该组候选耗尽后再进入下一组。
  */
 async function resolveAnyWebPoolMember(
   options: ResolveBackendOptions & { excluded?: Set<string> },
@@ -3365,6 +3453,7 @@ async function resolveAnyWebPoolMember(
     .from(imageBackendGroup)
     .where(eq(imageBackendGroup.isEnabled, true))
     .orderBy(asc(imageBackendGroup.priority), asc(imageBackendGroup.createdAt));
+  const excluded = new Set(options.excluded);
 
   for (const group of groups) {
     if (!canUseBackendGroupForPlan(group.metadata, plan)) continue;
@@ -3377,36 +3466,45 @@ async function resolveAnyWebPoolMember(
       requestedModel: options.requestedModel,
       forceFirefly: options.forceFirefly,
     });
-    const member = await selectPoolMember(
-      group.id,
-      group.metadata,
-      group.contentSafetyEnabled,
-      await listSelectableGroupContexts(group, plan, options.requestKind),
-      options.requestKind,
-      options.excluded,
-      options.preferredMemberId,
-      options.preferredMemberType,
-      null,
-      null,
-      "web",
-      options.accountBackendPreferenceMode,
-      modelRouting.requestedModel,
-      modelRouting.forceFirefly,
-      0,
-      0,
-      options.accountPlanFilter ?? "any"
+    const groupContexts = await listSelectableGroupContexts(
+      group,
+      plan,
+      options.requestKind
     );
-    if (!member) continue;
-    if (member.type === "account" && member.implementationMode === "web") {
-      return { group, member };
+    while (true) {
+      const member = await selectPoolMember(
+        group.id,
+        group.metadata,
+        group.contentSafetyEnabled,
+        groupContexts,
+        options.requestKind,
+        excluded,
+        options.preferredMemberId,
+        options.preferredMemberType,
+        null,
+        null,
+        "web",
+        options.accountBackendPreferenceMode,
+        modelRouting.requestedModel,
+        modelRouting.forceFirefly,
+        0,
+        0,
+        options.accountPlanFilter ?? "any",
+        options.webRequestMode ?? "image"
+      );
+      if (!member) break;
+      if (member.type === "account" && member.implementationMode === "web") {
+        return { group, member };
+      }
+      // 同组下一轮必须排除刚才的非 Web 成员，否则会反复租用最高优先级候选。
+      excluded.add(backendKey(member));
+      await releaseImageBackendInflightLease({
+        memberType: member.type,
+        memberId: member.id,
+        leaseId: member.leaseId,
+        leasePersisted: member.leasePersisted,
+      }).catch(() => {});
     }
-    // 非 web 成员(混合组里的 api/responses、或非 web 的 account):释放租约后试下一组。
-    await releaseImageBackendInflightLease({
-      memberType: member.type,
-      memberId: member.id,
-      leaseId: member.leaseId,
-      leasePersisted: member.leasePersisted,
-    }).catch(() => {});
   }
 
   return null;
@@ -3458,7 +3556,8 @@ async function resolveAnyResponsesPoolMember(
       modelRouting.forceFirefly,
       0,
       0,
-      options.accountPlanFilter ?? "any"
+      options.accountPlanFilter ?? "any",
+      options.webRequestMode ?? "image"
     );
     if (member) return { group, member };
   }
@@ -3476,7 +3575,12 @@ export async function resolveImageBackendPoolConfig(
   if (!resolved) return null;
   try {
     if (!resolved.member.leaseTouchedMember) {
-      await touchSelectedMember(resolved.member);
+      await touchSelectedMember(resolved.member, {
+        preserveAvailabilityState:
+          options.webRequestMode === "text" &&
+          resolved.member.type === "account" &&
+          resolved.member.implementationMode === "web",
+      });
     }
     const result = toResolvedPoolConfig(
       resolved.group.id,
@@ -3723,9 +3827,11 @@ export async function reportImageBackendResult(
     alwaysActive && failure?.status !== "error" ? {} : failure;
   const backend = normalizeAccountBackend(account?.implementationMode);
   const webSuccess =
-    input.success && backend === "web"
+    input.success && backend === "web" && input.consumeWebImageQuota !== false
       ? nextWebAccountMetadataAfterSuccess(account?.metadata)
       : null;
+  const preserveWebImageAvailability =
+    input.success && backend === "web" && input.consumeWebImageQuota === false;
   const metadata = nextSchedulerMetadataAfterResult(
     webSuccess?.metadata ?? account?.metadata,
     input,
@@ -3736,15 +3842,23 @@ export async function reportImageBackendResult(
     .update(imageBackendAccount)
     .set(
       input.success
-        ? {
-            successCount: sql`${imageBackendAccount.successCount} + 1`,
-            metadata,
-            status: webSuccess?.status || "active",
-            lastError: null,
-            lastErrorAt: null,
-            cooldownUntil: webSuccess ? webSuccess.cooldownUntil : null,
-            updatedAt: now,
-          }
+        ? preserveWebImageAvailability
+          ? {
+              // 文本成功只能证明 Chat 能力可用，不能据此清除 image_gen 的额度、
+              // 冷却或最后错误；否则后续图片请求会把仅文本可用的账号当成已恢复。
+              successCount: sql`${imageBackendAccount.successCount} + 1`,
+              metadata,
+              updatedAt: now,
+            }
+          : {
+              successCount: sql`${imageBackendAccount.successCount} + 1`,
+              metadata,
+              status: webSuccess?.status || "active",
+              lastError: null,
+              lastErrorAt: null,
+              cooldownUntil: webSuccess ? webSuccess.cooldownUntil : null,
+              updatedAt: now,
+            }
         : {
             failCount: sql`${imageBackendAccount.failCount} + 1`,
             metadata,

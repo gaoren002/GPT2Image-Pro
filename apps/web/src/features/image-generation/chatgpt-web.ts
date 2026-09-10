@@ -1847,6 +1847,13 @@ function completedImageGenerationErrorFromNode(node: unknown) {
 
 /** 从未知增量载荷里递归寻找已完成的 assistant/tool 图片额度错误。 */
 function completedImageGenerationErrorFromValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      const error = completedImageGenerationErrorFromValue(nested);
+      if (error) return error;
+    }
+    return "";
+  }
   if (!isRecord(value)) return "";
   const direct = completedImageGenerationErrorFromNode(value);
   if (direct) return direct;
@@ -1948,6 +1955,7 @@ function extractWebSystemError(payload: unknown): string {
 
 function extractWebStreamError(text: string) {
   const normalized = text.replace(/\r\n/g, "\n");
+  let completedQuotaError = "";
   for (const block of normalized.split("\n\n")) {
     if (!block.trim()) continue;
     let eventName = "";
@@ -1975,10 +1983,13 @@ function extractWebStreamError(text: string) {
     // 不能落到 "no image output" 兜底。
     const systemError = payload ? extractWebSystemError(payload) : "";
     if (systemError) return systemError;
-    const completedQuotaError = payload
+    const blockQuotaError = payload
       ? completedImageGenerationErrorFromValue(payload)
       : "";
-    if (completedQuotaError) return completedQuotaError;
+    if (blockQuotaError) {
+      completedQuotaError ||= blockQuotaError;
+      continue;
+    }
     const message = payload ? webErrorPayloadMessage(payload) : "";
     const code =
       typeof payload?.code === "string"
@@ -2003,10 +2014,12 @@ function extractWebStreamError(text: string) {
       if (message || code) return message || code;
     }
   }
+  const streamHasImage = hasImageIds(extractImageIds(text));
+  if (completedQuotaError) return streamHasImage ? "" : completedQuotaError;
   const match = text.match(
     /(usage limit[^"\n]*|usage_limit[^"\n]*|limit has been reached[^"\n]*|limit_reached[^"\n]*|rate limit[^"\n]*|rate_limit[^"\n]*|too many requests[^"\n]*|(?:the )?quota (?:has been )?exceeded[^"\n]*|billing_hard_limit[^"\n]*)/i
   );
-  return match?.[1] || "";
+  return match && !streamHasImage ? match[1] || "" : "";
 }
 
 function sleep(ms: number) {
@@ -2016,6 +2029,14 @@ function sleep(ms: number) {
 type ImagePollOptions = {
   deadline?: number;
   regularPollingStartsAt?: number;
+};
+
+type ImageConversationSnapshot = {
+  candidates: WebImageCandidate[];
+  selectionMessageId?: string;
+  selectedImageMessageId?: string;
+  parentMessageId: string;
+  error?: string;
 };
 
 /** 等到下次状态查询，但绝不睡过本轮共享截止时间。 */
@@ -2076,13 +2097,60 @@ function isWebRateLimited(message: string) {
   return /429|too many requests|rate limit/i.test(message);
 }
 
+/** 同时解析一份会话快照中的图片、选择信息和当前轮终态错误。 */
+function imageConversationSnapshot(
+  text: string,
+  requestMessageId: string
+): ImageConversationSnapshot {
+  const candidates = imageCandidatesAfterMessage(text, requestMessageId);
+  const parentMessageId = latestConversationMessageIdAfter(
+    text,
+    requestMessageId
+  );
+  if (candidates.length) {
+    const selection = imageSelectionAfterMessage(text, requestMessageId);
+    return {
+      candidates,
+      selectionMessageId: selection.messageId,
+      selectedImageMessageId: selection.selectedImageMessageId,
+      parentMessageId,
+    };
+  }
+  const error = extractCompletedImageGenerationError(text, requestMessageId);
+  return {
+    candidates: [],
+    parentMessageId,
+    ...(error ? { error } : {}),
+  };
+}
+
+/**
+ * 已有 SSE 图片时只补读一次会话快照，用完整候选和选择元数据覆盖流里的扁平 ID。
+ * 查询失败时保留流结果；此探测不睡眠、不重试。
+ */
+async function probeImageCandidates(
+  config: ApiConfig,
+  conversationId: string,
+  requestMessageId: string,
+  signal?: AbortSignal
+): Promise<ImageConversationSnapshot> {
+  throwIfAborted(signal);
+  try {
+    const text = await getConversationText(config, conversationId, signal);
+    return imageConversationSnapshot(text, requestMessageId);
+  } catch {
+    throwIfAborted(signal);
+    return { candidates: [], parentMessageId: "" };
+  }
+}
+
 async function pollImageCandidates(
   config: ApiConfig,
   conversationId: string,
   requestMessageId: string,
   signal?: AbortSignal,
   options?: ImagePollOptions
-) {
+): Promise<ImageConversationSnapshot> {
   const deadline = options?.deadline ?? Date.now() + IMAGE_POLL_TIMEOUT_MS;
   let firstPoll = true;
   while (Date.now() < deadline) {
@@ -2103,30 +2171,8 @@ async function pollImageCandidates(
       firstPoll = false;
       continue;
     }
-    const candidates = imageCandidatesAfterMessage(text, requestMessageId);
-    if (candidates.length) {
-      const selection = imageSelectionAfterMessage(text, requestMessageId);
-      return {
-        candidates,
-        selectionMessageId: selection.messageId,
-        selectedImageMessageId: selection.selectedImageMessageId,
-        parentMessageId: latestConversationMessageIdAfter(
-          text,
-          requestMessageId
-        ),
-      };
-    }
-    const error = extractCompletedImageGenerationError(text, requestMessageId);
-    if (error) {
-      return {
-        candidates: [],
-        parentMessageId: latestConversationMessageIdAfter(
-          text,
-          requestMessageId
-        ),
-        error,
-      };
-    }
+    const snapshot = imageConversationSnapshot(text, requestMessageId);
+    if (snapshot.candidates.length || snapshot.error) return snapshot;
     await waitForNextImagePoll(
       deadline,
       IMAGE_POLL_INTERVAL_MS,
@@ -2166,19 +2212,27 @@ async function resolveImageCandidateUrls(
   signal?: AbortSignal,
   options?: ImagePollOptions
 ) {
+  const hasStreamIds = hasImageIds(streamIds);
   const polled =
-    conversationId && requestMessageId && !hasImageIds(streamIds)
-      ? await pollImageCandidates(
-          config,
-          conversationId,
-          requestMessageId,
-          signal,
-          options
-        )
+    conversationId && requestMessageId
+      ? hasStreamIds
+        ? await probeImageCandidates(
+            config,
+            conversationId,
+            requestMessageId,
+            signal
+          )
+        : await pollImageCandidates(
+            config,
+            conversationId,
+            requestMessageId,
+            signal,
+            options
+          )
       : null;
   const candidates = polled?.candidates.length
     ? polled.candidates
-    : hasImageIds(streamIds)
+    : hasStreamIds
       ? [{ ...streamIds }]
       : [];
   const outputs: Array<{
@@ -2221,7 +2275,7 @@ async function resolveImageCandidateUrls(
     selectionMessageId: polled?.selectionMessageId || "",
     selectedImageMessageId: polled?.selectedImageMessageId || "",
     parentMessageId: polled?.parentMessageId || "",
-    error: polled?.error,
+    error: outputs.length ? undefined : polled?.error,
   };
 }
 

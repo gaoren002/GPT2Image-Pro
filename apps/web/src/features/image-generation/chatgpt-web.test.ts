@@ -713,6 +713,99 @@ describe("ChatGPT Web image choices", () => {
     );
   });
 
+  it("从 batch v 数组中的 assistant 终稿识别图片额度耗尽", () => {
+    const message = {
+      id: "quota-answer",
+      author: { role: "assistant" },
+      channel: "final",
+      end_turn: true,
+      content: {
+        content_type: "text",
+        parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+      },
+    };
+    const sse = `data: ${JSON.stringify({ o: "batch", v: [{ message }] })}\n\n`;
+
+    expect(__testing__.extractWebStreamError(sse)).toContain(
+      "图像生成请求上限"
+    );
+  });
+
+  it("完整 SSE 后段已有图片时忽略前段 assistant 额度终稿", () => {
+    const quotaMessage = {
+      id: "quota-answer",
+      author: { role: "assistant" },
+      channel: "final",
+      end_turn: true,
+      content: {
+        content_type: "text",
+        parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+      },
+    };
+    const imageMessage = {
+      id: "generated-image",
+      author: { role: "assistant" },
+      content: {
+        content_type: "multimodal_text",
+        parts: [{ asset_pointer: "sediment://generated-image" }],
+      },
+    };
+    const sse = [
+      `data: ${JSON.stringify({ o: "add", v: { message: quotaMessage } })}`,
+      "",
+      `data: ${JSON.stringify({ o: "add", v: { message: imageMessage } })}`,
+      "",
+    ].join("\n");
+
+    expect(__testing__.extractWebStreamError(sse)).toBe("");
+  });
+
+  it("完整 SSE 即使后段有图片也保持 tool system_error 强优先", () => {
+    const toolError = {
+      id: "tool-error",
+      author: { role: "tool" },
+      content: {
+        content_type: "system_error",
+        name: "ChatGPTAgentToolRateLimitException",
+        text: "unable to invoke the image_gen.text2im tool right now",
+      },
+    };
+    const imageMessage = {
+      id: "generated-image",
+      author: { role: "assistant" },
+      content: {
+        content_type: "multimodal_text",
+        parts: [{ asset_pointer: "sediment://generated-image" }],
+      },
+    };
+    const sse = [
+      `data: ${JSON.stringify({ o: "add", v: { message: toolError } })}`,
+      "",
+      `data: ${JSON.stringify({ o: "add", v: { message: imageMessage } })}`,
+      "",
+    ].join("\n");
+
+    expect(__testing__.extractWebStreamError(sse)).toContain(
+      "ChatGPTAgentToolRateLimitException"
+    );
+  });
+
+  it("assistant analysis 即使包含完整额度模板也不作为终态错误", () => {
+    const message = {
+      id: "analysis",
+      author: { role: "assistant" },
+      channel: "analysis",
+      status: "finished_successfully",
+      content: {
+        content_type: "text",
+        parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+      },
+    };
+    const sse = `data: ${JSON.stringify({ o: "add", v: { message } })}\n\n`;
+
+    expect(__testing__.extractWebStreamError(sse)).toBe("");
+  });
+
   it("用户消息里包含完整额度模板时不把提示词误判为上游限额", () => {
     const message = {
       id: "quota-prompt",
@@ -1042,6 +1135,133 @@ describe("ChatGPT Web image choices", () => {
 
     expect(result.error).toBeUndefined();
     expect(result.candidates[0]?.sedimentIds).toEqual(["generated-image"]);
+  });
+
+  it("已有流图时立即探测会话并优先使用完整多候选与选择元数据", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const conversation = {
+      messages: [
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "current-turn" },
+          content: { content_type: "text", parts: ["画两张猫"] },
+        },
+        {
+          id: "selection",
+          author: { role: "assistant" },
+          metadata: {
+            working_turn_id: "current-turn",
+            selected_image_message_id: "image-one",
+          },
+          content: { content_type: "text", parts: [] },
+        },
+        {
+          id: "image-one",
+          author: { role: "assistant" },
+          metadata: {
+            working_turn_id: "current-turn",
+            image_gen_group_id: "group-one",
+            generation_index: 1,
+          },
+          content: {
+            content_type: "multimodal_text",
+            parts: [{ asset_pointer: "sediment://candidate-one" }],
+          },
+        },
+        {
+          id: "image-two",
+          author: { role: "assistant" },
+          metadata: {
+            working_turn_id: "current-turn",
+            image_gen_group_id: "group-one",
+            generation_index: 2,
+          },
+          content: {
+            content_type: "multimodal_text",
+            parts: [{ asset_pointer: "sediment://candidate-two" }],
+          },
+        },
+      ],
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url) => {
+        const requestUrl = String(url);
+        if (requestUrl.includes("/backend-api/conversations/conversation")) {
+          return Response.json(conversation);
+        }
+        const fileId = requestUrl.match(/attachment\/([^/]+)\/download$/)?.[1];
+        if (fileId) {
+          return Response.json({ download_url: `https://download/${fileId}` });
+        }
+        throw new Error(`unexpected request: ${requestUrl}`);
+      });
+
+    const result = await __testing__.resolveImageCandidateUrls(
+      { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+      "conversation",
+      { fileIds: [], sedimentIds: ["stream-partial"] },
+      "request",
+      undefined,
+      {
+        deadline: Date.now() + 120_000,
+        regularPollingStartsAt: Date.now() + 45_000,
+      }
+    );
+
+    expect(result.outputs).toEqual([
+      {
+        url: "https://download/candidate-one",
+        messageId: "image-one",
+        groupId: "group-one",
+        generationIndex: 1,
+      },
+      {
+        url: "https://download/candidate-two",
+        messageId: "image-two",
+        groupId: "group-one",
+        generationIndex: 2,
+      },
+    ]);
+    expect(result.selectionMessageId).toBe("selection");
+    expect(result.selectedImageMessageId).toBe("image-one");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("已有流图但即时会话快照为空时直接使用流图，不进入定期轮询", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url) => {
+        const requestUrl = String(url);
+        if (requestUrl.includes("/backend-api/conversations/conversation")) {
+          return Response.json({ mapping: {} });
+        }
+        if (requestUrl.includes("/attachment/stream-image/download")) {
+          return Response.json({
+            download_url: "https://download/stream-image",
+          });
+        }
+        throw new Error(`unexpected request: ${requestUrl}`);
+      });
+
+    const result = await __testing__.resolveImageCandidateUrls(
+      { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+      "conversation",
+      { fileIds: [], sedimentIds: ["stream-image"] },
+      "request",
+      undefined,
+      {
+        deadline: Date.now() + 120_000,
+        regularPollingStartsAt: Date.now() + 45_000,
+      }
+    );
+
+    expect(result.outputs.map((output) => output.url)).toEqual([
+      "https://download/stream-image",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("候选轮询耗尽后不再开启第二个 ID 轮询窗口", async () => {

@@ -107,8 +107,8 @@ jobs:
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          draft: false
-          body_path: docs/releases/${{ github.ref_name }}.md
+          draft: true
+          generate_release_notes: true
           files: |
             gpt2image-pro-${{ github.ref_name }}.compose.tar.gz
             gpt2image-pro-${{ github.ref_name }}.compose.zip

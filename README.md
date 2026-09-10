@@ -8,7 +8,7 @@
 <p align="center">
   <a href="https://github.com/gaoren002/GPT2Image-Pro/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/gaoren002/GPT2Image-Pro?style=social" /></a>
   <a href="https://github.com/gaoren002/GPT2Image-Pro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-AGPL--3.0-green" /></a>
-  <a href="https://github.com/gaoren002/GPT2Image-Pro/releases"><img alt="Release" src="https://img.shields.io/badge/Release-v0.9.0-blue" /></a>
+  <a href="https://github.com/gaoren002/GPT2Image-Pro/releases"><img alt="Release" src="https://img.shields.io/badge/Release-v0.9.1-blue" /></a>
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" />
   <img alt="Docker" src="https://img.shields.io/badge/Docker-GHCR-2496ED?logo=docker&logoColor=white" />

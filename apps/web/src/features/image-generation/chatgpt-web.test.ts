@@ -566,6 +566,12 @@ describe("ChatGPT Web 抓包协议回归", () => {
 });
 
 describe("ChatGPT Web image choices", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
   it.each([
     undefined,
     "gpt-image-2.5",
@@ -687,6 +693,42 @@ describe("ChatGPT Web image choices", () => {
     ).toBe("The quota has been exceeded.");
   });
 
+  it("从 Web SSE 的中文 assistant 终稿识别图片额度耗尽", () => {
+    const message = {
+      id: "quota-answer",
+      author: { role: "assistant" },
+      channel: "final",
+      end_turn: true,
+      content: {
+        content_type: "text",
+        parts: [
+          "你已达到 Free 套餐的图像生成请求上限。上限将在 22 小时后重置。",
+        ],
+      },
+    };
+    const sse = `data: ${JSON.stringify({ o: "add", v: { message } })}\n\n`;
+
+    expect(__testing__.extractWebStreamError(sse)).toContain(
+      "图像生成请求上限"
+    );
+  });
+
+  it("用户消息里包含完整额度模板时不把提示词误判为上游限额", () => {
+    const message = {
+      id: "quota-prompt",
+      author: { role: "user" },
+      content: {
+        content_type: "text",
+        parts: [
+          "海报原文：你已达到 Free 套餐的图像生成请求上限。上限将在 22 小时后重置。",
+        ],
+      },
+    };
+    const sse = `data: ${JSON.stringify({ o: "add", v: { message } })}\n\n`;
+
+    expect(__testing__.extractWebStreamError(sse)).toBe("");
+  });
+
   it("递归取出包在 o/v 流式增量 v 里的错误文案", () => {
     expect(
       __testing__.extractWebErrorPayloadMessage(
@@ -750,6 +792,282 @@ describe("ChatGPT Web image choices", () => {
         v: { message: { id: "abc", content: { content_type: "text" } } },
       })
     ).toBe("");
+  });
+
+  it("仅从当前请求之后的已完成 assistant/tool 节点提取额度错误", () => {
+    const conversation = {
+      messages: [
+        {
+          id: "history-request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "history-turn" },
+          content: { content_type: "text", parts: ["画一只猫"] },
+        },
+        {
+          id: "history-answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "history-turn" },
+          content: {
+            content_type: "text",
+            parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+          },
+        },
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "text",
+            parts: ["海报里写上“图像生成请求上限”这几个字"],
+          },
+        },
+        {
+          id: "answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "text",
+            parts: [
+              "你已达到 Free 套餐的图像生成请求上限。上限将在 22 小时后重置。",
+            ],
+          },
+        },
+      ],
+    };
+
+    expect(
+      __testing__.extractCompletedImageGenerationError(
+        JSON.stringify(conversation),
+        "request"
+      )
+    ).toContain("图像生成请求上限");
+    expect(
+      __testing__.extractCompletedImageGenerationError(
+        JSON.stringify({
+          messages: conversation.messages.slice(0, 3),
+        }),
+        "request"
+      )
+    ).toBe("");
+  });
+
+  it("从当前请求后的 tool system_error 立即提取额度错误", () => {
+    const conversation = {
+      messages: [
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "current-turn" },
+          content: { content_type: "text", parts: ["画一只猫"] },
+        },
+        {
+          id: "tool-error",
+          author: { role: "tool" },
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "system_error",
+            name: "ChatGPTAgentToolRateLimitException",
+            text: "unable to invoke the image_gen.text2im tool right now",
+          },
+        },
+      ],
+    };
+
+    expect(
+      __testing__.extractCompletedImageGenerationError(
+        JSON.stringify(conversation),
+        "request"
+      )
+    ).toContain("ChatGPTAgentToolRateLimitException");
+  });
+
+  it("轮询首次快照发现已完成额度回复后立即返回", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const conversation = {
+      messages: [
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "current-turn" },
+          content: { content_type: "text", parts: ["画一只猫"] },
+        },
+        {
+          id: "answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "text",
+            parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+          },
+        },
+      ],
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(Response.json(conversation));
+
+    const result = await __testing__.pollImageCandidates(
+      { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+      "conversation",
+      "request"
+    );
+
+    expect(result.error).toContain("图像生成请求上限");
+    expect(result.candidates).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("SSE 未带图时先探测一次额度终态，不等待 45 秒静默期", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    let requestMessageId = "";
+    let conversationReads = 0;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url, init) => {
+        const requestUrl = String(url);
+        if (requestUrl === "https://chatgpt.com/") {
+          return new Response(
+            '<html data-build="test-build"><script src="/backend-api/sentinel/sdk.js"></script></html>'
+          );
+        }
+        if (requestUrl.endsWith("/backend-api/f/conversation/prepare")) {
+          return Response.json({ conduit_token: "test-conduit" });
+        }
+        if (
+          requestUrl.endsWith("/backend-api/sentinel/chat-requirements/prepare")
+        ) {
+          return Response.json({
+            prepare_token: "test-prepare",
+            proofofwork: { required: false },
+            turnstile: { required: false },
+          });
+        }
+        if (
+          requestUrl.endsWith(
+            "/backend-api/sentinel/chat-requirements/finalize"
+          )
+        ) {
+          return Response.json({ token: "test-requirements" });
+        }
+        if (requestUrl.endsWith("/backend-api/f/conversation")) {
+          const body = JSON.parse(String(init?.body));
+          requestMessageId = String(body.messages[0].id);
+          return new Response(
+            `data: ${JSON.stringify({ conversation_id: "conversation" })}\n\ndata: [DONE]\n\n`
+          );
+        }
+        if (requestUrl.includes("/backend-api/conversations/conversation")) {
+          conversationReads += 1;
+          return Response.json({
+            messages: [
+              {
+                id: requestMessageId,
+                author: { role: "user" },
+                content: { content_type: "text", parts: ["画一只猫"] },
+              },
+              {
+                id: "quota-answer",
+                author: { role: "assistant" },
+                channel: "final",
+                end_turn: true,
+                metadata: { parent_id: requestMessageId },
+                content: {
+                  content_type: "text",
+                  parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+                },
+              },
+            ],
+          });
+        }
+        throw new Error(`unexpected request: ${requestUrl}`);
+      });
+
+    const result = await generateImageWithChatGptWeb(
+      { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+      { prompt: "画一只猫" }
+    );
+
+    expect(result.error).toContain("图像生成请求上限");
+    expect(conversationReads).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("同一轮快照同时有图片和额度文字时优先返回图片", async () => {
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const conversation = {
+      messages: [
+        {
+          id: "request",
+          author: { role: "user" },
+          metadata: { working_turn_id: "current-turn" },
+          content: { content_type: "text", parts: ["画一只猫"] },
+        },
+        {
+          id: "image",
+          author: { role: "assistant" },
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "multimodal_text",
+            parts: [{ asset_pointer: "sediment://generated-image" }],
+          },
+        },
+        {
+          id: "answer",
+          author: { role: "assistant" },
+          channel: "final",
+          end_turn: true,
+          metadata: { working_turn_id: "current-turn" },
+          content: {
+            content_type: "text",
+            parts: ["你已达到 Free 套餐的图像生成请求上限。"],
+          },
+        },
+      ],
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json(conversation)
+    );
+
+    const result = await __testing__.pollImageCandidates(
+      { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+      "conversation",
+      "request"
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.candidates[0]?.sedimentIds).toEqual(["generated-image"]);
+  });
+
+  it("候选轮询耗尽后不再开启第二个 ID 轮询窗口", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-10T00:00:00Z"));
+    vi.stubEnv("CHATGPT_WEB_PROXY_URL", "");
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(Response.json({ mapping: {} }));
+    try {
+      const promise = __testing__.resolveImageCandidateUrls(
+        { baseUrl: "https://chatgpt.com", apiKey: "test-token" },
+        "conversation",
+        { fileIds: [], sedimentIds: [] },
+        "request",
+        undefined,
+        { deadline: Date.now() + 12_000 }
+      );
+      await vi.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result.outputs).toEqual([]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("extracts sibling image candidates after a request message", () => {

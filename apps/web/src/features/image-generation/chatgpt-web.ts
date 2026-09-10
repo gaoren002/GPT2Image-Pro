@@ -1443,10 +1443,6 @@ type WebImageCandidate = {
 
 type WebImageIds = ReturnType<typeof extractImageIds>;
 
-function emptyImageIds(): WebImageIds {
-  return { fileIds: [], sedimentIds: [] };
-}
-
 function hasImageIds(ids: WebImageIds) {
   return ids.fileIds.length > 0 || ids.sedimentIds.length > 0;
 }
@@ -1491,13 +1487,6 @@ function mergeImageCandidates(candidates: WebImageCandidate[]) {
 
 function dedupeStrings(values: string[]) {
   return [...new Set(values.filter(Boolean))];
-}
-
-function mergeImageIds(...items: WebImageIds[]) {
-  return {
-    fileIds: dedupeStrings(items.flatMap((item) => item.fileIds)),
-    sedimentIds: dedupeStrings(items.flatMap((item) => item.sedimentIds)),
-  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1683,15 +1672,6 @@ function conversationNodesAfterMessage(
   );
 }
 
-function scopedConversationTextAfterMessage(
-  conversationText: string,
-  requestMessageId: string
-) {
-  return conversationNodesAfterMessage(conversationText, requestMessageId)
-    .map(({ node }) => JSON.stringify(node))
-    .join("\n");
-}
-
 function imageIdsFromJson(value: unknown): WebImageIds {
   return extractImageIds(JSON.stringify(value));
 }
@@ -1804,6 +1784,79 @@ function nodeEndTurn(node: unknown): boolean {
   return Boolean(message && message.end_turn === true);
 }
 
+/** 已完成消息的状态；兼容旧 mapping 的 end_turn 与新版 messages 的 status。 */
+function nodeIsComplete(node: unknown): boolean {
+  if (nodeEndTurn(node)) return true;
+  const message = nodeMessageObject(node);
+  const status =
+    message && typeof message.status === "string"
+      ? message.status.toLowerCase()
+      : "";
+  return [
+    "finished",
+    "finished_successfully",
+    "complete",
+    "completed",
+  ].includes(status);
+}
+
+/**
+ * 严格识别图片额度耗尽文案。
+ *
+ * WHY:用户提示词也可能包含“上限”等字样，只有同时具备图片生成语义和明确额度/重置
+ * 语义才算确定性限额；工具异常名是 ChatGPT 自身的强信号，可直接命中。
+ */
+function isImageGenerationQuotaError(text: string) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  if (
+    /ChatGPTAgentToolRateLimitException/i.test(normalized) ||
+    (/image_gen\.text2im/i.test(normalized) &&
+      /unable to invoke|rate.?limit|quota|limit/i.test(normalized))
+  ) {
+    return true;
+  }
+  const hasImageContext =
+    /image generation|image generations requests|creat(?:e|ing) more images|image requests?|(?:图片|图像)\s*生成|生成\s*(?:图片|图像)/i.test(
+      normalized
+    );
+  const hasQuotaContext =
+    /usage limit|free (?:plan|tier).{0,32}limit|quota.{0,24}(?:exceeded|exhausted|depleted)|limit (?:has been reached|resets?)|rate.?limit|too many requests|(?:请求)?上限|限额|额度.{0,16}(?:耗尽|用完|不足|重置|恢复)|(?:已|已经).{0,8}(?:达到|超出).{0,24}(?:上限|限制)|上限.{0,24}(?:重置|恢复)/i.test(
+      normalized
+    );
+  return hasImageContext && hasQuotaContext;
+}
+
+/** 从单个已完成 assistant/tool 节点提取确定性的图片额度错误。 */
+function completedImageGenerationErrorFromNode(node: unknown) {
+  const role = nodeAuthorRole(node);
+  if ((role !== "assistant" && role !== "tool") || !nodeIsComplete(node)) {
+    return "";
+  }
+  const message = nodeMessageObject(node);
+  if (
+    role === "assistant" &&
+    ((typeof message?.channel === "string" && message.channel !== "final") ||
+      (typeof message?.recipient === "string" && message.recipient !== "all"))
+  ) {
+    return "";
+  }
+  const text = nodeTextContent(node);
+  return isImageGenerationQuotaError(text) ? text.slice(0, 500) : "";
+}
+
+/** 从未知增量载荷里递归寻找已完成的 assistant/tool 图片额度错误。 */
+function completedImageGenerationErrorFromValue(value: unknown): string {
+  if (!isRecord(value)) return "";
+  const direct = completedImageGenerationErrorFromNode(value);
+  if (direct) return direct;
+  for (const nested of Object.values(value)) {
+    const error = completedImageGenerationErrorFromValue(nested);
+    if (error) return error;
+  }
+  return "";
+}
+
 /**
  * 从 requestMessageId 之后的节点里抽出 assistant 最终文字答复。
  * text:最后一条 assistant text 节点的内容(定稿答复);complete:该 turn 是否已 end_turn 收尾。
@@ -1833,6 +1886,26 @@ function extractAssistantAnswer(
     }
   }
   return { text, complete };
+}
+
+/**
+ * 只检查本次请求之后的会话节点，返回已完成的工具系统错误或图片额度错误。
+ * 图片候选由调用方先检查，确保同一快照里已经有图时以成功结果为准。
+ */
+function extractCompletedImageGenerationError(
+  conversationText: string,
+  requestMessageId: string
+) {
+  for (const { node } of conversationNodesAfterMessage(
+    conversationText,
+    requestMessageId
+  )) {
+    const systemError = extractWebSystemError(node);
+    if (systemError) return systemError;
+    const quotaError = completedImageGenerationErrorFromNode(node);
+    if (quotaError) return quotaError;
+  }
+  return "";
 }
 
 /**
@@ -1902,6 +1975,10 @@ function extractWebStreamError(text: string) {
     // 不能落到 "no image output" 兜底。
     const systemError = payload ? extractWebSystemError(payload) : "";
     if (systemError) return systemError;
+    const completedQuotaError = payload
+      ? completedImageGenerationErrorFromValue(payload)
+      : "";
+    if (completedQuotaError) return completedQuotaError;
     const message = payload ? webErrorPayloadMessage(payload) : "";
     const code =
       typeof payload?.code === "string"
@@ -1934,6 +2011,22 @@ function extractWebStreamError(text: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type ImagePollOptions = {
+  deadline?: number;
+  regularPollingStartsAt?: number;
+};
+
+/** 等到下次状态查询，但绝不睡过本轮共享截止时间。 */
+async function waitForNextImagePoll(
+  deadline: number,
+  delayMs: number,
+  notBefore = 0
+) {
+  const now = Date.now();
+  const wakeAt = Math.min(deadline, Math.max(now + delayMs, notBefore));
+  if (wakeAt > now) await sleep(wakeAt - now);
 }
 
 /**
@@ -1983,50 +2076,15 @@ function isWebRateLimited(message: string) {
   return /429|too many requests|rate limit/i.test(message);
 }
 
-async function pollImageIds(
-  config: ApiConfig,
-  conversationId: string,
-  requestMessageId?: string,
-  signal?: AbortSignal
-) {
-  const deadline = Date.now() + IMAGE_POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    throwIfAborted(signal);
-    let text: string;
-    try {
-      text = await getConversationText(config, conversationId, signal);
-    } catch (error) {
-      // 单次状态查询失败(典型 429 会话查询限流 / 交接期瞬时错误)不该拖垮整次生成:
-      // 真 abort/超时上抛;否则按是否限流决定退避时长后继续轮询。
-      throwIfAborted(signal);
-      const message = error instanceof Error ? error.message : String(error);
-      await sleep(IMAGE_POLL_INTERVAL_MS * (isWebRateLimited(message) ? 3 : 1));
-      continue;
-    }
-    const scopedText = requestMessageId
-      ? scopedConversationTextAfterMessage(text, requestMessageId)
-      : text;
-    const ids = extractImageIds(scopedText);
-    if (hasImageIds(ids)) {
-      return {
-        ids,
-        parentMessageId: requestMessageId
-          ? latestConversationMessageIdAfter(text, requestMessageId)
-          : latestConversationMessageId(text),
-      };
-    }
-    await sleep(IMAGE_POLL_INTERVAL_MS);
-  }
-  return { ids: emptyImageIds(), parentMessageId: "" };
-}
-
 async function pollImageCandidates(
   config: ApiConfig,
   conversationId: string,
   requestMessageId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: ImagePollOptions
 ) {
-  const deadline = Date.now() + IMAGE_POLL_TIMEOUT_MS;
+  const deadline = options?.deadline ?? Date.now() + IMAGE_POLL_TIMEOUT_MS;
+  let firstPoll = true;
   while (Date.now() < deadline) {
     throwIfAborted(signal);
     let text: string;
@@ -2037,7 +2095,12 @@ async function pollImageCandidates(
       // 真 abort/超时上抛;否则按是否限流决定退避时长后继续轮询。
       throwIfAborted(signal);
       const message = error instanceof Error ? error.message : String(error);
-      await sleep(IMAGE_POLL_INTERVAL_MS * (isWebRateLimited(message) ? 3 : 1));
+      await waitForNextImagePoll(
+        deadline,
+        IMAGE_POLL_INTERVAL_MS * (isWebRateLimited(message) ? 3 : 1),
+        firstPoll ? options?.regularPollingStartsAt : 0
+      );
+      firstPoll = false;
       continue;
     }
     const candidates = imageCandidatesAfterMessage(text, requestMessageId);
@@ -2053,7 +2116,23 @@ async function pollImageCandidates(
         ),
       };
     }
-    await sleep(IMAGE_POLL_INTERVAL_MS);
+    const error = extractCompletedImageGenerationError(text, requestMessageId);
+    if (error) {
+      return {
+        candidates: [],
+        parentMessageId: latestConversationMessageIdAfter(
+          text,
+          requestMessageId
+        ),
+        error,
+      };
+    }
+    await waitForNextImagePoll(
+      deadline,
+      IMAGE_POLL_INTERVAL_MS,
+      firstPoll ? options?.regularPollingStartsAt : 0
+    );
+    firstPoll = false;
   }
   return { candidates: [], parentMessageId: "" };
 }
@@ -2079,75 +2158,22 @@ async function getDownloadUrl(
   return data.download_url || data.url || "";
 }
 
-async function resolveImageUrls(
-  config: ApiConfig,
-  conversationId: string,
-  ids: WebImageIds,
-  requestMessageId?: string,
-  signal?: AbortSignal
-) {
-  const polled =
-    conversationId && requestMessageId
-      ? await pollImageIds(config, conversationId, requestMessageId, signal)
-      : null;
-  const scopedHasIds = hasImageIds(polled?.ids || emptyImageIds());
-  const shouldPollUnscoped =
-    conversationId && !requestMessageId && !hasImageIds(ids) && !scopedHasIds;
-  const unscopedPolled =
-    !polled && shouldPollUnscoped
-      ? await pollImageIds(config, conversationId, undefined, signal)
-      : null;
-  const resolvedIds = scopedHasIds
-    ? mergeImageIds(polled?.ids || emptyImageIds(), ids)
-    : hasImageIds(unscopedPolled?.ids || emptyImageIds())
-      ? unscopedPolled?.ids || ids
-      : ids;
-  const urls: string[] = [];
-  for (const fileId of resolvedIds.fileIds) {
-    const url = await getDownloadUrl(
-      config,
-      `/backend-api/files/${fileId}/download`,
-      signal
-    );
-    if (url) urls.push(url);
-  }
-  const uniqueUrls = dedupeStrings(urls);
-  if (urls.length || !conversationId) {
-    return {
-      urls: uniqueUrls,
-      parentMessageId:
-        polled?.parentMessageId || unscopedPolled?.parentMessageId || "",
-    };
-  }
-  for (const sedimentId of resolvedIds.sedimentIds) {
-    const url = await getDownloadUrl(
-      config,
-      `/backend-api/conversation/${conversationId}/attachment/${sedimentId}/download`,
-      signal
-    );
-    if (url) urls.push(url);
-  }
-  return {
-    urls: dedupeStrings(urls),
-    parentMessageId:
-      polled?.parentMessageId || unscopedPolled?.parentMessageId || "",
-  };
-}
-
 async function resolveImageCandidateUrls(
   config: ApiConfig,
   conversationId: string,
   streamIds: WebImageIds,
   requestMessageId?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: ImagePollOptions
 ) {
   const polled =
-    conversationId && requestMessageId
+    conversationId && requestMessageId && !hasImageIds(streamIds)
       ? await pollImageCandidates(
           config,
           conversationId,
           requestMessageId,
-          signal
+          signal,
+          options
         )
       : null;
   const candidates = polled?.candidates.length
@@ -2190,28 +2216,12 @@ async function resolveImageCandidateUrls(
     }
   }
 
-  if (!outputs.length) {
-    const fallback = await resolveImageUrls(
-      config,
-      conversationId,
-      streamIds,
-      requestMessageId,
-      signal
-    );
-    for (const url of fallback.urls) outputs.push({ url });
-    return {
-      outputs,
-      selectionMessageId: polled?.selectionMessageId || "",
-      selectedImageMessageId: polled?.selectedImageMessageId || "",
-      parentMessageId: fallback.parentMessageId,
-    };
-  }
-
   return {
     outputs,
     selectionMessageId: polled?.selectionMessageId || "",
     selectedImageMessageId: polled?.selectedImageMessageId || "",
     parentMessageId: polled?.parentMessageId || "",
+    error: polled?.error,
   };
 }
 
@@ -2453,22 +2463,22 @@ async function runWebImage(
     let parentMessageId = extractLastMessageId(text);
     const selectionMessageIdFromStream = extractSelectionMessageId(text);
     const ids = extractImageIds(text);
-    // 发起后至少静默 IMAGE_POLL_INITIAL_DELAY_MS 再开始轮询状态:web 出图头 ~45s 几乎不可能就绪,
-    // 期间轮询纯属无谓请求且会把会话查询端点打到 429。流里已直接带出图则跳过等待(无需轮询)。
-    if (!hasImageIds(ids)) {
-      const waitMs = IMAGE_POLL_INITIAL_DELAY_MS - (Date.now() - launchedAt);
-      if (waitMs > 0) {
-        await sleep(waitMs);
-        throwIfAborted(abortController.signal);
-      }
-    }
+    // SSE 未直接带图时立即查一次会话：额度终稿通常此时已经落盘，可直接换号。普通生成仍从
+    // launchedAt + 45s 才开始定期轮询，避免为了快速识别限额而把会话端点打到 429。
+    const regularPollingStartsAt = launchedAt + IMAGE_POLL_INITIAL_DELAY_MS;
     const resolved = await resolveImageCandidateUrls(
       configWithSignal,
       conversationId,
       ids,
       requestMessageId,
-      abortController.signal
+      abortController.signal,
+      {
+        deadline:
+          Math.max(Date.now(), regularPollingStartsAt) + IMAGE_POLL_TIMEOUT_MS,
+        regularPollingStartsAt,
+      }
     );
+    if (resolved.error) return { error: resolved.error };
     const candidateImages = resolved.outputs;
     parentMessageId = resolved.parentMessageId || parentMessageId;
     if (conversationId && !parentMessageId) {
@@ -3381,9 +3391,11 @@ export const __testing__ = {
   imageSelectionAfterMessage,
   conversationNodesAfterMessage,
   extractImageIds,
+  extractCompletedImageGenerationError,
+  pollImageCandidates,
+  resolveImageCandidateUrls,
   outputMatchesInputImage,
   extractSelectionMessageId,
-  scopedConversationTextAfterMessage,
   extractEditableArtifacts,
   editableFilePrompt,
   extractAssistantAnswer,

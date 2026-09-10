@@ -1,3 +1,13 @@
+/** 创建页加载骨架，供 App Router 在表单与历史缩略图加载期间占位。 */
+const IMAGE_PLACEHOLDERS = [
+  "image-a",
+  "image-b",
+  "image-c",
+  "image-d",
+  "image-e",
+  "image-f",
+];
+
 export default function CreateLoading() {
   return (
     <div className="container mx-auto animate-pulse motion-reduce:animate-none px-4 py-6 md:px-6">
@@ -17,8 +27,8 @@ export default function CreateLoading() {
       <div className="space-y-4">
         <div className="h-6 w-24 rounded-md bg-muted" />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="aspect-square rounded-md bg-muted" />
+          {IMAGE_PLACEHOLDERS.map((key) => (
+            <div key={key} className="aspect-square rounded-md bg-muted" />
           ))}
         </div>
       </div>

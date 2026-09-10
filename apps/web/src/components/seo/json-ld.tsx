@@ -14,12 +14,8 @@ type LocaleType = "en" | "zh";
  * Generic JSON-LD script injector
  */
 function JsonLdScript({ data }: { data: object }) {
-  return (
-    <script
-      type="application/ld+json"
-      dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
-    />
-  );
+  const serialized = JSON.stringify(data).replace(/</g, "\\u003c");
+  return <script type="application/ld+json">{serialized}</script>;
 }
 
 /**

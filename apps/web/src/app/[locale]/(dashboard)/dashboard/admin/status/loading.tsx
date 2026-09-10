@@ -6,6 +6,30 @@
  * 此骨架在导航时立即显示,给出即时反馈;数据就绪后无缝替换为真实内容。
  * 结构对齐 page.tsx:页头 + 4 列指标卡 + 两栏明细块。
  */
+const METRIC_PLACEHOLDERS = ["usage", "latency", "success", "queue"];
+const PANEL_PLACEHOLDERS = [
+  {
+    key: "services",
+    rows: [
+      "services-a",
+      "services-b",
+      "services-c",
+      "services-d",
+      "services-e",
+    ],
+  },
+  {
+    key: "backends",
+    rows: [
+      "backends-a",
+      "backends-b",
+      "backends-c",
+      "backends-d",
+      "backends-e",
+    ],
+  },
+];
+
 export default function GlobalStatusLoading() {
   return (
     <div className="container mx-auto animate-pulse space-y-8 px-4 py-6 motion-reduce:animate-none md:px-6">
@@ -21,11 +45,8 @@ export default function GlobalStatusLoading() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div
-            key={`metric-${i}`}
-            className="space-y-3 rounded-lg border p-5"
-          >
+        {METRIC_PLACEHOLDERS.map((key) => (
+          <div key={key} className="space-y-3 rounded-lg border p-5">
             <div className="h-4 w-24 rounded bg-muted" />
             <div className="h-8 w-20 rounded bg-muted" />
             <div className="h-3 w-32 rounded bg-muted" />
@@ -34,11 +55,11 @@ export default function GlobalStatusLoading() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {Array.from({ length: 2 }).map((_, i) => (
-          <div key={`panel-${i}`} className="space-y-4 rounded-lg border p-6">
+        {PANEL_PLACEHOLDERS.map((panel) => (
+          <div key={panel.key} className="space-y-4 rounded-lg border p-6">
             <div className="h-5 w-32 rounded bg-muted" />
-            {Array.from({ length: 5 }).map((_, j) => (
-              <div key={`row-${i}-${j}`} className="h-4 w-full rounded bg-muted" />
+            {panel.rows.map((row) => (
+              <div key={row} className="h-4 w-full rounded bg-muted" />
             ))}
           </div>
         ))}

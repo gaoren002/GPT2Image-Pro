@@ -67,9 +67,10 @@ export async function exportLayeredPsdForUser(
   let elementIndex = 0;
   const layers: LayerSpec[] = await Promise.all(
     stackLayers.map(async (layer) => {
-      const image = await storage.getObject(layer.storageKey, bucket);
       const opaque = layer.role === "background";
-      const name = opaque ? "背景" : `元素 ${(elementIndex += 1)}`;
+      if (!opaque) elementIndex += 1;
+      const name = opaque ? "背景" : `元素 ${elementIndex}`;
+      const image = await storage.getObject(layer.storageKey, bucket);
       // 背景层不抠图、铺满不透明;元素层(白底生成)交给组装环节抠白底转透明。
       return { name, image, opaque };
     })

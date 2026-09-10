@@ -16,7 +16,7 @@ export const siteConfig = {
 
   links: {
     twitter: "https://twitter.com/gpt2image",
-    github: "https://github.com/MoYeRanqianzhi/GPT2Image",
+    github: "https://github.com/gaoren002/GPT2Image-Pro",
     discord: "",
   },
 

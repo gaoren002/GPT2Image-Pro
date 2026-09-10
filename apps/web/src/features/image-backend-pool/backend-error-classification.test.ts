@@ -367,6 +367,21 @@ describe("image backend error classification", () => {
     expect(remainMin).toBeLessThan(22 * 60);
   });
 
+  it("识别无异常名的英文 ChatGPT 生图额度终稿并按真实重置时间冷却", async () => {
+    const svc = await loadService();
+    const err =
+      "You've hit the Free plan limit for image generation requests. You can create more images when the limit resets in 22 hours.";
+
+    expect(svc.isImageBackendSwitchableError(err)).toBe(true);
+    const failure = await svc.classifyFailure(err);
+    expect(failure.status).toBe("limited");
+    expect(failure.cooldownUntil).toBeInstanceOf(Date);
+    const remainMin =
+      ((failure.cooldownUntil as Date).getTime() - Date.now()) / 60_000;
+    expect(remainMin).toBeGreaterThan(21 * 60 + 55);
+    expect(remainMin).toBeLessThanOrEqual(22 * 60);
+  });
+
   it("把中文 ChatGPT 生图额度上限归类为 limited,并按文案中的小时数冷却", async () => {
     const svc = await loadService();
     const err =

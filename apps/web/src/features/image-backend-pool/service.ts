@@ -1357,16 +1357,17 @@ function isLocalAbortTimeoutError(error?: string | null) {
 }
 
 /**
- * 识别 ChatGPT 中文界面返回的账号级图像额度上限。
+ * 识别 ChatGPT 助手终稿返回的账号级图像额度上限。
  *
  * 该响应可能只是普通助手文本而没有 HTTP 429 或英文错误码，因此同时要求出现
- * 图像生成语义与明确的请求/次数/额度耗尽语义，避免把一般中文错误误判为限流。
+ * 图像生成语义与明确的额度语义，避免把一般文本误判为限流。英文规则与 Web
+ * 会话终稿识别器保持一致，覆盖 Free plan 和 create more images 两类稳定文案。
  */
 function isChatGptImageQuotaLimitBackendError(error?: string | null) {
   const normalized = (error || "").toLowerCase();
-  const mentionsImageGeneration =
+  const mentionsChineseImageGeneration =
     normalized.includes("图像生成") || normalized.includes("图片生成");
-  const mentionsExhaustedQuota =
+  const mentionsChineseExhaustedQuota =
     normalized.includes("请求上限") ||
     normalized.includes("请求已达上限") ||
     normalized.includes("请求达到上限") ||
@@ -1379,7 +1380,18 @@ function isChatGptImageQuotaLimitBackendError(error?: string | null) {
         normalized.includes("耗尽") ||
         normalized.includes("已达到") ||
         normalized.includes("已达")));
-  return mentionsImageGeneration && mentionsExhaustedQuota;
+  const mentionsEnglishImageGeneration =
+    /image generation|image generations requests|creat(?:e|ing) more images|image requests?/.test(
+      normalized
+    );
+  const mentionsEnglishExhaustedQuota =
+    /usage limit|free (?:plan|tier).{0,32}limit|quota.{0,24}(?:exceeded|exhausted|depleted)|limit (?:has been reached|resets?)|rate.?limit|too many requests/.test(
+      normalized
+    );
+  return (
+    (mentionsChineseImageGeneration && mentionsChineseExhaustedQuota) ||
+    (mentionsEnglishImageGeneration && mentionsEnglishExhaustedQuota)
+  );
 }
 
 /**
@@ -1646,7 +1658,7 @@ function isUsageLimitBackendError(error?: string | null) {
 /**
  * 识别 ChatGPT 账号侧的画图额度限流。
  *
- * ChatGPT 可能返回 image_gen.text2im 的 RateLimitException，也可能只返回中文
+ * ChatGPT 可能返回 image_gen.text2im 的 RateLimitException，也可能只返回本地化
  * 助手提示且没有错误码。两种形式都表示账号暂时无额度，应按上游重置时间冷却并
  * 换号重试，不能归为缺少工具或普通 no-image 故障。
  */

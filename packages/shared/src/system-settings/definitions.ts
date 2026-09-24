@@ -149,6 +149,7 @@ export type SettingKey =
   | "REGISTRATION_BONUS_CREDITS"
   | "FREE_CREDITS_EXPIRY_DAYS"
   | "CREDITS_EXPIRY_DAYS"
+  | "CREDITS_RENEWAL_EXTENDS_EXPIRY"
   | "IMAGE_BASE_CREDITS_1024"
   | "IMAGE_BASE_CREDITS_4K"
   | "IMAGE_MODEL_MULTIPLIERS"
@@ -1380,6 +1381,15 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     category: "credits",
     valueType: "number",
     defaultValue: 0,
+  },
+  {
+    key: "CREDITS_RENEWAL_EXTENDS_EXPIRY",
+    label: "续费顺延积分有效期",
+    description:
+      "默认关闭。开启后，订阅续费/新周期发放积分时，自动把该用户名下【未到期】的订阅积分批次有效期顺延到新周期结束日（只延长、不缩短；已过期批次不追溯；积分包等非订阅批次不受影响）。",
+    category: "credits",
+    valueType: "boolean",
+    defaultValue: false,
   },
   {
     key: "IMAGE_BASE_CREDITS_1024",

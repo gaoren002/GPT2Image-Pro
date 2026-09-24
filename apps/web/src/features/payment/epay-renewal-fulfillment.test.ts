@@ -64,6 +64,9 @@ vi.mock("@repo/shared/config/subscription-plan", () => ({
 vi.mock("@repo/shared/credits/core", () => ({
   grantCredits,
   voidActiveSubscriptionCreditsForUpgrade: voidSubscriptionCredits,
+  extendActiveSubscriptionBatchesExpiry: vi
+    .fn()
+    .mockResolvedValue(0),
 }));
 vi.mock("@repo/shared/credits/packages", () => ({
   getCreditPackagePriceForPlan: vi.fn(),
@@ -71,6 +74,8 @@ vi.mock("@repo/shared/credits/packages", () => ({
 }));
 vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingNumber: vi.fn(),
+  // 续费顺延默认关闭；需要开启的用例在自身内覆写返回值。
+  getRuntimeSettingBoolean: vi.fn().mockResolvedValue(false),
 }));
 vi.mock("@repo/shared/subscription/services/user-plan", () => ({
   getUserPlanType: vi.fn(),
@@ -96,6 +101,8 @@ import {
 } from "@repo/shared/payment/epay";
 
 import { fulfillSuccessfulEpayPayment } from "./epay-fulfillment";
+import { extendActiveSubscriptionBatchesExpiry } from "@repo/shared/credits/core";
+import { getRuntimeSettingBoolean } from "@repo/shared/system-settings";
 
 const NOW = new Date("2026-08-02T12:00:00.000Z");
 
@@ -163,5 +170,21 @@ describe("Epay current-plan renewal fulfillment", () => {
     );
     expect(voidSubscriptionCredits).not.toHaveBeenCalled();
     expect(claimOrder).toHaveBeenCalledTimes(2);
+    // 默认（设置关闭）不触发续费顺延
+    expect(extendActiveSubscriptionBatchesExpiry).not.toHaveBeenCalled();
+  });
+
+  it("extends existing subscription batches expiry when the setting is enabled", async () => {
+    vi.mocked(getRuntimeSettingBoolean).mockResolvedValue(true);
+    vi.mocked(extendActiveSubscriptionBatchesExpiry).mockResolvedValue(2);
+
+    await fulfillSuccessfulEpayPayment(renewalPayment(), "epay-webhook");
+
+    const periodEnd = new Date("2026-09-02T12:00:00.000Z");
+    expect(extendActiveSubscriptionBatchesExpiry).toHaveBeenCalledWith({
+      userId: "user-1",
+      subscriptionId: "epay_renewal-1",
+      newExpiresAt: periodEnd,
+    });
   });
 });

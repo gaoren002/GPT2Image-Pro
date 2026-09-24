@@ -11,6 +11,7 @@ import {
   gte,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lt,
   or,
@@ -335,6 +336,49 @@ export async function ensureRegistrationBonusExpiry(userId: string) {
   if (updatedBatches.length > 0) {
     await processExpiredBatches();
   }
+}
+
+/**
+ * 续费顺延订阅积分批次有效期（系统设置 CREDITS_RENEWAL_EXTENDS_EXPIRY 开启时由支付回调调用）。
+ *
+ * 语义：把该用户名下【未到期、到期日早于新周期结束日】的订阅类（sourceType=
+ * "subscription"）active 批次 expiresAt 统一抬到 newExpiresAt。只延长、不缩短
+ * （新发放批次到期日恰为 newExpiresAt，天然被排除）；已过期批次不追溯；积分包/
+ * 免费积分等非订阅批次不受影响；Epay 升级路径的旧批次已被作废（status 非 active）
+ * 同样不会命中。天然幂等：重复执行无满足条件的行，返回 0。
+ *
+ * WHY 按 sourceType 而非订阅 id 过滤：credits_batch 无 debitAccount/订阅外键
+ * （Epay 批次 sourceRef 是订单号，映射不落批列表）；用户视角"我的订阅积分"本就
+ * 不区分是哪一次订阅所发，跨订阅续订顺延在产品语义上成立。
+ *
+ * @returns 顺延的批次数（供调用方记日志/审计）
+ */
+export async function extendActiveSubscriptionBatchesExpiry(params: {
+  userId: string;
+  subscriptionId: string;
+  newExpiresAt: Date;
+}): Promise<number> {
+  const { userId, newExpiresAt } = params;
+  if (Number.isNaN(newExpiresAt.getTime())) return 0;
+  const now = new Date();
+
+  const extended = await db
+    .update(creditsBatch)
+    .set({ expiresAt: newExpiresAt, updatedAt: now })
+    .where(
+      and(
+        eq(creditsBatch.userId, userId),
+        eq(creditsBatch.sourceType, "subscription"),
+        eq(creditsBatch.status, "active"),
+        isNotNull(creditsBatch.expiresAt),
+        // 只顺延未过期且比新周期结束日更早的批次：不缩短、不碰已过期、不碰新批次
+        gt(creditsBatch.expiresAt, now),
+        lt(creditsBatch.expiresAt, newExpiresAt)
+      )
+    )
+    .returning({ id: creditsBatch.id, remaining: creditsBatch.remaining });
+
+  return extended.length;
 }
 
 /**

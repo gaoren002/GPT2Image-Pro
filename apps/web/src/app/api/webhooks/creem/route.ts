@@ -9,12 +9,18 @@ import {
 import { db } from "@repo/database";
 import { creditsBatch, subscription, user } from "@repo/database/schema";
 import { CREDIT_CONFIG_DEFAULTS } from "@repo/shared/credits/config";
-import { grantCredits } from "@repo/shared/credits/core";
+import {
+  extendActiveSubscriptionBatchesExpiry,
+  grantCredits,
+} from "@repo/shared/credits/core";
 import {
   getCreditPackagePriceForPlan,
   getRuntimeCreditPackageById,
 } from "@repo/shared/credits/packages";
-import { getRuntimeSettingNumber } from "@repo/shared/system-settings";
+import {
+  getRuntimeSettingBoolean,
+  getRuntimeSettingNumber,
+} from "@repo/shared/system-settings";
 import {
   type CreemCheckoutCompletedData,
   type CreemSubscription,
@@ -739,6 +745,22 @@ async function grantSubscriptionCredits(
       },
       "Subscription credits granted"
     );
+
+    // 系统设置开启时：把该订阅名下未到期的存量批次有效期顺延到新周期末。
+    // 语义见 extendActiveSubscriptionBatchesExpiry（只延长不缩短，幂等）。
+    if (await getRuntimeSettingBoolean("CREDITS_RENEWAL_EXTENDS_EXPIRY")) {
+      const extendedCount = await extendActiveSubscriptionBatchesExpiry({
+        userId,
+        subscriptionId: sub.id,
+        newExpiresAt: periodEnd,
+      });
+      if (extendedCount > 0) {
+        logger.info(
+          { userId, subscriptionId: sub.id, extendedCount, periodEnd },
+          "Subscription renewal extended existing credit batches expiry"
+        );
+      }
+    }
   } catch (error) {
     logError(error, {
       source: "creem-webhook",

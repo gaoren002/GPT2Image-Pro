@@ -17,6 +17,7 @@ import {
   ENTERPRISE_RESOURCE_PACKAGE_ID,
 } from "@repo/shared/credits/config";
 import {
+  extendActiveSubscriptionBatchesExpiry,
   grantCredits,
   voidActiveSubscriptionCreditsForUpgrade,
 } from "@repo/shared/credits/core";
@@ -24,7 +25,10 @@ import {
   getCreditPackagePriceForPlan,
   getRuntimeCreditPackageById,
 } from "@repo/shared/credits/packages";
-import { getRuntimeSettingNumber } from "@repo/shared/system-settings";
+import {
+  getRuntimeSettingBoolean,
+  getRuntimeSettingNumber,
+} from "@repo/shared/system-settings";
 import { getUserPlanType } from "@repo/shared/subscription/services/user-plan";
 import {
   claimEpayOrderForFulfillment,
@@ -496,5 +500,27 @@ async function grantSubscriptionCredits(params: {
       },
       "Previous subscription credits voided for upgrade"
     );
+  }
+
+  // 系统设置开启时：把该用户名下未到期的订阅积分批次有效期顺延到新周期末
+  //（升级路径上方已作废旧批次，通常无可顺延；续费/新周期路径生效）。幂等。
+  if (expiresAt && (await getRuntimeSettingBoolean("CREDITS_RENEWAL_EXTENDS_EXPIRY"))) {
+    const extendedCount = await extendActiveSubscriptionBatchesExpiry({
+      userId: params.userId,
+      subscriptionId: params.subscriptionId,
+      newExpiresAt: expiresAt,
+    });
+    if (extendedCount > 0) {
+      logger.info(
+        {
+          source: params.source,
+          userId: params.userId,
+          subscriptionId: params.subscriptionId,
+          extendedCount,
+          newExpiresAt: expiresAt,
+        },
+        "Subscription renewal extended existing credit batches expiry"
+      );
+    }
   }
 }

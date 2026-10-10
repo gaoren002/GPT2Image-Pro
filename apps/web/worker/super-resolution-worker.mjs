@@ -109,10 +109,26 @@ async function superResolve(image) {
 
   const width = metadata.width;
   const height = metadata.height;
-  const source = await sharp(image).removeAlpha().raw().toBuffer();
   const outputWidth = width * SCALE;
   const outputHeight = height * SCALE;
   const output = Buffer.allocUnsafe(outputWidth * outputHeight * 3);
+
+  // 保护 alpha：先提取原图 alpha 通道（若有），超分后再放大合成回去。
+  // 之前直接 removeAlpha() 会把透明像素固化为黑底（RGB 0,0,0 是 PNG 编码器
+  // 对全透明像素的常见底层值），用户选 background=transparent 的输出经超分
+  // 后透明区域全部变黑。修复：RGB 走超分，alpha 单独双三次放大后合成。
+  const hasAlpha = metadata.hasAlpha === true;
+  const rgbBuffer = await sharp(image).removeAlpha().raw().toBuffer();
+  let alphaBuffer = null;
+  if (hasAlpha) {
+    alphaBuffer = await sharp(image)
+      .ensureAlpha()
+      .extractChannel("alpha")
+      .raw()
+      .toBuffer();
+  }
+
+  const source = rgbBuffer;
 
   for (let tileY = 0; tileY < height; tileY += TILE) {
     for (let tileX = 0; tileX < width; tileX += TILE) {
@@ -155,6 +171,30 @@ async function superResolve(image) {
         );
       }
     }
+  }
+
+  // 超分完的 RGB 图：若有原 alpha，双三次放大后合成回去，恢复透明区域。
+  if (hasAlpha && alphaBuffer) {
+    const upscaledAlpha = await sharp(alphaBuffer, {
+      raw: { width, height, channels: 1 },
+    })
+      .resize(outputWidth, outputHeight, { kernel: "bicubic" })
+      .raw()
+      .toBuffer();
+    const rgbWithAlpha = Buffer.allocUnsafe(
+      outputWidth * outputHeight * 4
+    );
+    for (let i = 0; i < outputWidth * outputHeight; i++) {
+      rgbWithAlpha[i * 4] = output[i * 3];
+      rgbWithAlpha[i * 4 + 1] = output[i * 3 + 1];
+      rgbWithAlpha[i * 4 + 2] = output[i * 3 + 2];
+      rgbWithAlpha[i * 4 + 3] = upscaledAlpha[i] ?? 255;
+    }
+    return sharp(rgbWithAlpha, {
+      raw: { width: outputWidth, height: outputHeight, channels: 4 },
+    })
+      .png()
+      .toBuffer();
   }
 
   return sharp(output, {

@@ -114,6 +114,74 @@ export const IMAGE_RESOLUTION_PRESETS = [
   { value: "2160x3840", label: "4K Tall", detail: "2160 × 3840" },
 ] as const;
 
+// ============================================
+// 精确比例预设（基准分辨率 x 宽高比 档位）
+// ============================================
+// 部分上游（如 suduma）会拒绝"约等于"预设比例的尺寸（如 3:2 档出 3520x2352，
+// 2352*1.5=3528≠3520），只接受能整除出精确比例的 WIDTHxHEIGHT。这里改为在
+// "双边均为 16 步进"的栅格上挑选数学上精确的预设值，避免上游 400/502。
+// 无法精确表达的档位（像素上限内无解）回退到旧的四舍五入路径。
+
+/** 计算精确比例栅格尺寸：短边为 16 步进且为比例分母（约分后）的倍数，
+ * 长边随之精确导出且同样落在 16 步进上。返回 null 表示该比例在本站
+ * 尺寸/像素约束下无精确解（如 4K 1:1 会超出像素上限）。 */
+export function getExactRatioImageSize(
+  ratioWidth: number,
+  ratioHeight: number,
+  longEdgeTarget: number
+): ImageDimensions | null {
+  if (
+    !Number.isFinite(ratioWidth) ||
+    !Number.isFinite(ratioHeight) ||
+    ratioWidth <= 0 ||
+    ratioHeight <= 0
+  ) {
+    return null;
+  }
+  const gcd = (a: number, b: number): number =>
+    b === 0 ? a : gcd(b, a % b);
+  const divisor = gcd(Math.round(ratioWidth), Math.round(ratioHeight)) || 1;
+  const unitWidth = Math.round(ratioWidth) / divisor;
+  const unitHeight = Math.round(ratioHeight) / divisor;
+  const landscape = unitWidth >= unitHeight;
+  // 短边的比例单元；短边必须是它的倍数，长边才能整数导出
+  const shortUnit = landscape ? unitHeight : unitWidth;
+  const longUnit = landscape ? unitWidth : unitHeight;
+  const targetShort =
+    (longEdgeTarget * Math.min(unitWidth, unitHeight)) /
+    Math.max(unitWidth, unitHeight);
+  const baseStep = Math.round(targetShort / IMAGE_DIMENSION_STEP);
+  // 双向搜索离目标短边最近的合法精确栅格。窗口给足：像素上限可能要求
+  // 大幅缩档（如 4K 3:2 的精确解在 3504x2336，距目标短边 14 步），
+  // 240 步已覆盖整个尺寸区间，实际合法解远在此之前出现。
+  for (let delta = 0; delta <= 240; delta++) {
+    for (const sign of delta === 0 ? [1] : [1, -1]) {
+      const shortEdge = (baseStep + sign * delta) * IMAGE_DIMENSION_STEP;
+      if (
+        shortEdge < MIN_IMAGE_DIMENSION ||
+        shortEdge > MAX_IMAGE_DIMENSION
+      ) {
+        continue;
+      }
+      if (shortEdge % shortUnit !== 0) continue;
+      const longEdge = (shortEdge / shortUnit) * longUnit;
+      if (
+        longEdge % IMAGE_DIMENSION_STEP !== 0 ||
+        longEdge < MIN_IMAGE_DIMENSION ||
+        longEdge > MAX_IMAGE_DIMENSION
+      ) {
+        continue;
+      }
+      const width = landscape ? longEdge : shortEdge;
+      const height = landscape ? shortEdge : longEdge;
+      const pixels = width * height;
+      if (pixels < MIN_IMAGE_PIXELS || pixels > MAX_IMAGE_PIXELS) continue;
+      return { width, height };
+    }
+  }
+  return null;
+}
+
 /**
  * 质量等级仅作为上游请求参数，不参与本站积分计费。
  */

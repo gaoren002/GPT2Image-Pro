@@ -6,6 +6,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_UPSTREAM_IMAGE_MODEL,
   fitImageDimensionsToValidSize,
+  getExactRatioImageSize,
   getImageBaseCredits,
   getImageCreditCostBreakdown,
   getImageModel,
@@ -392,5 +393,67 @@ describe("roundUpCreditAmount", () => {
     expect(roundUpCreditAmount(1.271)).toBe(1.28);
     expect(roundUpCreditAmount(1.27)).toBe(1.27);
     expect(roundUpCreditAmount(0.1 + 0.2)).toBe(0.3);
+  });
+});
+
+describe("getExactRatioImageSize", () => {
+  it("returns mathematically exact ratio sizes on the 16px grid", () => {
+    // 3:2 档位 1K：1248x832 恰好精确（1248/832=1.5）
+    const three2 = getExactRatioImageSize(3, 2, 1248);
+    expect(three2).toEqual({ width: 1248, height: 832 });
+    // 16:9 档位 1K：旧预设 1248x704 非精确，新算法取 1280x720
+    const wide = getExactRatioImageSize(16, 9, 1248);
+    expect(wide).toEqual({ width: 1280, height: 720 });
+    // 竖版镜像
+    const tall = getExactRatioImageSize(9, 16, 1248);
+    expect(tall).toEqual({ width: 720, height: 1280 });
+    // 4:3 档位 1K：旧预设 1248x928 非精确，新算法取 1280x960
+    const four3 = getExactRatioImageSize(4, 3, 1248);
+    expect(four3).toEqual({ width: 1280, height: 960 });
+  });
+
+  it("keeps every result an exact ratio, 16px grid, within pixel bounds", () => {
+    const ratios: Array<[number, number]> = [
+      [1, 1], [3, 2], [2, 3], [16, 9], [9, 16], [4, 3], [3, 4],
+      [21, 9], [9, 21], [1, 2], [2, 1], [1, 3], [3, 1],
+    ];
+    for (const [rw, rh] of ratios) {
+      for (const edge of [1248, 2048, 3840]) {
+        const result = getExactRatioImageSize(rw, rh, edge);
+        if (!result) continue; // 无精确解（如 4K 1:1 超像素上限）回退旧路径
+        expect(result.width % IMAGE_DIMENSION_STEP).toBe(0);
+        expect(result.height % IMAGE_DIMENSION_STEP).toBe(0);
+        expect(result.width / result.height).toBeCloseTo(rw / rh, 10);
+        expect(result.width * result.height).toBeLessThanOrEqual(
+          MAX_IMAGE_PIXELS
+        );
+        expect(result.width * result.height).toBeGreaterThanOrEqual(
+          MIN_IMAGE_PIXELS
+        );
+        expect(result.width).toBeGreaterThanOrEqual(MIN_IMAGE_DIMENSION);
+        expect(result.width).toBeLessThanOrEqual(MAX_IMAGE_DIMENSION);
+        expect(result.height).toBeGreaterThanOrEqual(MIN_IMAGE_DIMENSION);
+        expect(result.height).toBeLessThanOrEqual(MAX_IMAGE_DIMENSION);
+      }
+    }
+  });
+
+  it("caps at the pixel budget by shrinking to the largest exact grid", () => {
+    // 4K 1:1（3840x3840 = 14.7M 像素超上限）：缩到 2880x2880（恰好卡在 8.29M 上限且精确）
+    expect(getExactRatioImageSize(1, 1, 3840)).toEqual({
+      width: 2880,
+      height: 2880,
+    });
+    // 4K 3:2：3520x2352 非精确且超限，取像素内最大精确栅格 3504x2336
+    const big = getExactRatioImageSize(3, 2, 3840);
+    expect(big).toEqual({ width: 3504, height: 2336 });
+    // 4K 21:9：3808x1632 精确且在像素预算内
+    const ultrawide = getExactRatioImageSize(21, 9, 3840);
+    expect(ultrawide).toEqual({ width: 3808, height: 1632 });
+  });
+
+  it("returns null for degenerate ratio inputs", () => {
+    expect(getExactRatioImageSize(0, 1, 1248)).toBeNull();
+    expect(getExactRatioImageSize(1, Number.NaN, 1248)).toBeNull();
   });
 });

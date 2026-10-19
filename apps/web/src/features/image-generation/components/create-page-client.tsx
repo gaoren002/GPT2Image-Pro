@@ -96,6 +96,7 @@ import {
   type ImageThinkingLevel,
   IMAGE_1K_BASE_EDGE,
   IMAGE_DIMENSION_STEP,
+  getExactRatioImageSize,
   isFireflyModel,
   MAX_IMAGE_DIMENSION,
   normalizeImageSize,
@@ -428,6 +429,10 @@ function getNearestSupportedSizeForRatio(
   const baseSpec =
     IMAGE_SIZE_BASES.find((item) => item.value === base) ||
     IMAGE_SIZE_BASES[0]!;
+  // 优先取"数学上精确"的预设（双边 16 步进且整除出精确比例），部分上游
+  // （suduma）会拒绝约等于比例的尺寸；无精确解时回退旧的取整路径。
+  const exact = getExactRatioImageSize(ratio.width, ratio.height, baseSpec.edge);
+  if (exact) return normalizeImageSize(exact.width, exact.height);
   const longEdge = baseSpec.edge;
   const landscape = ratio.width >= ratio.height;
   const rawWidth = landscape

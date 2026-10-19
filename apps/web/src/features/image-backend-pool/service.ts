@@ -88,6 +88,7 @@ import type {
   ImageBackendAccountPlanFilter,
   ImageBackendApiInterfaceMode,
   ImageBackendGroupBackendType,
+  ImageBackendGroupSizeTier,
   ImageBackendGroupSummary,
   ImageBackendPreferenceMode,
   ImageBackendRequestKind,
@@ -489,6 +490,12 @@ function getGroupBackendType(
   metadata: Record<string, unknown> | null | undefined
 ) {
   return normalizeGroupBackendType(asGroupMetadata(metadata).backendType);
+}
+
+function getGroupSizeTier(
+  metadata: Record<string, unknown> | null | undefined
+): ImageBackendGroupSizeTier {
+  return asGroupMetadata(metadata).sizeTier === "full" ? "full" : "standard";
 }
 
 // 池成员(api / account / adobe)按其所在分组的 backendType 决定参与哪个"车道阶段"。
@@ -4182,6 +4189,7 @@ export async function listImageBackendGroupOptions(options?: {
       ...group,
       minPlan: getGroupMinPlan(metadata),
       backendType: getGroupBackendType(metadata),
+      sizeTier: getGroupSizeTier(metadata),
       billingMultiplier: getGroupBillingMultiplier(metadata),
       childGroupIds: getGroupChildGroupIds(metadata),
     }));
@@ -4290,6 +4298,7 @@ type UpsertGroupInput = {
   isUserSelectable: boolean;
   contentSafetyEnabled: boolean | null;
   backendType: ImageBackendGroupBackendType;
+  sizeTier: ImageBackendGroupSizeTier;
   minPlan: SubscriptionPlan;
   billingMultiplier: number;
   childGroupIds?: string[];
@@ -4341,6 +4350,7 @@ export async function upsertImageBackendGroup(input: UpsertGroupInput) {
       ...asGroupMetadata(existing?.metadata),
       minPlan: input.minPlan,
       backendType: input.backendType,
+      sizeTier: input.sizeTier,
       billingMultiplier: input.billingMultiplier,
       childGroupIds,
     };
@@ -4373,6 +4383,7 @@ export async function upsertImageBackendGroup(input: UpsertGroupInput) {
     metadata: {
       minPlan: input.minPlan,
       backendType: input.backendType,
+      sizeTier: input.sizeTier,
       billingMultiplier: input.billingMultiplier,
       childGroupIds,
     },
@@ -8275,6 +8286,7 @@ export async function listAdminImageBackendPool() {
     isUserSelectable: group.isUserSelectable,
     contentSafetyEnabled: group.contentSafetyEnabled,
     backendType: getGroupBackendType(group.metadata),
+    sizeTier: getGroupSizeTier(group.metadata),
     minPlan: getGroupMinPlan(group.metadata),
     billingMultiplier: getGroupBillingMultiplier(group.metadata),
     childGroupIds: getGroupChildGroupIds(group.metadata),

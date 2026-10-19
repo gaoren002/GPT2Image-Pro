@@ -19,7 +19,10 @@ import {
   getSelectableImageBackendGroupsAction,
   setUserImageBackendPreferenceAction,
 } from "./actions";
-import type { ImageBackendGroupBackendType } from "./types";
+import type {
+  ImageBackendGroupBackendType,
+  ImageBackendGroupSizeTier,
+} from "./types";
 
 type GroupOption = {
   id: string;
@@ -28,6 +31,7 @@ type GroupOption = {
   isDefault: boolean;
   contentSafetyEnabled: boolean | null;
   backendType: ImageBackendGroupBackendType;
+  sizeTier?: ImageBackendGroupSizeTier;
   billingMultiplier: number;
 };
 
@@ -39,8 +43,12 @@ function safetyLabel(value: boolean | null) {
 
 function backendTypeLabel(value: ImageBackendGroupBackendType) {
   if (value === "web") return "仅 Web";
-  if (value === "responses") return "仅 Codex";
+  if (value === "responses") return "非 Web";
   return "混合";
+}
+
+function sizeTierLabel(value: ImageBackendGroupSizeTier | undefined) {
+  return value === "full" ? "全参 4K" : "仅 1.2K";
 }
 
 function formatBillingMultiplier(value: number | null | undefined) {
@@ -50,9 +58,12 @@ function formatBillingMultiplier(value: number | null | undefined) {
 }
 
 function groupOptionLabel(group: GroupOption) {
+  // Web 车道出图分辨率由 Web 端决定，不标档位；非 Web 车道标注上游真实能力。
+  const sizePart =
+    group.backendType === "web" ? "" : ` · ${sizeTierLabel(group.sizeTier)}`;
   return `${group.name}${group.isDefault ? "（默认）" : ""} · ${backendTypeLabel(
     group.backendType
-  )} · ${safetyLabel(group.contentSafetyEnabled)} · 计费 x${formatBillingMultiplier(
+  )}${sizePart} · ${safetyLabel(group.contentSafetyEnabled)} · 计费 x${formatBillingMultiplier(
     group.billingMultiplier
   )}`;
 }

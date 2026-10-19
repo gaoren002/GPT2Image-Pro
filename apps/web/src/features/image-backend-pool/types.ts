@@ -7,6 +7,10 @@ export type ImageBackendRequestKind =
   | "responses";
 export type ImageBackendAccountBackend = "web" | "responses";
 export type ImageBackendGroupBackendType = "mixed" | "web" | "responses";
+// 分组分辨率档位（存 metadata.sizeTier）："full"=全参(最高 3840x2160)；
+// "standard"=仅约 1.2K(1248)。仅对非 Web 车道分组有意义，用于选组处展示，
+// 不参与调度判定。
+export type ImageBackendGroupSizeTier = "standard" | "full";
 export type ImageBackendApiInterfaceMode = "images" | "responses" | "mixed";
 export type ChatCompletionsUpstreamMode =
   | "responses"
@@ -57,6 +61,7 @@ export type ImageBackendGroupSummary = {
   isUserSelectable: boolean;
   contentSafetyEnabled: boolean | null;
   backendType: ImageBackendGroupBackendType;
+  sizeTier: ImageBackendGroupSizeTier;
   minPlan: SubscriptionPlan;
   billingMultiplier: number;
   childGroupIds: string[];

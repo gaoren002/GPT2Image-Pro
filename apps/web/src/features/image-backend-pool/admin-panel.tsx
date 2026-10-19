@@ -126,6 +126,7 @@ import type {
   AdminImageBackendAccountSummary,
   ImageBackendApiInterfaceMode,
   ImageBackendGroupBackendType,
+  ImageBackendGroupSizeTier,
   ImagesUpstreamMode,
 } from "./types";
 
@@ -138,6 +139,7 @@ type Group = {
   isUserSelectable: boolean;
   contentSafetyEnabled: boolean | null;
   backendType: ImageBackendGroupBackendType;
+  sizeTier: ImageBackendGroupSizeTier;
   minPlan: SubscriptionPlan;
   billingMultiplier: number;
   childGroupIds: string[];
@@ -270,6 +272,7 @@ type AdobeAccountRow = {
 type ContentSafetyFormValue = "inherit" | "enabled" | "disabled";
 type AccountBackendFormValue = "web" | "responses";
 type GroupBackendTypeFormValue = ImageBackendGroupBackendType;
+type GroupSizeTierFormValue = ImageBackendGroupSizeTier;
 type ApiInterfaceModeFormValue = ImageBackendApiInterfaceMode;
 type ChatCompletionsUpstreamModeFormValue =
   | "responses"
@@ -417,17 +420,37 @@ const GROUP_BACKEND_TYPE_OPTIONS: Array<{
   {
     value: "mixed",
     label: "混合",
-    detail: "Web 与 Codex/Responses 账号均可调度，参数全部显示。",
+    detail: "Web 与非 Web（Codex 账号/上游 API）成员均可调度，参数全部显示。",
   },
   {
     value: "web",
     label: "仅 Web",
-    detail: "只调度 Web 账号，界面隐藏 Codex/Responses 独有参数。",
+    detail: "只调度 Web 账号，界面隐藏非 Web 车道独有参数。",
   },
   {
     value: "responses",
-    label: "仅 Codex/Responses",
-    detail: "只调度 Codex/Responses 账号，界面隐藏 Web 独有提示。",
+    label: "非 Web",
+    detail:
+      "只调度非 Web 成员（Codex 账号/上游 API），仅在 Codex 偏好阶段参与，界面隐藏 Web 独有提示。",
+  },
+];
+
+// 分组分辨率档位：上游真实能力声明，只影响选组处展示，不参与调度判定。
+const GROUP_SIZE_TIER_OPTIONS: Array<{
+  value: GroupSizeTierFormValue;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "standard",
+    label: "仅 1.2K",
+    detail:
+      "该分组上游实际最高约 1248（请求更高尺寸可能被上游静默降档），选组处标注「仅 1.2K」。",
+  },
+  {
+    value: "full",
+    label: "全参（最高 4K）",
+    detail: "该分组上游支持全参分辨率（最高 3840x2160），选组处标注「全参 4K」。",
   },
 ];
 
@@ -598,8 +621,12 @@ function safetyLabel(value: boolean | null) {
 
 function groupBackendTypeLabel(value: ImageBackendGroupBackendType) {
   if (value === "web") return "仅 Web";
-  if (value === "responses") return "仅 Codex";
+  if (value === "responses") return "非 Web";
   return "混合";
+}
+
+function groupSizeTierLabel(value: ImageBackendGroupSizeTier) {
+  return value === "full" ? "全参 4K" : "仅 1.2K";
 }
 
 function apiInterfaceModeLabel(value: ImageBackendApiInterfaceMode) {
@@ -820,6 +847,7 @@ export function ImageBackendPoolAdminPanel({
     isUserSelectable: true,
     contentSafety: "inherit" as ContentSafetyFormValue,
     backendType: "mixed" as GroupBackendTypeFormValue,
+    sizeTier: "standard" as GroupSizeTierFormValue,
     minPlan: "free" as SubscriptionPlan,
     billingMultiplier: 1,
     childGroupIds: [] as string[],
@@ -1097,6 +1125,7 @@ export function ImageBackendPoolAdminPanel({
       isUserSelectable: true,
       contentSafety: "inherit" as ContentSafetyFormValue,
       backendType: "mixed" as GroupBackendTypeFormValue,
+      sizeTier: "standard" as GroupSizeTierFormValue,
       minPlan: "free" as SubscriptionPlan,
       billingMultiplier: 1,
       childGroupIds: [] as string[],
@@ -1205,6 +1234,7 @@ export function ImageBackendPoolAdminPanel({
       isUserSelectable: group.isUserSelectable,
       contentSafety: safetyValue(group.contentSafetyEnabled),
       backendType: group.backendType || "mixed",
+      sizeTier: group.sizeTier || "standard",
       minPlan: group.minPlan || "free",
       billingMultiplier: group.billingMultiplier || 1,
       childGroupIds: group.childGroupIds || [],
@@ -2504,6 +2534,36 @@ export function ImageBackendPoolAdminPanel({
                     }
                   </p>
                 </div>
+                <div className="space-y-2">
+                  <Label>分辨率档位</Label>
+                  <Select
+                    value={groupForm.sizeTier}
+                    onValueChange={(value) =>
+                      setGroupForm((current) => ({
+                        ...current,
+                        sizeTier: value as GroupSizeTierFormValue,
+                      }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {GROUP_SIZE_TIER_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {
+                      GROUP_SIZE_TIER_OPTIONS.find(
+                        (option) => option.value === groupForm.sizeTier
+                      )?.detail
+                    }
+                  </p>
+                </div>
                 <div
                   className={cn(
                     "space-y-2 rounded-md border p-3",
@@ -2516,8 +2576,8 @@ export function ImageBackendPoolAdminPanel({
                     <Label>嵌套子分组</Label>
                   </div>
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    仅 mixed 分组可嵌套一层子分组，子分组必须是仅 Web 或仅
-                    Codex/Responses。调度时会先进入 mixed
+                    仅 mixed 分组可嵌套一层子分组，子分组必须是仅 Web 或非
+                    Web。调度时会先进入 mixed
                     父组，再按请求类型筛选父组和子组内的可用成员。
                   </p>
                   {groupForm.backendType === "mixed" ? (
@@ -2678,6 +2738,9 @@ export function ImageBackendPoolAdminPanel({
                       </Badge>
                       <Badge variant="outline">
                         {groupBackendTypeLabel(group.backendType)}
+                      </Badge>
+                      <Badge variant="outline">
+                        {groupSizeTierLabel(group.sizeTier)}
                       </Badge>
                       {group.billingMultiplier !== 1 && (
                         <Badge variant="secondary">

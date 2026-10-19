@@ -89,6 +89,9 @@ const optionalGroupIdSchema = z
 const safetyOverrideSchema = z.enum(["inherit", "enabled", "disabled"]);
 const accountBackendSchema = z.enum(["web", "responses"]);
 const groupBackendTypeSchema = z.enum(["mixed", "web", "responses"]);
+// 分组分辨率档位：full=全参(4K)，standard=仅约 1.2K。默认 standard，与
+// service 侧 getGroupSizeTier 的兜底一致（未标注的旧分组按 1.2K 展示）。
+const groupSizeTierSchema = z.enum(["standard", "full"]).default("standard");
 const apiInterfaceModeSchema = z.enum(["images", "responses", "mixed"]);
 const chatCompletionsUpstreamModeSchema = z.enum([
   "responses",
@@ -293,6 +296,7 @@ export const saveImageBackendGroupAction = withImageBackendPoolAdminAction(
       isUserSelectable: z.boolean().default(true),
       contentSafety: safetyOverrideSchema.default("inherit"),
       backendType: groupBackendTypeSchema.default("mixed"),
+      sizeTier: groupSizeTierSchema,
       minPlan: subscriptionPlanSchema,
       billingMultiplier: z.coerce.number().min(0.01).max(100).default(1),
       childGroupIds: z.array(z.string().trim().min(1)).max(100).default([]),
@@ -309,6 +313,7 @@ export const saveImageBackendGroupAction = withImageBackendPoolAdminAction(
       isUserSelectable: parsedInput.isUserSelectable,
       contentSafetyEnabled: fromSafetyOverride(parsedInput.contentSafety),
       backendType: parsedInput.backendType,
+      sizeTier: parsedInput.sizeTier,
       minPlan: parsedInput.minPlan,
       billingMultiplier: parsedInput.billingMultiplier,
       childGroupIds: parsedInput.childGroupIds,

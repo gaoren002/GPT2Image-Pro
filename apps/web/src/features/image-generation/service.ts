@@ -712,7 +712,10 @@ function withStreamJsonErrorFallback<T extends { error?: string }>(
 }
 
 function normalizeQuality(quality?: string): ImageQuality | undefined {
-  if (!quality || quality === "auto") return undefined;
+  // auto 是合法档位、原样透传：OpenAI 官方接口接受 auto，部分逆向上游
+  // （如 suduma）甚至强制要求显式 quality，吞掉 auto 会让它们 400
+  // "请在请求里指定 quality"。仅清洗未传与非法值。
+  if (!quality) return undefined;
   return VALID_QUALITIES.has(quality as ImageQuality)
     ? (quality as ImageQuality)
     : undefined;

@@ -239,19 +239,40 @@ export function ImagePricingChartCard({
         ? qualityAddonParts.join(" · ")
         : copy("None (x1 all levels)", "无加价（各档 x1）"),
     },
-    ...Object.entries(billing.modelQualityMultipliers ?? {}).map(
-      ([model, levels]) => ({
+    ...(() => {
+      // 聚合层为每个分档表建了「源模型 + 出站 id」双索引（如 gpt-image-2 与
+      // gpt-image-2-gzs 指向同一张表），dashboard 没有模型上下文，逐键展开
+      // 会显示两行同价。这里按【表内容指纹】去重：同一张表只出一行，键名
+      // 取第一个（源模型优先，那是用户认识的型号）。
+      const tables = new Map<string, { model: string; levels: Record<string, number> }>();
+      for (const [model, rawLevels] of Object.entries(
+        billing.modelQualityMultipliers ?? {}
+      )) {
+        const levels: Record<string, number> = {};
+        for (const [level, value] of Object.entries(rawLevels ?? {})) {
+          if (typeof value === "number") levels[level] = value;
+        }
+        const fingerprint = Object.entries(levels)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([level, value]) => `${level}=${value}`)
+          .join(",");
+        const existing = tables.get(fingerprint);
+        // 出站 id（含 -gzs 等后缀）排在源模型之后,保留靠前的源模型名。
+        if (!existing) {
+          tables.set(fingerprint, { model, levels });
+        }
+      }
+      return [...tables.values()].map(({ model, levels }) => ({
         // 分档模型单列一行：该模型自己的质量定价，取代组默认表。
         label: copy("Per-model", "分档模型"),
         value: `${model} · ${Object.entries(levels)
-          .filter(([, value]) => typeof value === "number" && value !== 1)
+          .filter(([, value]) => value !== 1)
           .map(
-            ([level, value]) =>
-              `${level} x${Number((value as number).toFixed(4))}`
+            ([level, value]) => `${level} x${Number(value.toFixed(4))}`
           )
           .join(" · ")}`,
-      })
-    ),
+      }));
+    })(),
     {
       label: copy("Review add-on", "审核附加"),
       value: billing.moderationBlockingEnabled

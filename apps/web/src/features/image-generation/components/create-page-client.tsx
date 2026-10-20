@@ -3105,7 +3105,13 @@ export function CreatePageClient({
     }
     return Object.keys(merged).length ? merged : null;
   };
-  const routeQualityMultipliers = (route: PredictedImageBillingRoute) => {
+  // 各车道按【各自面板当前选中的模型】解析质量表：生图/线条用 textModel，
+  // 编辑用 editModel，chat/瀑布流/agent 用 chatImageModel——三处模型选择器
+  // 独立，质量下拉与预估必须跟随各自面板的模型联动。
+  const routeQualityMultipliers = (
+    route: PredictedImageBillingRoute,
+    model: string
+  ) => {
     const child =
       route.usesChildGroup && route.groupId
         ? backendGroups.find((group) => group.id === route.groupId)
@@ -3121,7 +3127,7 @@ export function CreatePageClient({
       const byModel = group.modelQualityMultipliers;
       if (byModel) {
         const outbound = getUpstreamImageModel(
-          getImageModel(textModel) || DEFAULT_IMAGE_MODEL
+          getImageModel(model) || DEFAULT_IMAGE_MODEL
         );
         if (byModel[outbound]) return byModel[outbound];
       }
@@ -3134,10 +3140,22 @@ export function CreatePageClient({
   // 各车道质量倍率表：质量下拉选项按此标注「x倍率」（textSettingsPanel 复用
   // text 表；编辑面板用 edit 表；聊天/瀑布流用 chat 表），预估价与公式按
   // 所选质量档取值折入。
-  const textQualityMultipliers = routeQualityMultipliers(textBillingRoute);
-  const editQualityMultipliers = routeQualityMultipliers(editBillingRoute);
-  const chatQualityMultipliers = routeQualityMultipliers(chatBillingRoute);
-  const agentQualityMultipliers = routeQualityMultipliers(agentBillingRoute);
+  const textQualityMultipliers = routeQualityMultipliers(
+    textBillingRoute,
+    textModel
+  );
+  const editQualityMultipliers = routeQualityMultipliers(
+    editBillingRoute,
+    editModel
+  );
+  const chatQualityMultipliers = routeQualityMultipliers(
+    chatBillingRoute,
+    chatImageModel
+  );
+  const agentQualityMultipliers = routeQualityMultipliers(
+    agentBillingRoute,
+    chatImageModel
+  );
   // 当前质量档的预估倍率：按当前模型解析出的质量表取所选档的值（无表/无档
   // 为 1），直接折入预估价与公式——创作页模型与质量档都已确定，不再用
   // 「未计入质量倍率」的含糊口径。实际扣费仍以服务端命中成员的解析为准。

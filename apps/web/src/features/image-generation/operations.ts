@@ -52,6 +52,8 @@ import {
   shouldPreferWebImageRoute,
   type ImageBillingPixelRange,
 } from "./billing-preview";
+import { applyApiModelMapping } from "./api-model-mapping";
+import { resolveModelBillingMultiplier } from "./model-billing";
 import { resolveQualityBillingMultiplier } from "./quality-billing";
 import {
   detectImageOutputFormatFromBuffer,
@@ -72,6 +74,7 @@ import {
   type ImageThinkingLevel,
   isFireflyModel,
   normalizeImageSize,
+  getUpstreamImageModel,
   roundCreditAmount,
   roundUpCreditAmount,
   validateImageSize,
@@ -245,6 +248,18 @@ function getPoolQualityBillingMultiplier(
   }
   return normalizeBillingMultiplier(
     resolveQualityBillingMultiplier(config.backend.qualityBilling, quality)
+  );
+}
+
+/** 池 API 成员的按模型计价倍率（metadata.modelBilling，精确命中）。
+ * 仅 pool-api 读取；账号/Adobe 不参与（走各自倍率链）。 */
+function getPoolApiModelBillingMultiplier(
+  config: ApiConfig,
+  model: string | null | undefined
+) {
+  if (config.backend?.type !== "pool-api") return 1;
+  return normalizeBillingMultiplier(
+    resolveModelBillingMultiplier(config.backend.modelBilling, model)
   );
 }
 
@@ -1401,8 +1416,24 @@ export async function runImageGenerationForUser(
             config,
             input.quality
           );
+          // 池 API 按模型计价（metadata.modelBilling，精确命中出站模型 id）：
+          // 与组倍率/模型族倍率/质量倍率叠乘。模型 id 取出站口径（站内别名解析
+          // + model_mapping 改写后的完整 id），与实际发给上游的一致，未配置则 1。
+          const outboundModel = applyApiModelMapping({
+            resolvedModel: getUpstreamImageModel(imageModel),
+            requestedModel: input.model,
+            quality: input.quality,
+            mapping: config.modelMapping,
+          }).model;
+          const apiModelBillingMultiplier = getPoolApiModelBillingMultiplier(
+            config,
+            outboundModel
+          );
           const billingMultiplier =
-            backendBillingMultiplier * modelMultiplier * qualityBillingMultiplier;
+            backendBillingMultiplier *
+            modelMultiplier *
+            apiModelBillingMultiplier *
+            qualityBillingMultiplier;
           const moderationEnabled =
             (await isContentModerationEnabled()) &&
             moderationBlockingEnabled &&

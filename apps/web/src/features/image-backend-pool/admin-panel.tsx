@@ -81,6 +81,12 @@ import {
   qualityBillingToForm,
 } from "./quality-billing-editor";
 import {
+  emptyModelBillingRows,
+  ModelBillingEditor,
+  modelBillingFromForm,
+  modelBillingToRows,
+} from "./model-billing-editor";
+import {
   bulkDeleteImageBackendAccountsAction,
   bulkUpdateImageBackendAccountsAction,
   deleteAdobeAccountAction,
@@ -202,6 +208,8 @@ type Api = {
   }> | null;
   // 质量计价倍率表（quality → 倍率）；null/未配置档位计 1 倍。
   qualityBilling?: Partial<Record<string, number>> | null;
+  // 按模型计价倍率表（出站模型 id → 倍率，精确命中）；null/未配置模型计 1 倍。
+  modelBilling?: Record<string, number> | null;
   interfaceMode: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode: ChatCompletionsUpstreamModeFormValue;
   imagesUpstreamMode: ImagesUpstreamModeFormValue;
@@ -908,6 +916,7 @@ export function ImageBackendPoolAdminPanel({
     model: "",
     modelMapping: [] as ReturnType<typeof parseApiModelMapping>,
     qualityBilling: emptyQualityBillingForm(),
+    modelBilling: emptyModelBillingRows(),
     interfaceMode: "mixed" as ApiInterfaceModeFormValue,
     chatCompletionsUpstreamMode:
       "responses" as ChatCompletionsUpstreamModeFormValue,
@@ -1191,6 +1200,7 @@ export function ImageBackendPoolAdminPanel({
       model: "",
       modelMapping: [],
       qualityBilling: emptyQualityBillingForm(),
+      modelBilling: emptyModelBillingRows(),
       interfaceMode: "mixed" as ApiInterfaceModeFormValue,
       chatCompletionsUpstreamMode:
         "responses" as ChatCompletionsUpstreamModeFormValue,
@@ -1349,6 +1359,7 @@ export function ImageBackendPoolAdminPanel({
       model: api.model || "",
       modelMapping: parseApiModelMapping(api.modelMapping),
       qualityBilling: qualityBillingToForm(api.qualityBilling),
+      modelBilling: modelBillingToRows(api.modelBilling),
       interfaceMode: api.interfaceMode || "images",
       chatCompletionsUpstreamMode:
         api.chatCompletionsUpstreamMode || "responses",
@@ -3937,6 +3948,21 @@ export function ImageBackendPoolAdminPanel({
                   }
                 />
                 <div className="space-y-2">
+                  <Label>模型计价倍率</Label>
+                  <ModelBillingEditor
+                    rows={apiForm.modelBilling}
+                    onChange={(modelBilling) =>
+                      setApiForm((current) => ({ ...current, modelBilling }))
+                    }
+                    disabled={readOnly}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    按出站模型 id 精确匹配（区分大小写、不做前缀），与组倍率、
+                    质量倍率叠乘。给改写变体定价请配改写后的完整 id
+                    （如 gpt-image-2.5-sunburst-gzs）。留空表示该模型 1 倍。
+                  </p>
+                </div>
+                <div className="space-y-2">
                   <Label>接口类型</Label>
                   <Select
                     value={apiForm.interfaceMode}
@@ -4250,6 +4276,7 @@ export function ImageBackendPoolAdminPanel({
                       qualityBilling: qualityBillingFromForm(
                         apiForm.qualityBilling
                       ),
+                      modelBilling: modelBillingFromForm(apiForm.modelBilling),
                     })
                   }
                   disabled={

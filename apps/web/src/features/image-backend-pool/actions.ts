@@ -344,6 +344,12 @@ const qualityBillingSchema = z
   )
   .nullish();
 
+// 池 API 按模型计价（出站模型 id → 倍率，精确命中；存 metadata.modelBilling）。
+// 键为任意非空模型名（上限 100 条，与 parseModelBilling 口径一致）。
+const modelBillingSchema = z
+  .record(z.string().trim().min(1).max(120), z.number().finite().positive().max(100))
+  .nullish();
+
 export const saveImageBackendAccountAction = withImageBackendPoolAdminAction(
   "saveAccount"
 )
@@ -628,6 +634,7 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
         .max(50)
         .optional(),
       qualityBilling: qualityBillingSchema,
+      modelBilling: modelBillingSchema,
       interfaceMode: apiInterfaceModeSchema.default("mixed"),
       chatCompletionsUpstreamMode:
         chatCompletionsUpstreamModeSchema.default("responses"),
@@ -658,6 +665,7 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
       model: parsedInput.model || null,
       modelMapping: parsedInput.modelMapping || null,
       qualityBilling: parsedInput.qualityBilling ?? null,
+      modelBilling: parsedInput.modelBilling ?? null,
       interfaceMode: parsedInput.interfaceMode,
       chatCompletionsUpstreamMode: parsedInput.chatCompletionsUpstreamMode,
       imagesUpstreamMode: parsedInput.imagesUpstreamMode,

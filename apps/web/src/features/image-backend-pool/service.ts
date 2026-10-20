@@ -50,6 +50,10 @@ import { nanoid } from "nanoid";
 import { Pool } from "pg";
 import { parseApiModelMapping } from "@/features/image-generation/api-model-mapping";
 import { normalizeQualityBillingForStorage, parseQualityBilling } from "@/features/image-generation/quality-billing";
+import {
+  normalizeModelBillingForStorage,
+  parseModelBilling,
+} from "@/features/image-generation/model-billing";
 
 import {
   type ChatGptWebAccountInfo,
@@ -3289,6 +3293,11 @@ function toResolvedPoolConfig(
           // 质量计价倍率表（quality → 倍率）：由 operations.ts 按请求 quality 解析
           // 后折入总倍率，与组/成员倍率相乘。
           qualityBilling: member.qualityBilling ?? null,
+          // 按模型计价倍率表（出站模型 id → 倍率，精确命中）：仅 pool-api，
+          // 来源 metadata.modelBilling，operations.ts 折入总倍率。
+          modelBilling: parseModelBilling(
+            asGroupMetadata(member.metadata).modelBilling
+          ),
           priority: member.priority,
           reportResult: true,
           inflightLease: true,
@@ -7478,6 +7487,9 @@ type UpsertApiInput = {
   }> | null;
   // 质量计价倍率表（quality → 倍率）；undefined=不改动，null=清空。
   qualityBilling?: Partial<Record<string, number>> | null;
+  // 按模型计价倍率表（出站模型 id → 倍率，精确命中）；undefined=不改动，
+  // null=清空。存 metadata.modelBilling。
+  modelBilling?: Record<string, number> | null;
   interfaceMode?: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode?: ChatCompletionsUpstreamMode;
   imagesUpstreamMode?: ImagesUpstreamMode;
@@ -7575,11 +7587,20 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     status: input.status || "active",
     updatedAt: new Date(),
     // 尺寸方言并入 metadata（保留其他键；显式传 wxh 时也落库，便于后台回显）。
-    ...(input.sizeDialect !== undefined
+    ...(input.sizeDialect !== undefined || input.modelBilling !== undefined
       ? {
           metadata: {
             ...(existingApiMetadata ?? {}),
-            sizeDialect: input.sizeDialect,
+            ...(input.sizeDialect !== undefined
+              ? { sizeDialect: input.sizeDialect }
+              : {}),
+            ...(input.modelBilling !== undefined
+              ? {
+                  modelBilling: normalizeModelBillingForStorage(
+                    input.modelBilling
+                  ),
+                }
+              : {}),
           },
         }
       : {}),
@@ -8440,6 +8461,10 @@ export async function listAdminImageBackendPool() {
       billingMultiplier: Number(api.billingMultiplier) || 1,
       // 尺寸方言从 metadata 解析（缺省 wxh），供后台表单回显。
       sizeDialect: normalizeApiSizeDialect(api.metadata),
+      // 按模型计价表从 metadata 解析，供后台表单回显。
+      modelBilling: parseModelBilling(
+        asGroupMetadata(api.metadata).modelBilling
+      ),
       groupIds:
         apiGroupIdMap.get(api.id) ||
         normalizeAccountGroupIds(api.groupId ? [api.groupId] : []),

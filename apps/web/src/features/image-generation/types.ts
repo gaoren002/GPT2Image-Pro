@@ -351,6 +351,9 @@ export interface ApiConfig {
     // 解析与回退规则见 quality-billing.ts；operations.ts 把它按请求 quality
     // 折入总 billingMultiplier。
     qualityBilling?: Partial<Record<string, number>> | null;
+    // 池 API 按模型计价倍率表（出站模型 id → 倍率，精确命中）；仅 pool-api
+    // 读取。来源是成员 metadata.modelBilling，解析见 model-billing.ts。
+    modelBilling?: Record<string, number> | null;
     // 池成员调度优先级(越小越先)。换号预算按同优先级计数,耗尽后跳到更高数值的下一档。
     priority?: number;
     reportResult?: boolean;

@@ -8,6 +8,12 @@ export type GenerationCreditDetails = {
   billableImageOutputCount: number | null;
   billingGroupId: string | null;
   billingMultiplier: number;
+  /** 倍率分量留痕（新记录才有；旧记录为 null，展示退回总倍率单行）。 */
+  backendBillingMultiplier: number | null;
+  modelFamilyMultiplier: number | null;
+  poolApiModelBillingMultiplier: number | null;
+  poolApiModelBillingReplacesQuality: boolean | null;
+  qualityBillingMultiplier: number | null;
   chatCredits: number | null;
   chatRoundCount: number | null;
   chatRoundCredits: number | null;
@@ -150,6 +156,20 @@ export function extractGenerationCreditDetails(
     billingGroupId:
       readString(metadata.billingGroupId) ?? readString(backend.billingGroupId),
     billingMultiplier,
+    backendBillingMultiplier: readPositiveNumber(
+      metadata.backendBillingMultiplier
+    ),
+    modelFamilyMultiplier: readPositiveNumber(metadata.modelFamilyMultiplier),
+    poolApiModelBillingMultiplier: readPositiveNumber(
+      metadata.poolApiModelBillingMultiplier
+    ),
+    poolApiModelBillingReplacesQuality:
+      typeof metadata.poolApiModelBillingReplacesQuality === "boolean"
+        ? metadata.poolApiModelBillingReplacesQuality
+        : null,
+    qualityBillingMultiplier: readPositiveNumber(
+      metadata.qualityBillingMultiplier
+    ),
     chatCredits,
     chatRoundCount,
     chatRoundCredits,

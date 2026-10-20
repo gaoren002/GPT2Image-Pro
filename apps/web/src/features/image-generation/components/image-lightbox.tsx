@@ -98,6 +98,43 @@ function formatMultiplier(value: number) {
   return Number(value.toFixed(4)).toString();
 }
 
+/**
+ * 计费倍率明细行：总倍率 = 分组/成员 × 模型族 × 池API模型 × 质量。
+ * 新记录带各分量时逐行拆出（等于 1 的分量跳过，噪音控制）；按模型分档
+ * 取代质量表时质量行标注「已并入模型计价」。旧记录无分量只显示总倍率。
+ */
+function buildMultiplierRows(creditDetails: GenerationCreditDetails) {
+  const total = `x${formatMultiplier(creditDetails.billingMultiplier)}`;
+  const has =
+    creditDetails.backendBillingMultiplier !== null &&
+    creditDetails.modelFamilyMultiplier !== null;
+  if (!has) {
+    return [{ label: "计费倍率", value: total }];
+  }
+  const rows: Array<{ label: string; value: string }> = [
+    {
+      label: "计费倍率（合计）",
+      value: total,
+    },
+  ];
+  const push = (label: string, multiplier: number | null) => {
+    if (multiplier === null || multiplier === 1) return;
+    rows.push({ label, value: `x${formatMultiplier(multiplier)}` });
+  };
+  push("· 分组/成员倍率", creditDetails.backendBillingMultiplier);
+  push("· 模型族倍率", creditDetails.modelFamilyMultiplier);
+  push("· 模型计价倍率", creditDetails.poolApiModelBillingMultiplier);
+  if (creditDetails.poolApiModelBillingReplacesQuality) {
+    rows.push({
+      label: "· 质量倍率",
+      value: "已并入模型计价",
+    });
+  } else {
+    push("· 质量倍率", creditDetails.qualityBillingMultiplier);
+  }
+  return rows;
+}
+
 export function ImageLightbox({
   generation,
   imageUrl,
@@ -174,12 +211,7 @@ export function ImageLightbox({
               }`,
             }
           : null,
-        {
-          // 总倍率 = 分组/成员倍率 × 模型族倍率 × 质量倍率（历史记录不拆分量）。
-          // 明细公式：(基础生图 + 审核附加) × 计费倍率 ≈ 图片小计。
-          label: copy("Billing multiplier", "计费倍率"),
-          value: `x${formatMultiplier(creditDetails.billingMultiplier)}`,
-        },
+        ...buildMultiplierRows(creditDetails),
         creditDetails.billableImageOutputCount !== null
           ? {
               label: copy("Billable images", "计费图片"),

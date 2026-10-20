@@ -1417,7 +1417,7 @@ export async function runImageGenerationForUser(
           const imageModelMultipliers = parseImageModelMultipliers(
             await getRuntimeSettingJson("IMAGE_MODEL_MULTIPLIERS")
           );
-          const modelMultiplier = resolveImageModelMultiplier(
+          const modelFamilyMultiplier = resolveImageModelMultiplier(
             config.backend?.groupBackendType === "web"
               ? imageModel
               : input.model,
@@ -1442,10 +1442,11 @@ export async function runImageGenerationForUser(
           const qualityBillingMultiplier = apiModelBilling.replacesQualityBilling
             ? 1
             : getPoolQualityBillingMultiplier(config, input.quality);
+          const poolApiModelBillingMultiplier = apiModelBilling.multiplier;
           const billingMultiplier =
             backendBillingMultiplier *
-            modelMultiplier *
-            apiModelBilling.multiplier *
+            modelFamilyMultiplier *
+            poolApiModelBillingMultiplier *
             qualityBillingMultiplier;
           const moderationEnabled =
             (await isContentModerationEnabled()) &&
@@ -1568,6 +1569,10 @@ export async function runImageGenerationForUser(
             billingPolicy,
             billingMultiplier,
             qualityBillingMultiplier,
+            backendBillingMultiplier,
+            modelFamilyMultiplier,
+            poolApiModelBillingMultiplier,
+            apiModelBilling,
             imageModel,
             gptModel,
             recordModel,
@@ -1619,6 +1624,10 @@ async function runQueuedImageGenerationForUser({
   billingPolicy,
   billingMultiplier,
   qualityBillingMultiplier,
+  backendBillingMultiplier,
+  modelFamilyMultiplier,
+  poolApiModelBillingMultiplier,
+  apiModelBilling,
   imageModel,
   gptModel,
   recordModel,
@@ -1650,6 +1659,10 @@ async function runQueuedImageGenerationForUser({
   billingPolicy: GenerationBillingPolicy;
   billingMultiplier: number;
   qualityBillingMultiplier: number;
+  backendBillingMultiplier: number;
+  modelFamilyMultiplier: number;
+  poolApiModelBillingMultiplier: number;
+  apiModelBilling: { multiplier: number; replacesQualityBilling: boolean };
   imageModel: string;
   gptModel?: string;
   recordModel: string;
@@ -1674,9 +1687,13 @@ async function runQueuedImageGenerationForUser({
   });
   const billingMetadata = {
     billingMultiplier,
-    // 质量倍率单独留痕：billingMultiplier 为三者乘积（后端×模型族×质量），
-    // 拆出质量分量便于对账时区分定价来源。
+    // 倍率分量留痕：billingMultiplier 为乘积（后端×模型族×池API模型×质量），
+    // 拆出各分量便于对账时区分定价来源；各分量与乘积同期写入，旧记录无此字段。
     qualityBillingMultiplier,
+    backendBillingMultiplier,
+    modelFamilyMultiplier,
+    poolApiModelBillingMultiplier,
+    poolApiModelBillingReplacesQuality: apiModelBilling.replacesQualityBilling,
     requestedQuality: input.quality ?? null,
     billingGroupId: config.backend?.billingGroupId ?? null,
     chargeImageCredits: billingPolicy.chargeImageCredits,

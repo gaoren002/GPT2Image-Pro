@@ -2045,17 +2045,16 @@ export function CreatePageClient({
     requestedSize?: string | null,
     options: Parameters<typeof getImageCreditCostBreakdown>[1] = {}
   ) => getPricedImageCreditBreakdown(requestedSize, options).totalCredits;
-  // 预估费用计算公式文案：（基础 a + 审核 b）× 分组倍率 m。
-  // 审核为 0 时省略加法段；质量倍率取决于调度最终命中的成员（含成员级
-  // 质量表与按模型的分档定价），预估无法预知，不折入报价——当预测车道内
-  // 存在质量计价配置时公式旁注明「未计入质量倍率」。
+  // 预估费用计算公式文案：（基础 a + 审核 b）× 分组倍率 m × 质量倍率 q。
+  // 审核为 0 时省略加法段；质量倍率按当前模型 + 所选质量档解析（无表/该档
+  // 未配置为 1），已折入预估价，公式同步展示，不再有「未计入」的口径。
   // chat/agent 轮次报价 baseLabel 传「轮次」。
   const creditFormulaLabel = (params: {
     baseLabel?: { en: string; zh: string };
     baseCredits: number;
     moderationCredits: number;
     multiplier: number;
-    qualityBillingPresent?: boolean;
+    qualityMultiplier?: number;
   }) => {
     const baseLabel = params.baseLabel
       ? copy(params.baseLabel.en, params.baseLabel.zh)
@@ -2069,12 +2068,16 @@ export function CreatePageClient({
           )}`
         : `${baseLabel} ${base}`;
     const groupPart = copy(`× group x${multiplier}`, `× 分组 ${multiplier}`);
-    const note = params.qualityBillingPresent
-      ? copy(" (quality multiplier not included)", "（未计入质量倍率）")
-      : "";
+    const qualityPart =
+      params.qualityMultiplier && params.qualityMultiplier !== 1
+        ? copy(
+            ` × quality x${Number(params.qualityMultiplier.toFixed(4))}`,
+            ` × 质量 ${Number(params.qualityMultiplier.toFixed(4))}`
+          )
+        : "";
     return copy(
-      `(${basePart}) ${groupPart}${note}`,
-      `（${basePart}）${groupPart}${note}`
+      `(${basePart}) ${groupPart}${qualityPart}`,
+      `（${basePart}）${groupPart}${qualityPart}`
     );
   };
   const activeBackendType = selectedBackendGroup?.backendType || "mixed";
@@ -3128,24 +3131,26 @@ export function CreatePageClient({
     const childTable = resolveGroup(child);
     return mergeQualityMultipliers([primary, childTable]);
   };
-  const textQualityBillingPresent =
-    routeQualityMultipliers(textBillingRoute) !== null;
-  const editQualityBillingPresent =
-    routeQualityMultipliers(editBillingRoute) !== null;
-  const chatQualityBillingPresent =
-    routeQualityMultipliers(chatBillingRoute) !== null;
   // 各车道质量倍率表：质量下拉选项按此标注「x倍率」（textSettingsPanel 复用
-  // text 表；编辑面板用 edit 表；聊天/瀑布流用 chat 表）。
+  // text 表；编辑面板用 edit 表；聊天/瀑布流用 chat 表），预估价与公式按
+  // 所选质量档取值折入。
   const textQualityMultipliers = routeQualityMultipliers(textBillingRoute);
   const editQualityMultipliers = routeQualityMultipliers(editBillingRoute);
   const chatQualityMultipliers = routeQualityMultipliers(chatBillingRoute);
-  const agentQualityBillingPresent =
-    routeQualityMultipliers(agentBillingRoute) !== null;
+  const agentQualityMultipliers = routeQualityMultipliers(agentBillingRoute);
+  // 当前质量档的预估倍率：按当前模型解析出的质量表取所选档的值（无表/无档
+  // 为 1），直接折入预估价与公式——创作页模型与质量档都已确定，不再用
+  // 「未计入质量倍率」的含糊口径。实际扣费仍以服务端命中成员的解析为准。
+  const qualityPreviewMultiplier = (table: Partial<Record<string, number>> | null) => {
+    const value = table?.[quality];
+    return typeof value === "number" && Number.isFinite(value) ? value : 1;
+  };
   const textImageCreditCost = useMemo(
     () =>
       applyBillingPreviewMultiplier(
         getPricedImageCreditCost(size, moderationCostOptions),
-        textBillingRoute.billingMultiplier
+        textBillingRoute.billingMultiplier *
+          qualityPreviewMultiplier(textQualityMultipliers)
       ),
     [
       chatThinking,
@@ -3154,6 +3159,7 @@ export function CreatePageClient({
       quality,
       size,
       textBillingRoute.billingMultiplier,
+      textQualityMultipliers,
     ]
   );
   const textBatchCreditCost = textImageCreditCost * batchCount;
@@ -3164,11 +3170,13 @@ export function CreatePageClient({
           effectiveEditSize,
           getModerationCostOptions(editImages.length)
         ),
-        editBillingRoute.billingMultiplier
+        editBillingRoute.billingMultiplier *
+          qualityPreviewMultiplier(editQualityMultipliers)
       )
     : applyBillingPreviewMultiplier(
         getPricedImageCreditCost(undefined, moderationCostOptions),
-        editBillingRoute.billingMultiplier
+        editBillingRoute.billingMultiplier *
+          qualityPreviewMultiplier(editQualityMultipliers)
       );
   const editBatchCreditCost = editImageCreditCost * editBatchCount;
   // 倍率前明细与预估公式文案（与上方倍率后报价同源同参数，保证公式与数字自洽）。
@@ -3186,27 +3194,27 @@ export function CreatePageClient({
     baseCredits: textImageBaseBreakdown.baseCredits,
     moderationCredits: textImageBaseBreakdown.moderationCredits,
     multiplier: textBillingRoute.billingMultiplier,
-    qualityBillingPresent: textQualityBillingPresent,
+    qualityMultiplier: qualityPreviewMultiplier(textQualityMultipliers),
   });
   const editCreditFormula = creditFormulaLabel({
     baseCredits: editImageBaseBreakdown.baseCredits,
     moderationCredits: editImageBaseBreakdown.moderationCredits,
     multiplier: editBillingRoute.billingMultiplier,
-    qualityBillingPresent: editQualityBillingPresent,
+    qualityMultiplier: qualityPreviewMultiplier(editQualityMultipliers),
   });
   const chatRoundCreditFormula = creditFormulaLabel({
     baseLabel: { en: "round", zh: "轮次" },
     baseCredits: capabilities.billing.chatRoundCredits,
     moderationCredits: 0,
     multiplier: chatBillingRoute.billingMultiplier,
-    qualityBillingPresent: chatQualityBillingPresent,
+    qualityMultiplier: qualityPreviewMultiplier(chatQualityMultipliers),
   });
   const agentRoundCreditFormula = creditFormulaLabel({
     baseLabel: { en: "round", zh: "轮次" },
     baseCredits: capabilities.billing.agentRoundCredits,
     moderationCredits: 0,
     multiplier: agentBillingRoute.billingMultiplier,
-    qualityBillingPresent: agentQualityBillingPresent,
+    qualityMultiplier: qualityPreviewMultiplier(agentQualityMultipliers),
   });
   const chatRoundCreditCost = applyBillingPreviewMultiplier(
     capabilities.billing.chatRoundCredits,
@@ -3290,10 +3298,9 @@ export function CreatePageClient({
       activeMode === "agent"
         ? agentBillingRoute.billingMultiplier
         : chatBillingRoute.billingMultiplier,
-    qualityBillingPresent:
-      activeMode === "agent"
-        ? agentQualityBillingPresent
-        : chatQualityBillingPresent,
+    qualityMultiplier: qualityPreviewMultiplier(
+      activeMode === "agent" ? agentQualityMultipliers : chatQualityMultipliers
+    ),
   });
   const chatSingleCreditFormula =
     activeMode === "agent" ? agentRoundCreditFormula : chatRoundCreditFormula;

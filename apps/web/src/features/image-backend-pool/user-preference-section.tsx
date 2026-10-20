@@ -35,6 +35,11 @@ type GroupOption = {
   billingMultiplier: number;
   // 质量计价倍率（quality 档位 → 倍率）；null=组内无质量计价配置。
   qualityMultipliers?: Partial<Record<string, number>> | null;
+  // 按模型的质量分档定价（出站模型 id -> 分档表）；仅用于提示存在性。
+  modelQualityMultipliers?: Record<
+    string,
+    Partial<Record<string, number>>
+  > | null;
 };
 
 function safetyLabel(value: boolean | null) {
@@ -71,11 +76,16 @@ function groupOptionLabel(group: GroupOption) {
     )
     .join("、");
   const qualitySuffix = qualityPart ? ` · 质量加价 ${qualityPart}` : "";
+  // 有按模型分档定价时提示一句（具体价创作页按当前模型展示）。
+  const modelTierSuffix = Object.keys(group.modelQualityMultipliers ?? {})
+    .length
+    ? " · 部分模型另有分档价"
+    : "";
   return `${group.name}${group.isDefault ? "（默认）" : ""} · ${backendTypeLabel(
     group.backendType
   )}${sizePart} · ${safetyLabel(group.contentSafetyEnabled)} · 计费 x${formatBillingMultiplier(
     group.billingMultiplier
-  )}${qualitySuffix}`;
+  )}${qualitySuffix}${modelTierSuffix}`;
 }
 
 export function ImageBackendPreferenceSection() {

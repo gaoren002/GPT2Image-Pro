@@ -4120,27 +4120,56 @@ export async function refreshImageBackendAccountsInfo(accountIds: string[]) {
 }
 
 /**
- * 每个分组的【质量计价倍率上限】：对组内启用成员（API + 账号）的 quality_billing
- * 逐档取最大值。创作页报价无法预知实际命中哪个成员，按上限展示（不高估成本）。
- * 实际扣费仍按调度命中的那个成员的配置解析（见 quality-billing.ts）。
- * API 成员的 metadata.modelBilling 质量分档表也并入同一上限——分档表命中
- * 时取代成员级质量表，取 max 后两者合看即为该组该档可能的最大倍率。
+ * 每个分组的【按模型质量计价结构】：成员级 quality_billing 是「组默认质量表」；
+ * API 成员 metadata.modelBilling 的质量分档是「按模型覆盖」。二者是不同模型
+ * 的定价，绝不合并——合并取 max 会让 A 模型的分档价污染 B 模型的展示。
+ * 返回：groupId -> { default: 组内成员级表逐档 max; byModel: 出站模型 id ->
+ * 该模型分档表（组内多成员命中同一模型 id 时逐档 max） }。
+ * 统一倍率形态（纯数字）不进 byModel：它与成员级质量表叠乘、且预估阶段
+ * 无法预知命中模型，单列会高估其他模型。
  */
+type GroupQualityStructure = {
+  default: Partial<Record<string, number>>;
+  byModel: Record<string, Partial<Record<string, number>>>;
+};
+
 async function getImageBackendGroupQualityMultipliers(
   groupIds: string[]
-): Promise<Map<string, Partial<Record<string, number>>>> {
+): Promise<Map<string, GroupQualityStructure>> {
   const idSet = new Set(groupIds.filter(Boolean));
   if (!idSet.size) return new Map();
-  const out = new Map<string, Partial<Record<string, number>>>();
-  const merge = (groupId: string | null, config: unknown): void => {
-    if (!groupId || !idSet.has(groupId)) return;
+  const out = new Map<string, GroupQualityStructure>();
+  const structure = (groupId: string | null): GroupQualityStructure | null => {
+    if (!groupId || !idSet.has(groupId)) return null;
+    let current = out.get(groupId);
+    if (!current) {
+      current = { default: {}, byModel: {} };
+      out.set(groupId, current);
+    }
+    return current;
+  };
+  const mergeDefault = (groupId: string | null, config: unknown): void => {
+    const target = structure(groupId);
+    if (!target) return;
     const parsed = parseQualityBilling(config);
     for (const [level, value] of Object.entries(parsed)) {
       if (typeof value !== "number" || !Number.isFinite(value)) continue;
-      const current = out.get(groupId) ?? {};
-      current[level] = Math.max(current[level] ?? 1, value);
-      out.set(groupId, current);
+      target.default[level] = Math.max(target.default[level] ?? 1, value);
     }
+  };
+  const mergeModel = (
+    groupId: string | null,
+    model: string,
+    entry: Partial<Record<string, number>>
+  ): void => {
+    const target = structure(groupId);
+    if (!target) return;
+    const current = target.byModel[model] ?? {};
+    for (const [level, value] of Object.entries(entry)) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      current[level] = Math.max(current[level] ?? 1, value);
+    }
+    target.byModel[model] = current;
   };
   const [apiRows, accountRows] = await Promise.all([
     db
@@ -4170,23 +4199,22 @@ async function getImageBackendGroupQualityMultipliers(
       .where(eq(imageBackendAccount.isEnabled, true)),
   ]);
   for (const row of apiRows) {
-    merge(row.junctionGroupId, row.qualityBilling);
-    merge(row.groupId, row.qualityBilling);
-    // 模型计价的分档表并入质量上限（分档命中时取代成员级质量表，逐档取
-    // max 即该组该档可能的最大倍率）。统一倍率形态不并入——它与成员级
-    // 质量表叠乘，预估阶段无法预知命中模型，单独并入会高估其他模型。
+    mergeDefault(row.junctionGroupId, row.qualityBilling);
+    mergeDefault(row.groupId, row.qualityBilling);
+    // 模型分档表按模型 id 单列，不与组默认表合并（不同模型的定价互不覆盖）。
+    // 统一倍率形态不进 byModel（见函数头注释）。
     const modelBilling = parseModelBilling(
       asGroupMetadata(row.metadata).modelBilling
     );
-    for (const entry of Object.values(modelBilling)) {
+    for (const [model, entry] of Object.entries(modelBilling)) {
       if (typeof entry === "number") continue;
-      merge(row.junctionGroupId, entry);
-      merge(row.groupId, entry);
+      mergeModel(row.junctionGroupId, model, entry);
+      mergeModel(row.groupId, model, entry);
     }
   }
   for (const row of accountRows) {
-    merge(row.junctionGroupId, row.qualityBilling);
-    merge(row.groupId, row.qualityBilling);
+    mergeDefault(row.junctionGroupId, row.qualityBilling);
+    mergeDefault(row.groupId, row.qualityBilling);
   }
   return out;
 }
@@ -4235,7 +4263,10 @@ export async function listImageBackendGroupOptions(options?: {
   );
   return groupRows.map((group) => ({
     ...group,
-    qualityMultipliers: qualityMultipliers.get(group.id) ?? null,
+    qualityMultipliers: qualityMultipliers.get(group.id)?.default ?? null,
+    // 按模型的质量分档定价（出站模型 id -> 分档表）；展示层按当前选中模型
+    // 取对应表，未命中模型的请求展示/预估用组默认表。
+    modelQualityMultipliers: qualityMultipliers.get(group.id)?.byModel ?? null,
   }));
 }
 

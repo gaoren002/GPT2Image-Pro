@@ -41,8 +41,14 @@ type ImagePricingChartCardProps = {
     moderationBlockingEnabled: boolean;
     monthlyCredits: number;
     planName: string;
-    /** 当前组的质量计价上限表（quality → 倍率，含模型分档并入的档位）；空/null=无加价。 */
+    /** 当前组的质量计价上限表（quality → 倍率）；空/null=无加价。 */
     qualityMultipliers?: Partial<Record<string, number>> | null;
+    /** 按模型的质量分档定价（出站模型 id -> 分档表）；这些模型有自己的价，
+     * 不并入 qualityMultipliers。 */
+    modelQualityMultipliers?: Record<
+      string,
+      Partial<Record<string, number>>
+    > | null;
   };
   isZh: boolean;
   pricing: ImageBaseCreditPricing;
@@ -227,12 +233,25 @@ export function ImagePricingChartCard({
       )}`,
     },
     {
-      // 质量计价：当前组内启用成员（含模型分档）各档最大倍率；空表显示「无加价」。
+      // 质量计价：组默认表（未配置分档模型的请求按此计价）。
       label: copy("Quality add-on", "质量加价"),
       value: qualityAddonParts.length
         ? qualityAddonParts.join(" · ")
         : copy("None (x1 all levels)", "无加价（各档 x1）"),
     },
+    ...Object.entries(billing.modelQualityMultipliers ?? {}).map(
+      ([model, levels]) => ({
+        // 分档模型单列一行：该模型自己的质量定价，取代组默认表。
+        label: copy("Per-model", "分档模型"),
+        value: `${model} · ${Object.entries(levels)
+          .filter(([, value]) => typeof value === "number" && value !== 1)
+          .map(
+            ([level, value]) =>
+              `${level} x${Number((value as number).toFixed(4))}`
+          )
+          .join(" · ")}`,
+      })
+    ),
     {
       label: copy("Review add-on", "审核附加"),
       value: billing.moderationBlockingEnabled

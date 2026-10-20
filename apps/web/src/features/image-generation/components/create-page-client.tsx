@@ -89,6 +89,8 @@ import {
 import {
   AUTO_IMAGE_SIZE,
   DEFAULT_IMAGE_MODEL,
+  getImageModel,
+  getUpstreamImageModel,
   DEFAULT_IMAGE_SIZE,
   getImageCreditCostBreakdown,
   type ImageBaseCreditPricing,
@@ -602,6 +604,12 @@ type BackendGroupOption = {
   contentSafetyEnabled: boolean | null;
   billingMultiplier: number;
   qualityMultipliers?: Partial<Record<string, number>> | null;
+  // 按模型的质量分档定价（出站模型 id -> 分档表）；当前模型命中时用该表，
+  // 否则用 qualityMultipliers（组默认表）。
+  modelQualityMultipliers?: Record<
+    string,
+    Partial<Record<string, number>>
+  > | null;
   childGroupIds: string[];
 };
 
@@ -3098,12 +3106,27 @@ export function CreatePageClient({
     const child =
       route.usesChildGroup && route.groupId
         ? backendGroups.find((group) => group.id === route.groupId)
-            ?.qualityMultipliers
         : null;
-    return mergeQualityMultipliers([
-      selectedBackendGroup?.qualityMultipliers,
-      child,
-    ]);
+    // 质量表按当前模型的出站 id 解析：命中模型分档（modelQualityMultipliers）
+    // 用该模型自己的表；未命中用组默认表。绝不跨模型合并——A 模型的分档价
+    // 不能污染 B 模型的展示。主组与 mixed 预测子组各自解析后仍逐档取 max
+    // （同组内多成员场景）。
+    const resolveGroup = (
+      group: (typeof backendGroups)[number] | null | undefined
+    ) => {
+      if (!group) return null;
+      const byModel = group.modelQualityMultipliers;
+      if (byModel) {
+        const outbound = getUpstreamImageModel(
+          getImageModel(textModel) || DEFAULT_IMAGE_MODEL
+        );
+        if (byModel[outbound]) return byModel[outbound];
+      }
+      return group.qualityMultipliers ?? null;
+    };
+    const primary = resolveGroup(selectedBackendGroup);
+    const childTable = resolveGroup(child);
+    return mergeQualityMultipliers([primary, childTable]);
   };
   const textQualityBillingPresent =
     routeQualityMultipliers(textBillingRoute) !== null;

@@ -212,6 +212,8 @@ export default async function DashboardPage() {
               groupMultiplier: activeBackendGroup?.billingMultiplier ?? 1,
               groupName: activeBackendGroup?.name ?? null,
               qualityMultipliers: activeBackendGroup?.qualityMultipliers ?? null,
+              modelQualityMultipliers:
+                activeBackendGroup?.modelQualityMultipliers ?? null,
               moderationBlockingEnabled:
                 capabilities.features["moderation.blocking"],
               monthlyCredits: capabilities.limits.monthlyCredits,

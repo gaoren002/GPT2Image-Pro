@@ -471,9 +471,14 @@ export function snapImageSizeToExactRatio(size: string): string {
   for (const [rw, rh] of STANDARD_RATIOS) {
     const diff = Math.abs(rw / rh - ratio);
     if (best && diff >= best.diff) continue;
-    // 用原尺寸长边作为目标，吸附到该比例的最近精确栅格
+    // 用原尺寸长边作为目标，吸附到该比例的最近精确栅格。getExactRatioImageSize
+    // 的像素下限可能拒绝小尺寸的最近栅格（如 9:16 的 576x1024 < 65 万像素），
+    // 此时放宽为「该比例下像素上限内最大的精确栅格」兜底——白名单上游
+    // （suduma）收到非精确比例 100% 拒，宁可尺寸略偏也不能原样发。
     const longEdge = Math.max(dimensions.width, dimensions.height);
-    const snapped = getExactRatioImageSize(rw, rh, longEdge);
+    const snapped =
+      getExactRatioImageSize(rw, rh, longEdge) ??
+      getExactRatioImageSize(rw, rh, MAX_IMAGE_DIMENSION);
     if (!snapped) continue;
     best = { ...snapped, diff };
   }

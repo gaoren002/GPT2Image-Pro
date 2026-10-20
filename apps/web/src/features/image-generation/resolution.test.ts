@@ -500,3 +500,16 @@ describe("snapImageSizeToExactRatio", () => {
     expect(snapImageSizeToExactRatio("3:2")).toBe("3:2");
   });
 });
+
+describe("snapImageSizeToExactRatio small custom sizes", () => {
+  it("snaps small custom sizes past the pixel minimum (suduma whitelist case)", () => {
+    // 624x1072(用户自定义小尺寸):最近比例 9:16,最近栅格 576x1024 低于
+    // 像素下限,兜底取该比例最大合法栅格 720x1280——不再原样发(必死)。
+    expect(snapImageSizeToExactRatio("624x1072")).toBe("720x1280");
+  });
+
+  it("keeps behavior for sizes whose nearest grid is legal", () => {
+    expect(snapImageSizeToExactRatio("3520x2352")).toBe("3504x2336");
+    expect(snapImageSizeToExactRatio("1248x704")).toBe("1280x720");
+  });
+});

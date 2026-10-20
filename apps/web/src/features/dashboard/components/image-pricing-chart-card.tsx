@@ -41,6 +41,8 @@ type ImagePricingChartCardProps = {
     moderationBlockingEnabled: boolean;
     monthlyCredits: number;
     planName: string;
+    /** 当前组的质量计价上限表（quality → 倍率，含模型分档并入的档位）；空/null=无加价。 */
+    qualityMultipliers?: Partial<Record<string, number>> | null;
   };
   isZh: boolean;
   pricing: ImageBaseCreditPricing;
@@ -190,6 +192,12 @@ export function ImagePricingChartCard({
   const multiplierExampleFinal = roundUpTwoDecimals(
     multiplierExampleBeforeMultiplier * groupMultiplier
   );
+  // 质量加价展示口径：与创作页一致，取组内各成员（含模型分档）各档最大倍率。
+  const qualityAddonParts = Object.entries(billing.qualityMultipliers ?? {})
+    .filter(([, value]) => typeof value === "number" && value !== 1)
+    .map(
+      ([level, value]) => `${level} x${Number((value as number).toFixed(4))}`
+    );
 
   const pricingItems = [
     {
@@ -217,6 +225,13 @@ export function ImagePricingChartCard({
       value: `${billing.groupName || copy("Default group", "默认分组")} · x${Number(
         groupMultiplier.toFixed(4)
       )}`,
+    },
+    {
+      // 质量计价：当前组内启用成员（含模型分档）各档最大倍率；空表显示「无加价」。
+      label: copy("Quality add-on", "质量加价"),
+      value: qualityAddonParts.length
+        ? qualityAddonParts.join(" · ")
+        : copy("None (x1 all levels)", "无加价（各档 x1）"),
     },
     {
       label: copy("Review add-on", "审核附加"),
@@ -409,6 +424,12 @@ export function ImagePricingChartCard({
                 {copy(
                   `Final single-image charge = ceil2(ceil2(base + review add-ons) x group multiplier).`,
                   `单张最终扣费 = 向上保留两位(向上保留两位(基础价 + 审核附加) x 分组倍率)。`
+                )}
+              </p>
+              <p>
+                {copy(
+                  "Quality / per-model billing multipliers, if configured on the active group, stack on top (per-model quality tiers replace the member quality table).",
+                  "若当前分组配了质量加价或按模型计价，在此基础上再乘对应倍率（按模型分档时取代成员质量表）；实际倍率以生成记录明细为准。"
                 )}
               </p>
             </div>

@@ -398,122 +398,6 @@ function draftToMultipliers(
   return map;
 }
 
-type PricingOverviewRow = {
-  group: string;
-  member: string;
-  type: string;
-  target: string;
-  multiplier: string;
-};
-
-/**
- * 计价总览行（纯函数）：把分组倍率、各成员质量计价、API 成员模型计价、
- * Adobe 成员倍率与全局 Adobe 族倍率聚合成一张只读表。等于 1 / 未配置的
- * 项不列。Adobe 族倍率作用于全部分组，group 列显示「全局」。
- */
-function buildPricingOverviewRows(input: {
-  groups: Group[];
-  apis: Api[];
-  accounts: Account[];
-  adobes: Adobe[];
-  imageMultipliers: Record<string, number>;
-}): PricingOverviewRow[] {
-  const rows: PricingOverviewRow[] = [];
-  const fmt = (value: number) => Number(value.toFixed(4)).toString();
-  const groupName = (groupId: string | null) =>
-    input.groups.find((group) => group.id === groupId)?.name ??
-    (groupId ? groupId : "（未分组）");
-
-  for (const group of input.groups) {
-    if (group.billingMultiplier !== 1) {
-      rows.push({
-        group: group.name,
-        member: "-",
-        type: "分组倍率",
-        target: "-",
-        multiplier: fmt(group.billingMultiplier),
-      });
-    }
-  }
-  const qualityText = (
-    config: Partial<Record<string, number>> | null | undefined
-  ) => {
-    const parts = Object.entries(config ?? {})
-      .filter(([, value]) => typeof value === "number" && value !== 1)
-      .map(([level, value]) => `${level} x${fmt(value as number)}`);
-    return parts.join("、");
-  };
-  for (const api of input.apis) {
-    const quality = qualityText(api.qualityBilling);
-    if (quality) {
-      rows.push({
-        group: groupName(api.groupIds[0] ?? api.groupId),
-        member: api.name,
-        type: "质量计价",
-        target: "quality",
-        multiplier: quality,
-      });
-    }
-    for (const [model, entry] of Object.entries(api.modelBilling ?? {})) {
-      if (typeof entry === "number") {
-        if (entry === 1) continue;
-        rows.push({
-          group: groupName(api.groupIds[0] ?? api.groupId),
-          member: api.name,
-          type: "模型计价（统一）",
-          target: model,
-          multiplier: fmt(entry),
-        });
-      } else {
-        const parts = Object.entries(entry)
-          .filter(([, value]) => typeof value === "number" && value !== 1)
-          .map(([level, value]) => `${level} x${fmt(value as number)}`);
-        if (!parts.length) continue;
-        rows.push({
-          group: groupName(api.groupIds[0] ?? api.groupId),
-          member: api.name,
-          type: "模型计价（分档）",
-          target: model,
-          multiplier: parts.join("、"),
-        });
-      }
-    }
-  }
-  for (const account of input.accounts) {
-    const quality = qualityText(account.qualityBilling);
-    if (!quality) continue;
-    rows.push({
-      group: groupName(account.groupIds[0] ?? account.groupId),
-      member: account.name,
-      type: "质量计价",
-      target: "quality",
-      multiplier: quality,
-    });
-  }
-  for (const adobe of input.adobes) {
-    const multiplier = Number(adobe.billingMultiplier) || 1;
-    if (multiplier === 1) continue;
-    rows.push({
-      group: groupName(adobe.groupIds[0] ?? adobe.groupId),
-      member: adobe.name,
-      type: "Adobe 成员倍率",
-      target: "-",
-      multiplier: fmt(multiplier),
-    });
-  }
-  for (const [family, multiplier] of Object.entries(input.imageMultipliers)) {
-    if (multiplier === 1) continue;
-    rows.push({
-      group: "全局",
-      member: "Adobe 模型族",
-      type: "模型族倍率",
-      target: family,
-      multiplier: fmt(multiplier),
-    });
-  }
-  return rows;
-}
-
 type BulkAccountForm = {
   selectionGroupId: string;
   selectionMode: "all" | AccountBackendFormValue;
@@ -2566,7 +2450,6 @@ export function ImageBackendPoolAdminPanel({
           <TabsTrigger value="accounts">账号池</TabsTrigger>
           <TabsTrigger value="apis">API 后端</TabsTrigger>
           <TabsTrigger value="adobe">Adobe 后端</TabsTrigger>
-          <TabsTrigger value="pricing">计价总览</TabsTrigger>
           {!readOnly && <TabsTrigger value="import">同步 Sub2API</TabsTrigger>}
           {!readOnly && <TabsTrigger value="register">注册机</TabsTrigger>}
         </TabsList>
@@ -5260,58 +5143,6 @@ export function ImageBackendPoolAdminPanel({
               </Card>
             )}
           </div>
-        </TabsContent>
-
-        <TabsContent value="pricing" className="mt-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">计价总览</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-xs text-muted-foreground">
-                全站计费倍率的只读聚合：最终积分 =（基础 + 审核）× 分组/成员
-                × 模型族 × 模型计价 × 质量。等于 1 的项不列。Adobe 族倍率为
-                全局配置，其余按成员。
-              </p>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b text-left text-xs text-muted-foreground">
-                      <th className="py-2 pr-4">分组</th>
-                      <th className="py-2 pr-4">成员</th>
-                      <th className="py-2 pr-4">类型</th>
-                      <th className="py-2 pr-4">对象</th>
-                      <th className="py-2">倍率</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {buildPricingOverviewRows({
-                      groups,
-                      apis,
-                      accounts,
-                      adobes,
-                      imageMultipliers: draftToMultipliers(
-                        imageMultiplierDraft
-                      ),
-                    }).map((row) => (
-                      <tr
-                        key={`${row.group}:${row.member}:${row.type}:${row.target}`}
-                        className="border-b last:border-b-0"
-                      >
-                        <td className="py-1.5 pr-4">{row.group}</td>
-                        <td className="py-1.5 pr-4">{row.member}</td>
-                        <td className="py-1.5 pr-4">{row.type}</td>
-                        <td className="py-1.5 pr-4 font-mono text-xs">
-                          {row.target}
-                        </td>
-                        <td className="py-1.5">x{row.multiplier}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
         </TabsContent>
 
         {!readOnly && (

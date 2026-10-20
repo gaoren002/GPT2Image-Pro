@@ -211,6 +211,7 @@ export default async function DashboardPage() {
               chatRoundCredits: capabilities.billing.chatRoundCredits,
               groupMultiplier: activeBackendGroup?.billingMultiplier ?? 1,
               groupName: activeBackendGroup?.name ?? null,
+              qualityMultipliers: activeBackendGroup?.qualityMultipliers ?? null,
               moderationBlockingEnabled:
                 capabilities.features["moderation.blocking"],
               monthlyCredits: capabilities.limits.monthlyCredits,

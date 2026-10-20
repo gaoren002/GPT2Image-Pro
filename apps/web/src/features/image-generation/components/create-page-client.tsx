@@ -5937,6 +5937,50 @@ export function CreatePageClient({
               id: "chat-transparent-matte",
               disabled: isChatGenerating || chatMixWebFirstActive,
             })}
+          {/* 质量：codex 对话生图此前未暴露质量参数，补齐（与瀑布流同款、
+              标注按本面板图像模型解析的倍率）；Web-only 车道不支持故隐藏。 */}
+          {!isWebOnlyBackend && (
+            <div
+              className={chatMixWebFirstActive ? "opacity-55" : ""}
+              title={
+                chatMixWebFirstActive
+                  ? responsesOnlyDisabledReason
+                  : undefined
+              }
+            >
+              <Select
+                value={quality}
+                onValueChange={(value) => setQuality(value as ImageQuality)}
+                disabled={isChatGenerating || chatMixWebFirstActive}
+              >
+                <SelectTrigger
+                  id="chat-quality"
+                  className="h-8 w-auto gap-1"
+                  title={copy("Image quality", "图像质量")}
+                >
+                  <span className="text-xs text-muted-foreground">
+                    {copy("Quality", "质量")}
+                  </span>
+                  <SelectValue>
+                    {qualityLabelWithBilling(
+                      quality,
+                      chatQualityMultipliers
+                    )}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {QUALITY_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {qualityLabelWithBilling(
+                        option.value,
+                        chatQualityMultipliers
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           {renderHdRepairToggle({
             id: "chat-hd-repair",
             disabled: isChatGenerating,
@@ -9738,6 +9782,26 @@ export function CreatePageClient({
                     ))}
                   </SelectContent>
                 </Select>
+                {/* 图像模型：瀑布流此前复用 chat 面板的 chatImageModel 但
+                    不暴露选择器,补齐(与 chat 面板同款紧凑选择器) */}
+                {showImageModelControls && (
+                  <div
+                    className={chatMixWebFirstActive ? "opacity-55" : ""}
+                    title={
+                      chatMixWebFirstActive
+                        ? responsesOnlyDisabledReason
+                        : imageModelHelpText
+                    }
+                  >
+                    {renderImageModelSelect({
+                      id: "waterfall-image-model",
+                      value: chatImageModel,
+                      onChange: setChatImageModel,
+                      disabled: isBatchActive || chatMixWebFirstActive,
+                      compact: true,
+                    })}
+                  </div>
+                )}
                 {/* 质量：复用 quality 状态(瀑布流请求已发送该参数)，Web-only 后端不支持故隐藏 */}
                 {!isWebOnlyBackend && (
                   <Select

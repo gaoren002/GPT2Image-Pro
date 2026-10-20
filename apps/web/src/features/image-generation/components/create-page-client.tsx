@@ -5981,6 +5981,46 @@ export function CreatePageClient({
               </Select>
             </div>
           )}
+          {/* 输出格式：请求已带 output_format（共享状态），此前仅生图/编辑
+              面板可改，补齐入口；Web-only 车道不支持故隐藏。 */}
+          {!isWebOnlyBackend && (
+            <div
+              className={chatMixWebFirstActive ? "opacity-55" : ""}
+              title={
+                chatMixWebFirstActive
+                  ? responsesOnlyDisabledReason
+                  : outputFormatHelpText
+              }
+            >
+              <Select
+                value={outputFormat}
+                onValueChange={(value) =>
+                  setOutputFormat(value as ImageOutputFormat)
+                }
+                disabled={isChatGenerating || chatMixWebFirstActive}
+              >
+                <SelectTrigger
+                  id="chat-output-format"
+                  className="h-8 w-auto gap-1"
+                  title={outputFormatHelpText}
+                >
+                  <span className="text-xs text-muted-foreground">
+                    {copy("Format", "格式")}
+                  </span>
+                  <SelectValue>
+                    {outputFormatLabel(outputFormat)}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {outputFormatLabel(option.value)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           {renderHdRepairToggle({
             id: "chat-hd-repair",
             disabled: isChatGenerating,
@@ -9876,6 +9916,45 @@ export function CreatePageClient({
                     id: "batch-transparent-matte",
                     disabled: isBatchActive || chatMixWebFirstActive,
                   })}
+                {/* 输出格式：与 chat 面板同款补齐入口（共享 outputFormat 状态）。 */}
+                {!isWebOnlyBackend && (
+                  <div
+                    className={chatMixWebFirstActive ? "opacity-55" : ""}
+                    title={
+                      chatMixWebFirstActive
+                        ? responsesOnlyDisabledReason
+                        : outputFormatHelpText
+                    }
+                  >
+                    <Select
+                      value={outputFormat}
+                      onValueChange={(value) =>
+                        setOutputFormat(value as ImageOutputFormat)
+                      }
+                      disabled={isBatchActive || chatMixWebFirstActive}
+                    >
+                      <SelectTrigger
+                        id="batch-output-format"
+                        className="h-8 w-auto gap-1"
+                        title={outputFormatHelpText}
+                      >
+                        <span className="text-xs text-muted-foreground">
+                          {copy("Format", "格式")}
+                        </span>
+                        <SelectValue>
+                          {outputFormatLabel(outputFormat)}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {outputFormatLabel(option.value)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 {renderHdRepairToggle({
                   id: "batch-hd-repair",
                   disabled: isBatchActive,

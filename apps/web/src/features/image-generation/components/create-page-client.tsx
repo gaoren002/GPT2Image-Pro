@@ -2038,8 +2038,9 @@ export function CreatePageClient({
     options: Parameters<typeof getImageCreditCostBreakdown>[1] = {}
   ) => getPricedImageCreditBreakdown(requestedSize, options).totalCredits;
   // 预估费用计算公式文案：（基础 a + 审核 b）× 分组倍率 m。
-  // 审核为 0 时省略加法段；质量倍率取决于调度最终命中的成员，预估无法预知，
-  // 不折入报价——当预测车道内存在质量计价配置时公式旁注明「未计入质量倍率」。
+  // 审核为 0 时省略加法段；质量倍率取决于调度最终命中的成员（含成员级
+  // 质量表与按模型的分档定价），预估无法预知，不折入报价——当预测车道内
+  // 存在质量计价配置时公式旁注明「未计入质量倍率」。
   // chat/agent 轮次报价 baseLabel 传「轮次」。
   const creditFormulaLabel = (params: {
     baseLabel?: { en: string; zh: string };

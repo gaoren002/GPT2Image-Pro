@@ -4123,6 +4123,8 @@ export async function refreshImageBackendAccountsInfo(accountIds: string[]) {
  * 每个分组的【质量计价倍率上限】：对组内启用成员（API + 账号）的 quality_billing
  * 逐档取最大值。创作页报价无法预知实际命中哪个成员，按上限展示（不高估成本）。
  * 实际扣费仍按调度命中的那个成员的配置解析（见 quality-billing.ts）。
+ * API 成员的 metadata.modelBilling 质量分档表也并入同一上限——分档表命中
+ * 时取代成员级质量表，取 max 后两者合看即为该组该档可能的最大倍率。
  */
 async function getImageBackendGroupQualityMultipliers(
   groupIds: string[]
@@ -4146,6 +4148,7 @@ async function getImageBackendGroupQualityMultipliers(
         junctionGroupId: imageBackendApiGroup.groupId,
         groupId: imageBackendApi.groupId,
         qualityBilling: imageBackendApi.qualityBilling,
+        metadata: imageBackendApi.metadata,
       })
       .from(imageBackendApi)
       .leftJoin(
@@ -4169,6 +4172,17 @@ async function getImageBackendGroupQualityMultipliers(
   for (const row of apiRows) {
     merge(row.junctionGroupId, row.qualityBilling);
     merge(row.groupId, row.qualityBilling);
+    // 模型计价的分档表并入质量上限（分档命中时取代成员级质量表，逐档取
+    // max 即该组该档可能的最大倍率）。统一倍率形态不并入——它与成员级
+    // 质量表叠乘，预估阶段无法预知命中模型，单独并入会高估其他模型。
+    const modelBilling = parseModelBilling(
+      asGroupMetadata(row.metadata).modelBilling
+    );
+    for (const entry of Object.values(modelBilling)) {
+      if (typeof entry === "number") continue;
+      merge(row.junctionGroupId, entry);
+      merge(row.groupId, entry);
+    }
   }
   for (const row of accountRows) {
     merge(row.junctionGroupId, row.qualityBilling);

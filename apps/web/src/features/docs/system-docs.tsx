@@ -1078,7 +1078,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               name: "quality",
               requirement: "可选",
               description:
-                "auto、low、medium、high。注意：部分分组成员配置了质量计价倍率，该档位的最终积分消耗会在分组倍率基础上再乘质量倍率；绑定的分组若存在质量加价，控制台分组选择器会标注（如「质量加价 high x1.4」）。",
+                "auto、low、medium、high。注意：部分分组成员配置了质量计价倍率或按模型的质量分档定价，该档位的最终积分消耗会在分组倍率基础上再乘对应倍率（按模型分档时取代成员级质量倍率）；绑定的分组若存在质量加价，控制台分组选择器会标注（如「质量加价 high x1.4」）。",
             },
             {
               name: "moderation",

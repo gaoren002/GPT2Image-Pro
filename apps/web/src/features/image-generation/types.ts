@@ -321,6 +321,13 @@ export interface ApiConfig {
     chatCompletionsUpstreamMode?: "responses" | "chat_completions" | "images";
     imagesUpstreamMode?: "images" | "responses";
     apiForceResponsesEndpoint?: boolean;
+    // 池 API 尺寸方言（metadata.sizeDialect）：上游对 size 参数的兼容形态。
+    // - 不设/"wxh"：WIDTHxHEIGHT 原样直传（默认，兼容绝大多数上游）。
+    // - "exact-ratio"：上游只接受能整除出精确比例的 WxH（如 suduma gzs）；
+    //   出站前把任意 WxH 吸附到最近的精确比例栅格。
+    // - "ratio-string"：上游只认比例串（如 "3:2"）；预设档位请求改发比例串，
+    //   自定义尺寸仍发 WxH（无法精确表达时按上游能力取舍）。
+    sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
     // pool-api 专属：该 api 后端上游实为 Adobe（adobe-sourced）。为真时计费吃成员倍率
     // （见 service.ts），且 firefly-* 请求经反向转换（截家族名 + 推 size）后由本后端服务。
     adobeSourced?: boolean;

@@ -205,6 +205,8 @@ type Api = {
   interfaceMode: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode: ChatCompletionsUpstreamModeFormValue;
   imagesUpstreamMode: ImagesUpstreamModeFormValue;
+  // 尺寸方言（metadata.sizeDialect）；缺省视为 wxh。
+  sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
   useStream: boolean;
   contentSafetyEnabled: boolean;
   isEnabled: boolean;
@@ -273,6 +275,7 @@ type ContentSafetyFormValue = "inherit" | "enabled" | "disabled";
 type AccountBackendFormValue = "web" | "responses";
 type GroupBackendTypeFormValue = ImageBackendGroupBackendType;
 type GroupSizeTierFormValue = ImageBackendGroupSizeTier;
+type ApiSizeDialectFormValue = "wxh" | "exact-ratio" | "ratio-string";
 type ApiInterfaceModeFormValue = ImageBackendApiInterfaceMode;
 type ChatCompletionsUpstreamModeFormValue =
   | "responses"
@@ -494,6 +497,31 @@ const IMAGES_UPSTREAM_MODE_OPTIONS: Array<{
     label: "转换为 Responses",
     detail:
       "命中文生图/图生图时转换为上游 /responses + image_generation tool，适合只提供 Responses 的上游。",
+  },
+];
+
+// 尺寸方言：上游对 size 参数的兼容形态（存 metadata.sizeDialect）。
+const API_SIZE_DIALECT_OPTIONS: Array<{
+  value: ApiSizeDialectFormValue;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "wxh",
+    label: "WIDTHxHEIGHT 直传",
+    detail: "标准 OpenAI 形态，尺寸原样发送。默认，绝大多数上游适用。",
+  },
+  {
+    value: "exact-ratio",
+    label: "吸附精确比例",
+    detail:
+      "上游只接受能整除出精确比例的 WxH（如部分 gpt-image 逆向）。出站前把约等于比例的尺寸吸附到最近的精确比例栅格（偏差 <16px 档）。",
+  },
+  {
+    value: "ratio-string",
+    label: "改发比例串",
+    detail:
+      "上游只认比例串（如 \"3:2\"）。预设档位请求改发比例串，自定义像素尺寸仍发 WxH。",
   },
 ];
 
@@ -884,6 +912,7 @@ export function ImageBackendPoolAdminPanel({
     chatCompletionsUpstreamMode:
       "responses" as ChatCompletionsUpstreamModeFormValue,
     imagesUpstreamMode: "images" as ImagesUpstreamModeFormValue,
+    sizeDialect: "wxh" as ApiSizeDialectFormValue,
     useStream: false,
     contentSafetyEnabled: true,
     isEnabled: true,
@@ -1166,6 +1195,7 @@ export function ImageBackendPoolAdminPanel({
       chatCompletionsUpstreamMode:
         "responses" as ChatCompletionsUpstreamModeFormValue,
       imagesUpstreamMode: "images" as ImagesUpstreamModeFormValue,
+      sizeDialect: "wxh" as ApiSizeDialectFormValue,
       useStream: false,
       contentSafetyEnabled: true,
       isEnabled: true,
@@ -1323,6 +1353,7 @@ export function ImageBackendPoolAdminPanel({
       chatCompletionsUpstreamMode:
         api.chatCompletionsUpstreamMode || "responses",
       imagesUpstreamMode: api.imagesUpstreamMode || "images",
+      sizeDialect: api.sizeDialect || "wxh",
       useStream: api.useStream,
       contentSafetyEnabled: api.contentSafetyEnabled,
       isEnabled: api.isEnabled,
@@ -3962,6 +3993,36 @@ export function ImageBackendPoolAdminPanel({
                     {
                       IMAGES_UPSTREAM_MODE_OPTIONS.find(
                         (option) => option.value === apiForm.imagesUpstreamMode
+                      )?.detail
+                    }
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label>尺寸方言</Label>
+                  <Select
+                    value={apiForm.sizeDialect}
+                    onValueChange={(value) =>
+                      setApiForm((current) => ({
+                        ...current,
+                        sizeDialect: value as ApiSizeDialectFormValue,
+                      }))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {API_SIZE_DIALECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {
+                      API_SIZE_DIALECT_OPTIONS.find(
+                        (option) => option.value === apiForm.sizeDialect
                       )?.detail
                     }
                   </p>

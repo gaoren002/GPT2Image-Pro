@@ -418,6 +418,9 @@ export function alignImageSizeToStep(size: string) {
   const normalized = size.trim().toLowerCase();
   if (normalized === AUTO_IMAGE_SIZE) return AUTO_IMAGE_SIZE;
 
+  const ratio = parseImageSizeRatio(normalized);
+  if (ratio) return normalized; // 合法比例串原样放行，由尺寸校验/上游侧处理
+
   const dimensions = parseImageSize(normalized);
   if (!dimensions) return normalized;
 
@@ -425,6 +428,57 @@ export function alignImageSizeToStep(size: string) {
     roundToImageStep(dimensions.width),
     roundToImageStep(dimensions.height)
   );
+}
+
+/**
+ * 解析 "W:H" 比例串（如 "3:2"、"21:9"，1-21 的正整数，比例不超过 3:1）。
+ * 下游 API（v1/images/*）接受比例串作为 size，交给上游按自家方言处理；
+ * 返回 null 表示不是合法比例串。
+ */
+export function parseImageSizeRatio(size: string): {
+  width: number;
+  height: number;
+} | null {
+  const match = size.trim().match(/^([1-9]\d?)\s*:\s*([1-9]\d?)$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (width > 21 || height > 21) return null; // 常规宽高比不会超过 21
+  if (width / height > MAX_IMAGE_ASPECT_RATIO) return null;
+  if (height / width > MAX_IMAGE_ASPECT_RATIO) return null;
+  return { width, height };
+}
+
+/**
+ * 把任意 WxH 吸附到「数学上精确比例 + 双边 16 步进」的最近栅格尺寸。
+ * 用于 exact-ratio 方言上游（如 suduma gzs：只接受能整除出精确比例的 WxH，
+ * 约等于比例的尺寸一律 400/502）。吸附在全部标准比例（1:1..3:1，含 4:5/5:4
+ * 竖横镜像）中找比例最接近者，再取该比例下离原尺寸最近的合法精确栅格；
+ * 偏差始终小于一个比例档位间距（视觉无感）。找不到任何合法栅格时原样返回
+ * （由上游按自家规则兜底）。
+ */
+export function snapImageSizeToExactRatio(size: string): string {
+  const dimensions = parseImageSize(size);
+  if (!dimensions) return size;
+  const ratio = dimensions.width / dimensions.height;
+  // 标准比例全集（suduma 报错信息列出的清单 + 常见档位，横竖镜像都含）
+  const STANDARD_RATIOS: Array<[number, number]> = [
+    [1, 1], [4, 5], [5, 4], [3, 4], [4, 3], [2, 3], [3, 2],
+    [1, 2], [2, 1], [9, 16], [16, 9], [9, 21], [21, 9],
+    [1, 3], [3, 1],
+  ];
+  let best: { width: number; height: number; diff: number } | null = null;
+  for (const [rw, rh] of STANDARD_RATIOS) {
+    const diff = Math.abs(rw / rh - ratio);
+    if (best && diff >= best.diff) continue;
+    // 用原尺寸长边作为目标，吸附到该比例的最近精确栅格
+    const longEdge = Math.max(dimensions.width, dimensions.height);
+    const snapped = getExactRatioImageSize(rw, rh, longEdge);
+    if (!snapped) continue;
+    best = { ...snapped, diff };
+  }
+  if (!best) return size;
+  return normalizeImageSize(best.width, best.height);
 }
 
 function ceilToImageStep(value: number) {
@@ -554,6 +608,11 @@ export function validateImageSize(
   | { valid: false; message: string } {
   if (size.trim().toLowerCase() === AUTO_IMAGE_SIZE) {
     return { valid: true, dimensions: null, auto: true };
+  }
+  // 比例串（"3:2" 等）：合法即放行，dimensions 为空、auto 为 false——
+  // 具体尺寸由上游决定；本站像素计价按兜底（详见调用方）。
+  if (parseImageSizeRatio(size)) {
+    return { valid: true, dimensions: null, auto: false };
   }
 
   const dimensions = parseImageSize(size);

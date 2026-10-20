@@ -88,6 +88,8 @@ import {
   isImageModel,
   normalizeImageModel,
   parseImageSize,
+  parseImageSizeRatio,
+  snapImageSizeToExactRatio,
 } from "./resolution";
 import {
   buildResponsesImageEditRequest,
@@ -266,9 +268,38 @@ function resolveOutgoingImageRequest(
   });
   return {
     model: mapped.model,
-    size: fireflyRewrite?.size ?? requestedSize ?? undefined,
+    size:
+      applyUpstreamSizeDialect(
+        config,
+        fireflyRewrite?.size ?? requestedSize
+      ) ?? undefined,
     quality: mapped.quality,
   };
+}
+
+/**
+ * 按成员「尺寸方言」改写出站 size（仅 pool-api 后端生效）：
+ * - exact-ratio：吸附到最近精确比例栅格（上游拒收约等于比例的 WxH）；
+ * - ratio-string：预设档位比例改发比例串（如 "3:2"），上游自己定尺寸；
+ *   自定义/非标 WxH 原样保留（比例串表达不了精确像素）。
+ * auto 与比例串入参原样透传；其余（含 pool-account/pool-adobe/user-api）不动。
+ */
+function applyUpstreamSizeDialect(
+  config: ApiConfig,
+  size: string | null | undefined
+): string | null | undefined {
+  if (!size || size === AUTO_IMAGE_SIZE) return size;
+  if (config.backend?.type !== "pool-api") return size;
+  const dialect = config.backend.sizeDialect;
+  if (dialect === "exact-ratio") {
+    // 比例串本身就精确，直接透传
+    return parseImageSizeRatio(size) ? size : snapImageSizeToExactRatio(size);
+  }
+  if (dialect === "ratio-string") {
+    // 已是比例串或吸附不回 WxH 的自定义尺寸原样发
+    return size;
+  }
+  return size;
 }
 
 function getHeaders(

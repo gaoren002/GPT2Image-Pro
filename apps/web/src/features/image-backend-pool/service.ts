@@ -453,6 +453,17 @@ function normalizeGroupBackendType(
   return value === "web" || value === "responses" ? value : "mixed";
 }
 
+// 池 API 尺寸方言（metadata.sizeDialect）：解析见 image-generation/types.ts 注释。
+// 非法/未设置一律回退默认 "wxh"（WxH 直传）。
+function normalizeApiSizeDialect(
+  metadata: Record<string, unknown> | null | undefined
+): "wxh" | "exact-ratio" | "ratio-string" {
+  const value = asGroupMetadata(metadata).sizeDialect;
+  return value === "exact-ratio" || value === "ratio-string"
+    ? value
+    : "wxh";
+}
+
 function stripTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -3266,6 +3277,8 @@ function toResolvedPoolConfig(
           imagesUpstreamMode: member.imagesUpstreamMode,
           apiForceResponsesEndpoint:
             options.accountBackendPreference === "responses",
+          // 尺寸方言（metadata.sizeDialect）：见 image-generation/types.ts 注释。
+          sizeDialect: normalizeApiSizeDialect(member.metadata),
           adobeSourced: member.adobeSourced,
           billingGroupId: fallbackGroupId,
           // Adobe 来源 api：组倍率 × 本后端倍率（复用 Adobe 伪账号同一倍率链）；
@@ -7468,6 +7481,8 @@ type UpsertApiInput = {
   interfaceMode?: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode?: ChatCompletionsUpstreamMode;
   imagesUpstreamMode?: ImagesUpstreamMode;
+  // 尺寸方言（写入 metadata.sizeDialect，解析见 image-generation/types.ts）。
+  sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
   useStream: boolean;
   contentSafetyEnabled: boolean;
   isEnabled: boolean;
@@ -7515,13 +7530,18 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
   const primaryGroupId = groupIds[0] || null;
   let existingPrimaryGroupId: string | null | undefined;
 
+  let existingApiMetadata: Record<string, unknown> | null = null;
   if (input.id) {
     const [existingApi] = await db
-      .select({ groupId: imageBackendApi.groupId })
+      .select({
+        groupId: imageBackendApi.groupId,
+        metadata: imageBackendApi.metadata,
+      })
       .from(imageBackendApi)
       .where(eq(imageBackendApi.id, input.id))
       .limit(1);
     existingPrimaryGroupId = existingApi?.groupId ?? null;
+    existingApiMetadata = existingApi?.metadata ?? null;
   }
 
   const updateBase = {
@@ -7554,6 +7574,15 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     billingMultiplier: String(input.billingMultiplier ?? 1),
     status: input.status || "active",
     updatedAt: new Date(),
+    // 尺寸方言并入 metadata（保留其他键；显式传 wxh 时也落库，便于后台回显）。
+    ...(input.sizeDialect !== undefined
+      ? {
+          metadata: {
+            ...(existingApiMetadata ?? {}),
+            sizeDialect: input.sizeDialect,
+          },
+        }
+      : {}),
   };
 
   if (input.id) {
@@ -8307,6 +8336,7 @@ export async function listAdminImageBackendPool() {
       interfaceMode: imageBackendApi.interfaceMode,
       chatCompletionsUpstreamMode: imageBackendApi.chatCompletionsUpstreamMode,
       imagesUpstreamMode: imageBackendApi.imageUpstreamMode,
+      metadata: imageBackendApi.metadata,
       useStream: imageBackendApi.useStream,
       contentSafetyEnabled: imageBackendApi.contentSafetyEnabled,
       isEnabled: imageBackendApi.isEnabled,
@@ -8408,6 +8438,8 @@ export async function listAdminImageBackendPool() {
       ...api,
       // numeric 列回库为字符串，转成数值供前端展示/编辑。
       billingMultiplier: Number(api.billingMultiplier) || 1,
+      // 尺寸方言从 metadata 解析（缺省 wxh），供后台表单回显。
+      sizeDialect: normalizeApiSizeDialect(api.metadata),
       groupIds:
         apiGroupIdMap.get(api.id) ||
         normalizeAccountGroupIds(api.groupId ? [api.groupId] : []),

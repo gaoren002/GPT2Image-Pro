@@ -8,6 +8,8 @@ import {
   fitImageDimensionsToValidSize,
   getExactRatioImageSize,
   getImageBaseCredits,
+  parseImageSizeRatio,
+  snapImageSizeToExactRatio,
   getImageCreditCostBreakdown,
   getImageModel,
   getImageModelForGroup,
@@ -455,5 +457,46 @@ describe("getExactRatioImageSize", () => {
   it("returns null for degenerate ratio inputs", () => {
     expect(getExactRatioImageSize(0, 1, 1248)).toBeNull();
     expect(getExactRatioImageSize(1, Number.NaN, 1248)).toBeNull();
+  });
+});
+
+describe("parseImageSizeRatio", () => {
+  it("accepts standard ratio strings", () => {
+    expect(parseImageSizeRatio("3:2")).toEqual({ width: 3, height: 2 });
+    expect(parseImageSizeRatio("21:9")).toEqual({ width: 21, height: 9 });
+    expect(parseImageSizeRatio("1:1")).toEqual({ width: 1, height: 1 });
+    expect(parseImageSizeRatio(" 9:16 ")).toEqual({ width: 9, height: 16 });
+  });
+
+  it("rejects non-ratio or out-of-range strings", () => {
+    expect(parseImageSizeRatio("1024x1024")).toBeNull();
+    expect(parseImageSizeRatio("auto")).toBeNull();
+    expect(parseImageSizeRatio("0:1")).toBeNull();
+    expect(parseImageSizeRatio("4:1")).toBeNull(); // 超 3:1 比例上限
+    expect(parseImageSizeRatio("99:1")).toBeNull();
+  });
+
+  it("passes through ratio strings in alignImageSizeToStep and validateImageSize", () => {
+    expect(alignImageSizeToStep("3:2")).toBe("3:2");
+    const check = validateImageSize("16:9");
+    expect(check.valid).toBe(true);
+  });
+});
+
+describe("snapImageSizeToExactRatio", () => {
+  it("snaps near-ratio sizes to the nearest exact grid", () => {
+    // suduma 实测案例：3520x2352（约 3:2）→ 3504x2336
+    expect(snapImageSizeToExactRatio("3520x2352")).toBe("3504x2336");
+    // 16:9 家族：1248x704 → 1280x720
+    expect(snapImageSizeToExactRatio("1248x704")).toBe("1280x720");
+    // 4:3 家族：1248x928 → 1280x960
+    expect(snapImageSizeToExactRatio("1248x928")).toBe("1280x960");
+  });
+
+  it("keeps already-exact and non-size inputs unchanged", () => {
+    expect(snapImageSizeToExactRatio("3840x2160")).toBe("3840x2160");
+    expect(snapImageSizeToExactRatio("3504x2336")).toBe("3504x2336");
+    expect(snapImageSizeToExactRatio("auto")).toBe("auto");
+    expect(snapImageSizeToExactRatio("3:2")).toBe("3:2");
   });
 });

@@ -93,6 +93,9 @@ const groupBackendTypeSchema = z.enum(["mixed", "web", "responses"]);
 // service 侧 getGroupSizeTier 的兜底一致（未标注的旧分组按 1.2K 展示）。
 const groupSizeTierSchema = z.enum(["standard", "full"]).default("standard");
 const apiInterfaceModeSchema = z.enum(["images", "responses", "mixed"]);
+// 池 API 尺寸方言：上游对 size 参数的兼容形态（存 metadata.sizeDialect）。
+// wxh=直传 WxH（默认）；exact-ratio=吸附到精确比例栅格；ratio-string=发比例串。
+const apiSizeDialectSchema = z.enum(["wxh", "exact-ratio", "ratio-string"]);
 const chatCompletionsUpstreamModeSchema = z.enum([
   "responses",
   "chat_completions",
@@ -629,6 +632,7 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
       chatCompletionsUpstreamMode:
         chatCompletionsUpstreamModeSchema.default("responses"),
       imagesUpstreamMode: imagesUpstreamModeSchema.default("images"),
+      sizeDialect: apiSizeDialectSchema.default("wxh"),
       useStream: z.boolean().default(false),
       contentSafetyEnabled: z.boolean().default(true),
       isEnabled: z.boolean().default(true),
@@ -657,6 +661,7 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
       interfaceMode: parsedInput.interfaceMode,
       chatCompletionsUpstreamMode: parsedInput.chatCompletionsUpstreamMode,
       imagesUpstreamMode: parsedInput.imagesUpstreamMode,
+      sizeDialect: parsedInput.sizeDialect,
       useStream: parsedInput.useStream,
       contentSafetyEnabled: parsedInput.contentSafetyEnabled,
       isEnabled: parsedInput.isEnabled,

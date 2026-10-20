@@ -4178,6 +4178,7 @@ async function getImageBackendGroupQualityMultipliers(
         groupId: imageBackendApi.groupId,
         qualityBilling: imageBackendApi.qualityBilling,
         metadata: imageBackendApi.metadata,
+        modelMapping: imageBackendApi.modelMapping,
       })
       .from(imageBackendApi)
       .leftJoin(
@@ -4203,13 +4204,33 @@ async function getImageBackendGroupQualityMultipliers(
     mergeDefault(row.groupId, row.qualityBilling);
     // 模型分档表按模型 id 单列，不与组默认表合并（不同模型的定价互不覆盖）。
     // 统一倍率形态不进 byModel（见函数头注释）。
+    // 分档表的键是【出站】模型 id（含 model_mapping 改写后缀，如
+    // gpt-image-2-gzs）；同时反查该成员的映射，把改写前的【源】模型 id
+    // （用户实际选择的型号，如 gpt-image-2）也建索引——展示层按用户选择
+    // 解析，计费层按出站解析，两边都能命中同一张表。
     const modelBilling = parseModelBilling(
       asGroupMetadata(row.metadata).modelBilling
     );
-    for (const [model, entry] of Object.entries(modelBilling)) {
+    // 出站 id -> 源模型 id 集合（该成员 model_mapping 的反向索引）
+    const outboundToSource = new Map<string, Set<string>>();
+    for (const mapping of parseApiModelMapping(row.modelMapping)) {
+      let sources = outboundToSource.get(mapping.to);
+      if (!sources) {
+        sources = new Set();
+        outboundToSource.set(mapping.to, sources);
+      }
+      sources.add(mapping.from);
+    }
+    for (const [outboundModel, entry] of Object.entries(modelBilling)) {
       if (typeof entry === "number") continue;
-      mergeModel(row.junctionGroupId, model, entry);
-      mergeModel(row.groupId, model, entry);
+      mergeModel(row.junctionGroupId, outboundModel, entry);
+      mergeModel(row.groupId, outboundModel, entry);
+      const sources = outboundToSource.get(outboundModel);
+      if (!sources) continue;
+      for (const source of sources) {
+        mergeModel(row.junctionGroupId, source, entry);
+        mergeModel(row.groupId, source, entry);
+      }
     }
   }
   for (const row of accountRows) {

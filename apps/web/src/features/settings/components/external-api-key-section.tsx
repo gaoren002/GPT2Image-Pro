@@ -63,6 +63,9 @@ type ImageBackendGroupOption = {
   backendType: ImageBackendGroupBackendType;
   sizeTier?: ImageBackendGroupSizeTier;
   billingMultiplier?: number;
+  // 质量计价倍率（quality 档位 → 倍率，取该组各启用成员的最大值）；
+  // null=组内无任何质量计价配置，按 1 倍。
+  qualityMultipliers?: Partial<Record<string, number>> | null;
 };
 
 type ExternalApiKeySummary = {
@@ -111,6 +114,16 @@ function groupOptionLabel(group: ImageBackendGroupOption) {
     group.backendType === "web"
       ? ""
       : ` · ${group.sizeTier === "full" ? "全参 4K" : "仅 1.2K"}`;
+  // 质量计价：把非 1 倍的档位列出来（如「质量 high x1.4」），让用户绑组前
+  // 就知道哪些质量档会加价；无配置不显示。
+  const qualityPart = Object.entries(group.qualityMultipliers ?? {})
+    .filter(([, value]) => typeof value === "number" && value !== 1)
+    .map(
+      ([level, value]) =>
+        `${level} x${Number((value as number).toFixed(4))}`
+    )
+    .join("、");
+  const qualitySuffix = qualityPart ? ` · 质量加价 ${qualityPart}` : "";
   const safety =
     group.contentSafetyEnabled === true
       ? "内容审核开启"
@@ -119,7 +132,7 @@ function groupOptionLabel(group: ImageBackendGroupOption) {
         : "内容审核按成员配置";
   return `${group.name}${group.isDefault ? "（默认）" : ""} · ${backend}${sizePart} · ${safety} · 计费 x${formatBillingMultiplier(
     group.billingMultiplier
-  )}`;
+  )}${qualitySuffix}`;
 }
 
 export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {

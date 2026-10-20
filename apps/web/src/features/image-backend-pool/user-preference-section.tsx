@@ -33,6 +33,8 @@ type GroupOption = {
   backendType: ImageBackendGroupBackendType;
   sizeTier?: ImageBackendGroupSizeTier;
   billingMultiplier: number;
+  // 质量计价倍率（quality 档位 → 倍率）；null=组内无质量计价配置。
+  qualityMultipliers?: Partial<Record<string, number>> | null;
 };
 
 function safetyLabel(value: boolean | null) {
@@ -61,11 +63,19 @@ function groupOptionLabel(group: GroupOption) {
   // Web 车道出图分辨率由 Web 端决定，不标档位；非 Web 车道标注上游真实能力。
   const sizePart =
     group.backendType === "web" ? "" : ` · ${sizeTierLabel(group.sizeTier)}`;
+  // 质量计价：列出非 1 倍的档位（如「质量 high x1.4」），无配置不显示。
+  const qualityPart = Object.entries(group.qualityMultipliers ?? {})
+    .filter(([, value]) => typeof value === "number" && value !== 1)
+    .map(
+      ([level, value]) => `${level} x${Number((value as number).toFixed(4))}`
+    )
+    .join("、");
+  const qualitySuffix = qualityPart ? ` · 质量加价 ${qualityPart}` : "";
   return `${group.name}${group.isDefault ? "（默认）" : ""} · ${backendTypeLabel(
     group.backendType
   )}${sizePart} · ${safetyLabel(group.contentSafetyEnabled)} · 计费 x${formatBillingMultiplier(
     group.billingMultiplier
-  )}`;
+  )}${qualitySuffix}`;
 }
 
 export function ImageBackendPreferenceSection() {

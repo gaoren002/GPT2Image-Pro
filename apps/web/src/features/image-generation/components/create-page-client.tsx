@@ -2114,6 +2114,23 @@ export function CreatePageClient({
         max: "极致",
       }[qualityValue]
     );
+  // 质量计价倍率随当前选中质量档展示（下拉选项与选中值同文案）。
+  // 倍率取「预测车道内各成员该档的最大值」（routeQualityMultipliers 的合并
+  // 语义），未配置该档时不标注——与计费公式旁「未计入质量倍率」提示互补：
+  // 用户在选质量前就能看到该档要乘多少。声明在 routeQualityMultipliers
+  // 之前，仅引用后者时不调用（调用点均在渲染期，届时已初始化）。
+  const qualityLabelWithBilling = (
+    qualityValue: ImageQuality,
+    multipliers?: Partial<Record<string, number>> | null
+  ) => {
+    const multiplier = multipliers?.[qualityValue];
+    if (typeof multiplier !== "number" || !Number.isFinite(multiplier))
+      return qualityLabel(qualityValue);
+    return copy(
+      `${qualityLabel(qualityValue)} (x${Number(multiplier.toFixed(4))})`,
+      `${qualityLabel(qualityValue)}（x${Number(multiplier.toFixed(4))}）`
+    );
+  };
   const moderationLabel = (moderationValue: ImageModeration) =>
     copy(
       MODERATION_OPTIONS.find((option) => option.value === moderationValue)
@@ -3093,6 +3110,11 @@ export function CreatePageClient({
     routeQualityMultipliers(editBillingRoute) !== null;
   const chatQualityBillingPresent =
     routeQualityMultipliers(chatBillingRoute) !== null;
+  // 各车道质量倍率表：质量下拉选项按此标注「x倍率」（textSettingsPanel 复用
+  // text 表；编辑面板用 edit 表；聊天/瀑布流用 chat 表）。
+  const textQualityMultipliers = routeQualityMultipliers(textBillingRoute);
+  const editQualityMultipliers = routeQualityMultipliers(editBillingRoute);
+  const chatQualityMultipliers = routeQualityMultipliers(chatBillingRoute);
   const agentQualityBillingPresent =
     routeQualityMultipliers(agentBillingRoute) !== null;
   const textImageCreditCost = useMemo(
@@ -7860,12 +7882,17 @@ export function CreatePageClient({
                       id={`image-quality-${mode}`}
                       className="w-full"
                     >
-                      <SelectValue />
+                      <SelectValue>
+                        {qualityLabelWithBilling(quality, textQualityMultipliers)}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {QUALITY_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
-                          {qualityLabel(option.value)}
+                          {qualityLabelWithBilling(
+                            option.value,
+                            textQualityMultipliers
+                          )}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -8792,12 +8819,20 @@ export function CreatePageClient({
                         disabled={isEditing || editMixWebFirstActive}
                       >
                         <SelectTrigger id="edit-quality" className="w-full">
-                          <SelectValue />
+                          <SelectValue>
+                            {qualityLabelWithBilling(
+                              quality,
+                              editQualityMultipliers
+                            )}
+                          </SelectValue>
                         </SelectTrigger>
                         <SelectContent>
                           {QUALITY_OPTIONS.map((option) => (
                             <SelectItem key={option.value} value={option.value}>
-                              {qualityLabel(option.value)}
+                              {qualityLabelWithBilling(
+                                option.value,
+                                editQualityMultipliers
+                              )}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -9669,12 +9704,20 @@ export function CreatePageClient({
                       <span className="text-xs text-muted-foreground">
                         {copy("Quality", "质量")}
                       </span>
-                      <SelectValue />
+                      <SelectValue>
+                        {qualityLabelWithBilling(
+                          quality,
+                          chatQualityMultipliers
+                        )}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {QUALITY_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
-                          {qualityLabel(option.value)}
+                          {qualityLabelWithBilling(
+                            option.value,
+                            chatQualityMultipliers
+                          )}
                         </SelectItem>
                       ))}
                     </SelectContent>

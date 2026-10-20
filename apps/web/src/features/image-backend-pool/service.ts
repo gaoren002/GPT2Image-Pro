@@ -53,6 +53,7 @@ import { normalizeQualityBillingForStorage, parseQualityBilling } from "@/featur
 import {
   normalizeModelBillingForStorage,
   parseModelBilling,
+  type ModelBillingEntry,
 } from "@/features/image-generation/model-billing";
 
 import {
@@ -7488,8 +7489,8 @@ type UpsertApiInput = {
   // 质量计价倍率表（quality → 倍率）；undefined=不改动，null=清空。
   qualityBilling?: Partial<Record<string, number>> | null;
   // 按模型计价倍率表（出站模型 id → 倍率，精确命中）；undefined=不改动，
-  // null=清空。存 metadata.modelBilling。
-  modelBilling?: Record<string, number> | null;
+  // null=清空。存 metadata.modelBilling。值为统一倍率或质量分档表。
+  modelBilling?: Record<string, ModelBillingEntry> | null;
   interfaceMode?: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode?: ChatCompletionsUpstreamMode;
   imagesUpstreamMode?: ImagesUpstreamMode;

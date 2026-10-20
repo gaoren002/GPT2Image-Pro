@@ -53,7 +53,7 @@ import {
   type ImageBillingPixelRange,
 } from "./billing-preview";
 import { applyApiModelMapping } from "./api-model-mapping";
-import { resolveModelBillingMultiplier } from "./model-billing";
+import { resolveModelBilling } from "./model-billing";
 import { resolveQualityBillingMultiplier } from "./quality-billing";
 import {
   detectImageOutputFormatFromBuffer,
@@ -252,15 +252,26 @@ function getPoolQualityBillingMultiplier(
 }
 
 /** 池 API 成员的按模型计价倍率（metadata.modelBilling，精确命中）。
- * 仅 pool-api 读取；账号/Adobe 不参与（走各自倍率链）。 */
-function getPoolApiModelBillingMultiplier(
+ * 仅 pool-api 读取；账号/Adobe 不参与（走各自倍率链）。
+ * 模型配置为质量分档表时 replacesQualityBilling=true，调用方跳过成员级
+ * 质量表（分档表已按质量定价，避免双重计价）。 */
+function getPoolApiModelBilling(
   config: ApiConfig,
-  model: string | null | undefined
-) {
-  if (config.backend?.type !== "pool-api") return 1;
-  return normalizeBillingMultiplier(
-    resolveModelBillingMultiplier(config.backend.modelBilling, model)
+  model: string | null | undefined,
+  quality: string | null | undefined
+): { multiplier: number; replacesQualityBilling: boolean } {
+  if (config.backend?.type !== "pool-api") {
+    return { multiplier: 1, replacesQualityBilling: false };
+  }
+  const resolved = resolveModelBilling(
+    config.backend.modelBilling,
+    model,
+    quality
   );
+  return {
+    multiplier: normalizeBillingMultiplier(resolved.multiplier),
+    replacesQualityBilling: resolved.replacesQualityBilling,
+  };
 }
 
 /** 把系统设置里的图像模型倍率 JSON 收窄成 family→正数 的 map。 */
@@ -1412,27 +1423,29 @@ export async function runImageGenerationForUser(
               : input.model,
             imageModelMultipliers
           );
-          const qualityBillingMultiplier = getPoolQualityBillingMultiplier(
-            config,
-            input.quality
-          );
           // 池 API 按模型计价（metadata.modelBilling，精确命中出站模型 id）：
-          // 与组倍率/模型族倍率/质量倍率叠乘。模型 id 取出站口径（站内别名解析
-          // + model_mapping 改写后的完整 id），与实际发给上游的一致，未配置则 1。
+          // 模型 id 取出站口径（站内别名解析 + model_mapping 改写后的完整 id），
+          // 与实际发给上游的一致，未配置则 1。值为质量分档表时按请求 quality
+          // 取倍率并【取代】成员级质量表（避免双重计价）；值为数字时与成员级
+          // 质量表叠乘。
           const outboundModel = applyApiModelMapping({
             resolvedModel: getUpstreamImageModel(imageModel),
             requestedModel: input.model,
             quality: input.quality,
             mapping: config.modelMapping,
           }).model;
-          const apiModelBillingMultiplier = getPoolApiModelBillingMultiplier(
+          const apiModelBilling = getPoolApiModelBilling(
             config,
-            outboundModel
+            outboundModel,
+            input.quality
           );
+          const qualityBillingMultiplier = apiModelBilling.replacesQualityBilling
+            ? 1
+            : getPoolQualityBillingMultiplier(config, input.quality);
           const billingMultiplier =
             backendBillingMultiplier *
             modelMultiplier *
-            apiModelBillingMultiplier *
+            apiModelBilling.multiplier *
             qualityBillingMultiplier;
           const moderationEnabled =
             (await isContentModerationEnabled()) &&

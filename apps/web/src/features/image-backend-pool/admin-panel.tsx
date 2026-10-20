@@ -208,8 +208,11 @@ type Api = {
   }> | null;
   // 质量计价倍率表（quality → 倍率）；null/未配置档位计 1 倍。
   qualityBilling?: Partial<Record<string, number>> | null;
-  // 按模型计价倍率表（出站模型 id → 倍率，精确命中）；null/未配置模型计 1 倍。
-  modelBilling?: Record<string, number> | null;
+  // 按模型计价倍率表（出站模型 id → 统一倍率或质量分档表，精确命中）；
+  // null/未配置模型计 1 倍。
+  modelBilling?:
+    | Record<string, number | Record<string, number>>
+    | null;
   interfaceMode: ImageBackendApiInterfaceMode;
   chatCompletionsUpstreamMode: ChatCompletionsUpstreamModeFormValue;
   imagesUpstreamMode: ImagesUpstreamModeFormValue;
@@ -3957,9 +3960,10 @@ export function ImageBackendPoolAdminPanel({
                     disabled={readOnly}
                   />
                   <p className="text-xs text-muted-foreground">
-                    按出站模型 id 精确匹配（区分大小写、不做前缀），与组倍率、
-                    质量倍率叠乘。给改写变体定价请配改写后的完整 id
-                    （如 gpt-image-2.5-sunburst-gzs）。留空表示该模型 1 倍。
+                    按出站模型 id 精确匹配（区分大小写、不做前缀）。统一倍率与
+                    组倍率、成员质量倍率叠乘；按质量分档则取代该成员的质量倍率
+                    （分档缺省档计 1，xhigh/max 回退 high）。给改写变体定价请配
+                    改写后的完整 id（如 gpt-image-2.5-sunburst-gzs）。
                   </p>
                 </div>
                 <div className="space-y-2">

@@ -344,10 +344,19 @@ const qualityBillingSchema = z
   )
   .nullish();
 
-// 池 API 按模型计价（出站模型 id → 倍率，精确命中；存 metadata.modelBilling）。
-// 键为任意非空模型名（上限 100 条，与 parseModelBilling 口径一致）。
+// 池 API 按模型计价（出站模型 id → 统一倍率或质量分档表，精确命中；
+// 存 metadata.modelBilling）。键为任意非空模型名（上限 100 条，与
+// parseModelBilling 口径一致）。
+const modelBillingEntrySchema = z.union([
+  z.number().finite().positive().max(100),
+  z
+    .partialRecord(
+      z.enum(["auto", "low", "medium", "high", "xhigh", "max"]),
+      z.number().finite().positive().max(100)
+    ),
+]);
 const modelBillingSchema = z
-  .record(z.string().trim().min(1).max(120), z.number().finite().positive().max(100))
+  .record(z.string().trim().min(1).max(120), modelBillingEntrySchema)
   .nullish();
 
 export const saveImageBackendAccountAction = withImageBackendPoolAdminAction(

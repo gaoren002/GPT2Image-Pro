@@ -1469,7 +1469,7 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     key: "IMAGE_MODEL_MULTIPLIERS",
     label: "图像模型族倍率",
     description:
-      '按 firefly 图像模型族设置计费倍率的 JSON（family → 倍率，缺省/非正回退 1）。键为 firefly 图像族：gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro。例：{"gpt-image-2":2,"nano-banana-pro":1.5}。',
+      '按 firefly 图像模型族设置计费倍率的 JSON（family → 倍率，缺省/非正回退 1）。键为 firefly 图像族：gpt-image-2.5（含 sunburst/flare 变体）、gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro。例：{"gpt-image-2.5":2,"nano-banana-pro":1.5}。',
     category: "credits",
     valueType: "json",
     exampleValue: '{"gpt-image-2": 1, "nano-banana-pro": 1.5}',

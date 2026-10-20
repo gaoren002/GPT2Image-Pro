@@ -12,7 +12,10 @@ const FIREFLY_MODEL_PREFIX = "firefly-";
 // firefly 图像模型族枚举。与 adobe-direct 的族列表保持一致；用于从
 // `firefly-<family>...` 形式的模型 id 中按"最长前缀"匹配出族，避免 nano-banana
 // 误吞 nano-banana-pro / nano-banana2，gpt-image-2 误吞 gpt-image-1.5。
+// gpt-image-2.5 独立成族：sunburst/flare 变体归 2.5，不再按前缀落到
+// gpt-image-2 的定价（2026-10-20 之前 2.5 系共享 2 的倍率行）。
 export const FIREFLY_IMAGE_FAMILIES = [
+  "gpt-image-2.5",
   "gpt-image-2",
   "gpt-image-1.5",
   "nano-banana",

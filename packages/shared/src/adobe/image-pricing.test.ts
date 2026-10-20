@@ -47,3 +47,28 @@ describe("resolveImageModelMultiplier", () => {
     expect(resolveImageModelMultiplier(undefined, undefined)).toBe(1);
   });
 });
+
+describe("gpt-image-2.5 独立成族", () => {
+  it("routes 2.5 variants to the gpt-image-2.5 family, not gpt-image-2", () => {
+    // sunburst/flare 变体归 2.5 族;最长前缀保证 gpt-image-2.5 优先于 gpt-image-2。
+    expect(
+      resolveImageModelMultiplier("firefly-gpt-image-2.5", {
+        "gpt-image-2.5": 2,
+        "gpt-image-2": 3,
+      })
+    ).toBe(2);
+    expect(
+      resolveImageModelMultiplier("firefly-gpt-image-2.5-sunburst", {
+        "gpt-image-2.5": 2,
+        "gpt-image-2": 3,
+      })
+    ).toBe(2);
+    // 纯 2 系仍命中 gpt-image-2 族。
+    expect(
+      resolveImageModelMultiplier("firefly-gpt-image-2", {
+        "gpt-image-2.5": 2,
+        "gpt-image-2": 3,
+      })
+    ).toBe(3);
+  });
+});

@@ -85,6 +85,54 @@ import {
   type ReferenceHandoffMode,
 } from "@/features/image-generation/reference-handoff";
 import type { ImageBackendGroupBackendType } from "@/features/image-backend-pool/types";
+// 聊天叶子组件(高频状态订阅下沉):chatStream 流式气泡、chatMessages 去抖持久化。
+import { ChatStreamBubble } from "./chat-stream-bubble";
+import {
+  ChatMessageList,
+  ChatPanelStreamGate,
+  ChatPersistenceAgent,
+} from "./chat-subscriptions";
+import { WaterfallCardList } from "./waterfall-card-list";
+// 聊天模型与持久化纯函数抽到共享模块,本文件 re-export 保持内部引用不变。
+import type {
+  ChatConversation as ChatConversationShared,
+  ChatGptWebConversationState as ChatGptWebConversationStateShared,
+  ChatMessage as ChatMessageShared,
+  ChatVariant as ChatVariantShared,
+  ConversationMode as ConversationModeShared,
+  ResponsesPreviousResponseState as ResponsesPreviousResponseStateShared,
+  StickyBackendMemberState as StickyBackendMemberStateShared,
+} from "./chat-message-types";
+export {
+  CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY,
+  CHAT_ACTIVE_CONVERSATION_STORAGE_KEY,
+  CHAT_CONVERSATIONS_STORAGE_KEY,
+  CHAT_CONVERSATION_LIMIT,
+  CHAT_PERSIST_DEBOUNCE_MS,
+  CHAT_STORAGE_KEY,
+  chatActiveConversationStorageKey,
+  compactChatConversations,
+  getChatConversationTitle,
+  inferChatConversationMode,
+  isMessageInConversationMode as isMessageInConversationModeShared,
+  persistChatConversationSnapshot,
+  sanitizePersistedChatMessages,
+} from "./chat-persistence";
+import {
+  CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY,
+  CHAT_ACTIVE_CONVERSATION_STORAGE_KEY,
+  CHAT_CONVERSATIONS_STORAGE_KEY,
+  CHAT_CONVERSATION_LIMIT,
+  CHAT_STORAGE_KEY,
+  chatActiveConversationStorageKey,
+  compactChatConversations,
+  getChatConversationTitle,
+  inferChatConversationMode,
+  isMessageInConversationMode as isMessageInConversationModeFn,
+  persistChatConversationSnapshot,
+} from "./chat-persistence";
+import type { ChatStreamState as ChatStreamStateShared } from "./chat-stream-state";
+import type { BatchCard as BatchCardShared } from "./chat-message-types";
 import {
   agentEventToImageUrl,
   appendAgentRunEvent,
@@ -252,40 +300,10 @@ type ChatAttachment = EditImageFile & {
   kind: "image" | "file";
 };
 
-type ChatAttachmentPreview = {
-  id: string;
-  name: string;
-  previewUrl?: string;
-  kind?: "image" | "file";
-};
-
-type ChatVariant = {
-  generationId?: string;
-  imageUrl?: string;
-  imageFileId?: string;
-  pending?: boolean;
-  webImageMessageId?: string;
-  webImageGroupId?: string;
-  prompt: string;
-  model: string;
-  size: string;
-  revisedPrompt?: string;
-  promptRepairNotice?: string;
-  responseText?: string;
-  responseThinking?: string;
-  responseAgent?: string;
-  agentEvents?: AgentRunEvent[];
-  agentRoundCount?: number;
-  webConversation?: ChatGptWebConversationState;
-  backendMember?: StickyBackendMemberState;
-  responsesPreviousResponse?: ResponsesPreviousResponseState;
-  creditsConsumed?: number;
-  createdAt?: string;
-  outputRole?: "final" | "agent_draft" | "choice";
-  // chat(web) 生成的可编辑文件(PPT/PSD)产物:下载链接。与图像 variant 并存于同一消息模型。
-  files?: Array<{ label: string; url: string }>;
-};
-
+type ChatGptWebConversationState = ChatGptWebConversationStateShared;
+type StickyBackendMemberState = StickyBackendMemberStateShared;
+type ResponsesPreviousResponseState = ResponsesPreviousResponseStateShared;
+type ChatVariant = ChatVariantShared;
 type ChatRecentGeneration = RecentGeneration & {
   canDelete?: boolean;
 };
@@ -316,52 +334,9 @@ type ChatResultInput = Pick<
   outputRole?: "final" | "agent_draft" | "choice";
 };
 
-type ChatGptWebConversationState = {
-  conversationId: string;
-  parentMessageId: string;
-  accountId?: string;
-  apiKeyId?: string;
-  selectionMessageId?: string;
-  selectedImageMessageId?: string;
-};
-
-type StickyBackendMemberState = {
-  type: "api" | "account";
-  id: string;
-  groupId?: string | null;
-  accountBackend?: "web" | "responses";
-};
-
-type ResponsesPreviousResponseState = {
-  responseId: string;
-  backendMember: StickyBackendMemberState;
-  store: true;
-  createdAt?: string;
-};
-
-type ConversationMode = "chat" | "agent" | "web";
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  mode?: ConversationMode;
-  attachments?: ChatAttachmentPreview[];
-  variants?: ChatVariant[];
-  activeVariant?: number;
-  error?: string;
-  createdAt: string;
-};
-
-type ChatConversation = {
-  id: string;
-  mode: ConversationMode;
-  title: string;
-  messages: ChatMessage[];
-  createdAt: string;
-  updatedAt: string;
-};
-
+type ConversationMode = ConversationModeShared;
+type ChatMessage = ChatMessageShared;
+type ChatConversation = ChatConversationShared;
 type ImageReferenceMentionOption = {
   token: string;
   label: string;
@@ -499,21 +474,7 @@ function inferImageSizeDialogState(value: ImageSizeDialogValue) {
   };
 }
 
-type ChatStreamState = {
-  messageId?: string;
-  cardId?: string;
-  mode?: "chat" | "agent";
-  text: string;
-  thinking: string;
-  agent: string;
-  agentEvents: AgentRunEvent[];
-  imageUrl?: string;
-  generationId?: string;
-  prompt?: string;
-  model?: string;
-  size?: string;
-};
-
+type ChatStreamState = ChatStreamStateShared;
 function createInitialChatStreamState(params: {
   messageId?: string;
   cardId?: string;
@@ -543,23 +504,7 @@ type ChatModel = (typeof RESPONSES_IMAGE_MODELS)[number];
 type ChatThinkingLevel = "none" | "low" | "medium" | "high" | "xhigh";
 type TextGenerationMode = "single" | "lines";
 
-type BatchCard = {
-  id: string;
-  state: "loading" | "image" | "text" | "error";
-  aspectRatio: string;
-  prompt: string;
-  size: string;
-  streamText?: string;
-  streamThinking?: string;
-  streamAgent?: string;
-  imageUrl?: string;
-  generationId?: string;
-  text?: string;
-  error?: string;
-  model?: string;
-  creditsConsumed?: number;
-  saved?: boolean;
-};
+type BatchCard = BatchCardShared;
 
 type WaterfallStats = {
   sent: number;
@@ -1202,21 +1147,8 @@ const CHAT_SUGGESTIONS_ZH = [
   "雨夜霓虹灯下的赛博朋克城市街道",
   "戴眼镜的猫咪水彩肖像",
 ] as const;
-const CHAT_STORAGE_KEY = "gpt2image_chat_messages_v1";
-const CHAT_CONVERSATIONS_STORAGE_KEY = "gpt2image_chat_conversations_v1";
-const CHAT_ACTIVE_CONVERSATION_STORAGE_KEY =
-  "gpt2image_active_chat_conversation_v1";
-const CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY =
-  "gpt2image_active_agent_conversation_v1";
 const CREATE_ACTIVE_MODE_STORAGE_KEY = "gpt2image_create_active_mode_v1";
 const CHAT_CONTEXT_MESSAGE_LIMIT = 8;
-const CHAT_CONVERSATION_LIMIT = 30;
-/**
- * 会话持久化去抖窗口(毫秒)。流式生成期 chatMessages 每个增量都变,
- * 若每次都同步 JSON.stringify 全部会话并写 localStorage 会逐 token 阻塞
- * 主线程;取尾沿去抖,回合结束或停顿时才真正落库。
- */
-const CHAT_PERSIST_DEBOUNCE_MS = 300;
 const PROMPT_IMAGE_REFERENCE_PATTERN = /@(?:第)?\d+轮图\d+|@图\d+/;
 
 function readStoredCreateActiveMode(): ActiveMode {
@@ -1296,15 +1228,6 @@ function imageStreamEventToPreviewUrl(event: ImageStreamEvent) {
   return event.url || null;
 }
 
-function sanitizeAgentEventsForStorage(events: AgentRunEvent[] | undefined) {
-  return (events || []).map((event) => {
-    const normalized = normalizeAgentEvent(event);
-    if (normalized.imageUrl?.startsWith("data:image/")) {
-      return { ...normalized, imageUrl: undefined };
-    }
-    return normalized;
-  });
-}
 
 function createLocalId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1631,18 +1554,6 @@ function sanitizeChatMessages(value: unknown): ChatMessage[] {
   });
 }
 
-function sanitizePersistedChatMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.slice(-80).map((message) => ({
-    ...message,
-    attachments: message.attachments?.filter(
-      (attachment) => !attachment.previewUrl?.startsWith("blob:")
-    ),
-    variants: message.variants?.map((variant) => ({
-      ...variant,
-      agentEvents: sanitizeAgentEventsForStorage(variant.agentEvents),
-    })),
-  }));
-}
 
 function createChatConversation(
   messages: ChatMessage[],
@@ -1661,17 +1572,7 @@ function createChatConversation(
   };
 }
 
-function inferChatConversationMode(messages: ChatMessage[]): ConversationMode {
-  if (messages.some((message) => message.mode === "agent")) return "agent";
-  if (messages.some((message) => message.mode === "web")) return "web";
-  return "chat";
-}
 
-function chatActiveConversationStorageKey(mode: ConversationMode) {
-  return mode === "agent"
-    ? CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY
-    : CHAT_ACTIVE_CONVERSATION_STORAGE_KEY;
-}
 
 function activeModeToConversationMode(mode: ActiveMode): ConversationMode {
   return mode === "agent" ? "agent" : mode === "chat-web" ? "web" : "chat";
@@ -1745,106 +1646,10 @@ function sanitizeChatConversations(value: unknown): ChatConversation[] {
   });
 }
 
-function getChatMessageSignature(message: ChatMessage) {
-  return `${message.role}\u0000${message.id}\u0000${message.text}`;
-}
 
-function isConversationSnapshotOf(
-  candidate: ChatConversation,
-  target: ChatConversation
-) {
-  if (candidate.mode !== target.mode) return false;
-  if (candidate.id === target.id) return true;
-  if (candidate.messages.length > target.messages.length) return false;
-  return candidate.messages.every(
-    (message, index) =>
-      getChatMessageSignature(message) ===
-      getChatMessageSignature(target.messages[index] as ChatMessage)
-  );
-}
 
-function compactChatConversations(conversations: ChatConversation[]) {
-  const byCompleteness = [...conversations].sort((a, b) => {
-    const messageCountDelta = b.messages.length - a.messages.length;
-    if (messageCountDelta !== 0) return messageCountDelta;
-    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-  });
-  const compacted: ChatConversation[] = [];
 
-  for (const conversation of byCompleteness) {
-    if (
-      compacted.some((existing) =>
-        isConversationSnapshotOf(conversation, existing)
-      )
-    ) {
-      continue;
-    }
-    compacted.push(conversation);
-  }
 
-  return compacted.sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-  );
-}
-
-function persistChatConversationSnapshot(params: {
-  conversations: ChatConversation[];
-  conversationId: string;
-  mode: ConversationMode;
-  messages: ChatMessage[];
-  titleFallback: string;
-}) {
-  if (typeof window === "undefined" || params.messages.length === 0) return;
-  try {
-    const persistedMessages = sanitizePersistedChatMessages(params.messages);
-    const title = getChatConversationTitle(
-      persistedMessages.filter((message) =>
-        params.mode === "agent"
-          ? message.mode === "agent"
-          : params.mode === "web"
-            ? message.mode === "web"
-            : message.mode !== "agent" && message.mode !== "web"
-      ),
-      params.titleFallback
-    );
-    const now = new Date().toISOString();
-    const existing = params.conversations.find(
-      (conversation) => conversation.id === params.conversationId
-    );
-    const current: ChatConversation = {
-      id: params.conversationId,
-      mode: existing?.mode || params.mode,
-      title,
-      messages: persistedMessages,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
-    const nextConversations = compactChatConversations([
-      current,
-      ...params.conversations.filter(
-        (conversation) => conversation.id !== params.conversationId
-      ),
-    ]).slice(0, CHAT_CONVERSATION_LIMIT);
-    window.localStorage.setItem(
-      CHAT_CONVERSATIONS_STORAGE_KEY,
-      JSON.stringify(nextConversations)
-    );
-    window.localStorage.setItem(
-      chatActiveConversationStorageKey(current.mode),
-      params.conversationId
-    );
-    window.localStorage.removeItem(CHAT_STORAGE_KEY);
-  } catch {
-    /* ignore local storage quota errors */
-  }
-}
-
-function getChatConversationTitle(messages: ChatMessage[], fallback: string) {
-  const firstUserMessage = messages.find((message) => message.role === "user");
-  const title = firstUserMessage?.text.trim();
-  if (!title) return fallback;
-  return title.length > 48 ? `${title.slice(0, 48)}...` : title;
-}
 
 function getChatVariants(message: ChatMessage) {
   return message.variants || [];
@@ -2073,15 +1878,7 @@ export function CreatePageClient({
     activeModeToConversationMode(mode);
   // 会话消息归属:agent/web 各自独立;chat 桶收非 agent 非 web(含历史无 mode)。
   // WHY:chat-web 有独立会话历史(mode="web"),不能与 chat(codex) 串桶。
-  const isMessageInConversationMode = (
-    message: ChatMessage,
-    mode: ConversationMode
-  ) =>
-    mode === "agent"
-      ? message.mode === "agent"
-      : mode === "web"
-        ? message.mode === "web"
-        : message.mode !== "agent" && message.mode !== "web";
+  const isMessageInConversationMode = isMessageInConversationModeFn;
   const batchCostSuffix = (count: number) =>
     count > 1
       ? copy(` for ${count}`, `，共 ${count} 张`)
@@ -2332,18 +2129,27 @@ export function CreatePageClient({
   const [chatConversations, setChatConversations] = useCreateRuntimeState<
     ChatConversation[]
   >("chatConversations", []);
-  const [chatMessages, setChatMessages] = useCreateRuntimeState<ChatMessage[]>(
-    "chatMessages",
-    []
-  );
+  // WHY 非订阅访问器:chatMessages 在流式期间逐帧变化,订阅式会让 1 万行父组件
+  // 每帧全量重渲(生成时卡顿主因)。事件处理器经 getChatMessages() 读最新值;
+  // 渲染路径的订阅下沉到叶子组件(ChatMessageList),父组件不再随流式重渲。
+  const [getChatMessages, setChatMessages] = useCreateRuntimeAccessor<
+    ChatMessage[]
+  >("chatMessages", []);
   const [chatAttachments, setChatAttachments] = useCreateRuntimeState<
     ChatAttachment[]
   >("chatAttachments", []);
-  const [chatStream, setChatStream] =
-    useCreateRuntimeState<ChatStreamState | null>("chatStream", null);
+  // chatStream 同理:流式期间每帧变化,渲染订阅已下沉到 ChatStreamBubble /
+  // ChatPanelStreamGate,父组件只在请求边界(setChatStream(初始/null))写它,
+  // 少数 effect 守卫经 getChatStream() 读即时值。
+  const [getChatStream, setChatStream] = useCreateRuntimeAccessor<
+    ChatStreamState | null
+  >("chatStream", null);
   const [retryingChatMessageId, setRetryingChatMessageId] =
     useCreateRuntimeState<string | null>("retryingChatMessageId", null);
-  const [batchCards, setBatchCards] = useCreateRuntimeState<BatchCard[]>(
+  // WHY 非订阅访问器:batchCards 流式期间逐帧变化(卡片 imageUrl/streamText 更新),
+  // 订阅会让父组件每帧全量重渲。写入点(setBatchCards)全在事件/流回调里经函数式
+  // 更新读写最新值,渲染订阅下沉到 WaterfallCardList。
+  const [, setBatchCards] = useCreateRuntimeAccessor<BatchCard[]>(
     "batchCards",
     []
   );
@@ -2841,7 +2647,6 @@ export function CreatePageClient({
     null
   );
   // 会话持久化去抖窗口内待执行的落库闭包;仅供关页/卸载时冲刷,防丢尾巴。
-  const pendingChatPersistRef = useRef<(() => void) | null>(null);
   const isCreatePageMountedRef = useRef(false);
   const appliedReferenceParamKeyRef = useRef<string | null>(null);
   const activeChatRequestGenerationIdsRef = useCreateRuntimeRef<Set<string>>(
@@ -3346,13 +3151,9 @@ export function CreatePageClient({
   // WHY useMemo:本组件重渲极频繁(输入/轮询/流式都会触发),这里若每次
   // render 重建数组,不仅自身 O(消息数),还会因引用变化把下游
   // chatReferenceOptions 的 useMemo 一并击穿,形成"每次击键全量遍历会话"。
-  const visibleChatMessages = useMemo(
-    () =>
-      chatMessages.filter((message) =>
-        isMessageInConversationMode(message, activeConversationMode)
-      ),
-    [activeConversationMode, chatMessages]
-  );
+  // 消息列表渲染(含 visibleChatMessages 派生)已下沉到 ChatMessageList 叶子
+  // 组件订阅 chatMessages,父组件不再随流式帧重渲。见 chat-subscriptions.tsx。
+  
   const canUseEditReferenceMentions =
     activeBackendType === "responses" || activeBackendType === "mixed";
   const canUseChatReferenceMentions =
@@ -3368,6 +3169,14 @@ export function CreatePageClient({
       })),
     [copy, editImages]
   );
+  // WHY 订阅式(功能性优先):@引用菜单需要消息里新增图片后及时出现。
+  // chatMessages 高频帧经 useMemo 派生的 options 数组仅在内容实际变化时
+  // 产生新引用(store 写入方保证浅比较跳过等值帧),流式期间的文本帧
+  // 不会改变 options 引用,父组件重渲频率与流式前一致。
+  const [chatMessagesForReferences] = useCreateRuntimeState<ChatMessage[]>(
+    "chatMessages",
+    []
+  );
   const chatReferenceOptions = useMemo<ImageReferenceMentionOption[]>(() => {
     const options: ImageReferenceMentionOption[] = chatAttachments
       .filter((item) => item.kind === "image")
@@ -3378,7 +3187,7 @@ export function CreatePageClient({
         previewUrl: item.previewUrl,
       }));
     let roundIndex = 0;
-    for (const message of visibleChatMessages) {
+    for (const message of chatMessagesForReferences) {
       if (message.role !== "assistant" || message.error) continue;
       const imageVariants = getChatVariants(message).filter(
         (variant) => variant.imageUrl || variant.imageFileId
@@ -3399,7 +3208,7 @@ export function CreatePageClient({
       });
     }
     return options;
-  }, [chatAttachments, copy, visibleChatMessages]);
+  }, [chatAttachments, copy, chatMessagesForReferences]);
   const filteredEditReferenceOptions = useMemo(
     () => filterMentionOptions(editReferenceOptions, editMention?.query || ""),
     [editMention?.query, editReferenceOptions]
@@ -3991,7 +3800,9 @@ export function CreatePageClient({
     }
 
     if (!didLoadChatRef.current || !isConversationMode(activeMode)) return;
-    if (isChatGenerating || chatStream?.generationId) return;
+    // 流式守卫改经 accessor 读当前值:父组件已不订阅 chatStream,
+    // effect 触发时机(切模式/会话列表变化)与流式帧无关,读即时值语义不变。
+    if (isChatGenerating || getChatStream()?.generationId) return;
     if (
       activeConversationExists &&
       chatMessagesModeRef.current === activeConversationMode
@@ -4038,7 +3849,6 @@ export function CreatePageClient({
     activeConversationExists,
     activeConversationMode,
     activeMode,
-    chatStream?.generationId,
     currentModeConversations,
     isChatGenerating,
   ]);
@@ -4598,6 +4408,7 @@ export function CreatePageClient({
 
   useEffect(() => {
     if (didLoadChatRef.current) return;
+    const chatMessages = getChatMessages();
     try {
       if (chatMessages.length > 0 || chatConversations.length > 0) {
         chatConversationsRef.current = chatConversations;
@@ -4701,91 +4512,20 @@ export function CreatePageClient({
     }
   }, []);
 
-  // WHY 去抖:本 effect 每次 chatMessages 变化都要 sanitize + 推导标题 +
-  // JSON.stringify 全部会话并同步写 localStorage,成本随会话历史线性增长。
-  // 流式生成期 chatMessages 逐增量更新,同步执行等于每个 token 阻塞一次
-  // 主线程(实测是"生成时卡/越用越卡"的主因之一)。改为尾沿去抖后,流式
-  // 期间定时器持续被重置,回合结束或停顿 CHAT_PERSIST_DEBOUNCE_MS 后才
-  // 真正落库;关页/卸载时经 pendingChatPersistRef 冲刷,不丢最后一轮。
-  useEffect(() => {
-    if (!didLoadChatRef.current) return;
-    const persist = () => {
-      pendingChatPersistRef.current = null;
-      try {
-        if (
-          chatMessages.length > 0 &&
-          chatMessagesConversationIdRef.current &&
-          (chatMessagesConversationIdRef.current !== chatConversationId ||
-            (chatMessagesModeRef.current &&
-              chatMessagesModeRef.current !==
-                inferChatConversationMode(chatMessages)))
-        ) {
-          return;
-        }
-        if (chatMessages.length === 0) {
-          window.localStorage.removeItem(CHAT_STORAGE_KEY);
-          return;
-        }
-        const persistedMessages = sanitizePersistedChatMessages(chatMessages);
-        const conversationMode = inferChatConversationMode(persistedMessages);
-        chatMessagesConversationIdRef.current = chatConversationId;
-        chatMessagesModeRef.current = conversationMode;
-        const title = getChatConversationTitle(
-          persistedMessages.filter((message) =>
-            isMessageInConversationMode(message, conversationMode)
-          ),
-          isZh ? "未命名对话" : "Untitled chat"
-        );
-        const now = new Date().toISOString();
-        const previousConversations = chatConversationsRef.current;
-        const existing = previousConversations.find(
-          (conversation) => conversation.id === chatConversationId
-        );
-        const current: ChatConversation = {
-          id: chatConversationId,
-          mode: existing?.mode || conversationMode,
-          title,
-          messages: persistedMessages,
-          createdAt: existing?.createdAt || now,
-          updatedAt: now,
-        };
-        const nextConversations = compactChatConversations([
-          current,
-          ...previousConversations.filter(
-            (conversation) => conversation.id !== chatConversationId
-          ),
-        ]).slice(0, CHAT_CONVERSATION_LIMIT);
-        chatConversationsRef.current = nextConversations;
-        setChatConversations(nextConversations);
-        window.localStorage.setItem(
-          CHAT_CONVERSATIONS_STORAGE_KEY,
-          JSON.stringify(nextConversations)
-        );
-        window.localStorage.setItem(
-          chatActiveConversationStorageKey(current.mode),
-          chatConversationId
-        );
-        window.localStorage.removeItem(CHAT_STORAGE_KEY);
-      } catch {
-        /* ignore local storage quota errors */
-      }
-    };
-    pendingChatPersistRef.current = persist;
-    const timer = window.setTimeout(persist, CHAT_PERSIST_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [chatConversationId, chatMessages, isZh]);
-
-  // 关页/组件卸载时冲刷去抖窗口内尚未落库的会话变更。
-  useEffect(() => {
-    const flushPendingChatPersist = () => {
-      pendingChatPersistRef.current?.();
-    };
-    window.addEventListener("beforeunload", flushPendingChatPersist);
-    return () => {
-      window.removeEventListener("beforeunload", flushPendingChatPersist);
-      flushPendingChatPersist();
-    };
-  }, []);
+  // chatMessages 的订阅消费方(去抖持久化 + 卸载冲刷)已下沉为叶子组件
+  // ChatPersistenceAgent:流式期间每帧的 chatMessages 变化只重渲该空渲染
+  // 组件,父组件不再因此全量重渲。见 chat-subscriptions.tsx。
+  const chatPersistenceAgent = (
+    <ChatPersistenceAgent
+      chatConversationId={chatConversationId}
+      isZh={isZh}
+      didLoadChatRef={didLoadChatRef}
+      chatMessagesConversationIdRef={chatMessagesConversationIdRef}
+      chatMessagesModeRef={chatMessagesModeRef}
+      chatConversationsRef={chatConversationsRef}
+      setChatConversations={setChatConversations}
+    />
+  );
 
   useEffect(() => {
     if (
@@ -5278,11 +5018,11 @@ export function CreatePageClient({
   };
 
   const findPrecedingUserMessage = (assistantIndex: number) => {
-    const assistantMessage = chatMessages[assistantIndex];
+    const assistantMessage = getChatMessages()[assistantIndex];
     const targetMode =
       assistantMessage?.mode === "agent" ? "agent" : ("chat" as const);
     for (let index = assistantIndex - 1; index >= 0; index--) {
-      const message = chatMessages[index];
+      const message = getChatMessages()[index];
       if (
         message?.role === "user" &&
         isMessageInConversationMode(message, targetMode)
@@ -5356,37 +5096,37 @@ export function CreatePageClient({
 
   const handleChatVariantChange = useCallback(
     (messageId: string, direction: -1 | 1) => {
-      const message = chatMessages.find((item) => item.id === messageId);
+      const message = getChatMessages().find((item) => item.id === messageId);
       const current = message?.activeVariant || 0;
       handleChatVariantSelect(messageId, current + direction);
     },
-    [chatMessages, handleChatVariantSelect]
+    [getChatMessages, handleChatVariantSelect]
   );
 
   const handleChatRetry = async (assistantId: string) => {
     if (isChatGenerating) return;
 
-    const assistantIndex = chatMessages.findIndex(
+    const assistantIndex = getChatMessages().findIndex(
       (message) => message.id === assistantId
     );
     if (assistantIndex < 0) return;
     const userMessage = findPrecedingUserMessage(assistantIndex);
     if (!userMessage?.text) return;
 
-    const assistantMessage = chatMessages[assistantIndex];
+    const assistantMessage = getChatMessages()[assistantIndex];
     if (!assistantMessage) return;
     const activeVariant = getActiveChatVariant(assistantMessage);
     const retrySize = activeVariant?.size || size;
     const generationId = createGenerationId();
-    const userIndex = chatMessages.findIndex(
+    const userIndex = getChatMessages().findIndex(
       (message) => message.id === userMessage.id
     );
     const conversationMode =
       assistantMessage.mode === "agent" ? "agent" : ("chat" as const);
     const historyMessages = (
       userIndex >= 0
-        ? chatMessages.slice(0, userIndex)
-        : chatMessages.slice(0, assistantIndex)
+        ? getChatMessages().slice(0, userIndex)
+        : getChatMessages().slice(0, assistantIndex)
     ).filter((message) =>
       isMessageInConversationMode(message, conversationMode)
     );
@@ -5401,7 +5141,7 @@ export function CreatePageClient({
           : undefined,
       pending: true,
     });
-    const pendingMessages = chatMessages.map((message) => {
+    const pendingMessages = getChatMessages().map((message) => {
       if (message.id !== assistantId) return message;
       const variants = getChatVariants(message);
       return {
@@ -5816,49 +5556,13 @@ export function CreatePageClient({
     );
   };
 
-  const renderChatStreamBubble = (messageId?: string) => {
-    if (!chatStream || chatStream.messageId !== messageId) return null;
-    const isAgentStream = chatStream.mode === "agent";
-    const hasVisibleAgentProgress =
-      isAgentStream && chatStream.agentEvents.length > 0;
-    return (
-      <div className="rounded-lg rounded-bl-[5px] border border-border bg-background px-3 py-3 text-sm text-foreground">
-        {renderThinkingBlock(chatStream.thinking, true)}
-        {hasVisibleAgentProgress
-          ? renderAgentRoundCards(
-              chatStream.agentEvents,
-              chatStream.agent,
-              true
-            )
-          : null}
-        {chatStream.text && (
-          <p className="whitespace-pre-wrap break-words leading-relaxed">
-            {chatStream.text}
-          </p>
-        )}
-        {chatStream.imageUrl && (
-          <div className="relative mt-3 max-w-sm overflow-hidden rounded-md border bg-muted">
-            <Image
-              src={chatStream.imageUrl}
-              alt={copy("Streaming preview", "流式预览")}
-              width={320}
-              height={320}
-              className="h-auto w-full object-contain"
-              unoptimized={shouldBypassImageOptimization(chatStream.imageUrl)}
-            />
-          </div>
-        )}
-        {!chatStream.text &&
-          !chatStream.imageUrl &&
-          !hasVisibleAgentProgress && (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {copy("Generating...", "生成中...")}
-            </div>
-          )}
-      </div>
-    );
-  };
+  const renderChatStreamBubble = (messageId?: string) => (
+    <ChatStreamBubble
+      messageId={messageId}
+      renderThinkingBlock={renderThinkingBlock}
+      renderAgentRoundCards={renderAgentRoundCards}
+    />
+  );
 
   const renderChatInput = () => {
     const isEditChat = hasChatImageAttachments;
@@ -6693,7 +6397,7 @@ export function CreatePageClient({
     const assistantMessageId = createLocalId();
     const createdAt = new Date().toISOString();
     const pendingMessages: ChatMessage[] = [
-      ...chatMessages,
+      ...getChatMessages(),
       {
         id: userMessageId,
         role: "user",
@@ -6912,11 +6616,12 @@ export function CreatePageClient({
           : undefined,
       pending: true,
     });
-    const conversationBeforeSend = chatMessages.filter((message) =>
+    const currentMessages = getChatMessages();
+    const conversationBeforeSend = currentMessages.filter((message) =>
       isMessageInConversationMode(message, conversationMode)
     );
     const pendingMessages: ChatMessage[] = [
-      ...chatMessages,
+      ...currentMessages,
       {
         id: userMessageId,
         role: "user",
@@ -7809,7 +7514,7 @@ export function CreatePageClient({
 
   const selectedRecent =
     recent.find((item) => item.id === selectedRecentId) ??
-    chatMessages.flatMap((message) =>
+    getChatMessages().flatMap((message) =>
       getChatVariants(message)
         .filter((variant) => variant.generationId === selectedRecentId)
         .map(
@@ -9289,7 +8994,7 @@ export function CreatePageClient({
                         size="sm"
                         onClick={handleClearChatHistory}
                         disabled={
-                          isChatGenerating || visibleChatMessages.length === 0
+                          isChatGenerating || getChatMessages().length === 0
                         }
                       >
                         <Trash2 className="h-4 w-4" />
@@ -9315,6 +9020,11 @@ export function CreatePageClient({
                       ref={chatMessagesRef}
                       className="flex-1 space-y-5 overflow-y-auto px-4 py-4"
                     >
+                      <ChatMessageList
+                        activeConversationMode={activeConversationMode}
+                        isConversationModeMatch={isMessageInConversationMode}
+                        renderList={(visibleChatMessages, chatStreamMessageId) => (
+                          <>
                       {visibleChatMessages.length === 0 ? (
                         <div className="flex min-h-[420px] flex-col items-center justify-center text-center text-muted-foreground">
                           {activeMode === "agent" ? (
@@ -9350,7 +9060,7 @@ export function CreatePageClient({
                                 variant.outputRole === "choice" && variant.imageUrl
                             );
                             const isStreamingMessage =
-                              chatStream?.messageId === message.id;
+                              chatStreamMessageId === message.id;
                             const activeVariantPending =
                               activeVariant?.pending === true;
 
@@ -9681,20 +9391,10 @@ export function CreatePageClient({
                           })}
                         </>
                       )}
-
-                      {chatStream &&
-                        !retryingChatMessageId &&
-                        !chatStream.messageId && (
-                          <>
-                            {chatStream.mode === activeConversationMode && (
-                              <div className="flex justify-start">
-                                <div className="max-w-[88%]">
-                                  {renderChatStreamBubble(undefined)}
-                                </div>
-                              </div>
-                            )}
                           </>
                         )}
+                      />
+                      <ChatPanelStreamGate activeConversationMode={activeConversationMode} renderBubble={renderChatStreamBubble} retryingChatMessageId={retryingChatMessageId} />
                     </div>
 
                     {renderChatInput()}
@@ -9702,7 +9402,143 @@ export function CreatePageClient({
                 </div>
               </div>
     ),
-    [activeConversationExists, activeConversationMode, attachResultToChat, chatMessagesRef, clearChatAttachments, currentModeConversations, handleChatRetry, handleChatVariantChange, handleChatVariantSelect, handleClearChatHistory, handleNewChat, handleOpenChatConversation, renderAgentRoundCards, renderChatInput, renderChatStreamBubble, renderThinkingBlock, visibleChatMessages]
+    [activeConversationExists, activeConversationMode, attachResultToChat, chatMessagesRef, clearChatAttachments, currentModeConversations, handleChatRetry, handleChatVariantChange, handleChatVariantSelect, handleClearChatHistory, handleNewChat, handleOpenChatConversation, renderAgentRoundCards, renderChatInput, renderChatStreamBubble, renderThinkingBlock]
+  );
+
+
+  // 瀑布流单卡渲染:稳定引用传给 WaterfallCardList(订阅 batchCards 的叶子组件),
+  // 流式期间每帧的卡片更新只重渲列表层,父组件不再订阅 batchCards。
+  const renderBatchCard = (card: BatchCard) => (
+                          <div
+                            key={card.id}
+                            className={`mb-3 break-inside-avoid overflow-hidden rounded-lg border bg-muted/30 ${
+                              card.state === "error"
+                                ? "border-destructive/30"
+                                : "border-border"
+                            }`}
+                            style={
+                              card.aspectRatio &&
+                              (card.state === "loading" ||
+                                (card.state === "image" && !card.imageUrl))
+                                ? { aspectRatio: card.aspectRatio }
+                                : undefined
+                            }
+                          >
+                            {card.state === "loading" && !card.imageUrl && (
+                              <div className="flex h-full min-h-40 items-center justify-center text-muted-foreground">
+                                <Loader2 className="h-5 w-5 animate-spin" />
+                              </div>
+                            )}
+
+                            {card.imageUrl && (
+                              <button
+                                type="button"
+                                className="group relative block w-full bg-muted"
+                                onClick={() => {
+                                  if (card.generationId) {
+                                    setSelectedRecentId(card.generationId);
+                                  }
+                                }}
+                                title={copy("Open image preview", "打开图片预览")}
+                              >
+                                <Image
+                                  src={thumbSrc(card.imageUrl, 640)}
+                                  alt={card.prompt}
+                                  width={640}
+                                  height={640}
+                                  className="h-auto w-full object-contain"
+                                  unoptimized={shouldBypassImageOptimization(
+                                    card.imageUrl
+                                  )}
+                                />
+                                {card.state === "loading" && (
+                                  <span className="absolute left-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-whisper">
+                                    <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+                                    {copy("Streaming", "流式生成中")}
+                                  </span>
+                                )}
+                                {card.state === "image" && (
+                                  <div className="absolute inset-x-2 bottom-2 hidden items-center justify-end gap-1 group-hover:flex">
+                                    <Button
+                                      type="button"
+                                      variant="secondary"
+                                      size="icon-xs"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        saveBatchCardToRecent(card);
+                                      }}
+                                      disabled={card.saved}
+                                      title={copy("Save to recent", "保存到最近生成")}
+                                    >
+                                      <Save className="h-3 w-3" />
+                                    </Button>
+                                    <Button
+                                      asChild
+                                      variant="secondary"
+                                      size="icon-xs"
+                                      title={copy("Download", "下载")}
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <a
+                                        href={card.imageUrl}
+                                        download
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                      >
+                                        <Download className="h-3 w-3" />
+                                      </a>
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="secondary"
+                                      size="icon-xs"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        if (card.generationId) {
+                                          setSelectedRecentId(card.generationId);
+                                        }
+                                      }}
+                                      title={copy("Fullscreen", "全屏")}
+                                    >
+                                      <Maximize2 className="h-3 w-3" />
+                                    </Button>
+                                  </div>
+                                )}
+                              </button>
+                            )}
+
+                            {card.state === "text" && (
+                              <div className="p-3 text-sm leading-relaxed">
+                                {renderThinkingBlock(card.streamThinking)}
+                                {renderAgentBlock(card.streamAgent)}
+                                <p className="whitespace-pre-wrap break-words">
+                                  {card.text || card.streamText || ""}
+                                </p>
+                              </div>
+                            )}
+
+                            {card.state === "error" && (
+                              <div className="space-y-3 p-3 text-sm text-destructive">
+                                <p className="break-words">
+                                  {card.error ||
+                                    copy("Generation failed", "生成失败")}
+                                </p>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() =>
+                                    triggerBatchGeneration({
+                                      retryCardId: card.id,
+                                    })
+                                  }
+                                >
+                                  <RefreshCcw className="h-4 w-4" />
+                                  {copy("Retry", "重试")}
+                                </Button>
+                              </div>
+                            )}
+                          </div>
   );
 
   // 瀑布流面板 JSX 缓存:deps 语义同 chatPanelElement。batchCards 是池化 state,
@@ -10104,140 +9940,7 @@ export function CreatePageClient({
                           </Button>
                         </div>
                       </div>
-                      <div className="columns-1 gap-3 sm:columns-2 lg:columns-3">
-                        {batchCards.map((card) => (
-                          <div
-                            key={card.id}
-                            className={`mb-3 break-inside-avoid overflow-hidden rounded-lg border bg-muted/30 ${
-                              card.state === "error"
-                                ? "border-destructive/30"
-                                : "border-border"
-                            }`}
-                            style={
-                              card.aspectRatio &&
-                              (card.state === "loading" ||
-                                (card.state === "image" && !card.imageUrl))
-                                ? { aspectRatio: card.aspectRatio }
-                                : undefined
-                            }
-                          >
-                            {card.state === "loading" && !card.imageUrl && (
-                              <div className="flex h-full min-h-40 items-center justify-center text-muted-foreground">
-                                <Loader2 className="h-5 w-5 animate-spin" />
-                              </div>
-                            )}
-
-                            {card.imageUrl && (
-                              <button
-                                type="button"
-                                className="group relative block w-full bg-muted"
-                                onClick={() => {
-                                  if (card.generationId) {
-                                    setSelectedRecentId(card.generationId);
-                                  }
-                                }}
-                                title={copy("Open image preview", "打开图片预览")}
-                              >
-                                <Image
-                                  src={thumbSrc(card.imageUrl, 640)}
-                                  alt={card.prompt}
-                                  width={640}
-                                  height={640}
-                                  className="h-auto w-full object-contain"
-                                  unoptimized={shouldBypassImageOptimization(
-                                    card.imageUrl
-                                  )}
-                                />
-                                {card.state === "loading" && (
-                                  <span className="absolute left-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-whisper">
-                                    <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
-                                    {copy("Streaming", "流式生成中")}
-                                  </span>
-                                )}
-                                {card.state === "image" && (
-                                  <div className="absolute inset-x-2 bottom-2 hidden items-center justify-end gap-1 group-hover:flex">
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        saveBatchCardToRecent(card);
-                                      }}
-                                      disabled={card.saved}
-                                      title={copy("Save to recent", "保存到最近生成")}
-                                    >
-                                      <Save className="h-3 w-3" />
-                                    </Button>
-                                    <Button
-                                      asChild
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      title={copy("Download", "下载")}
-                                      onClick={(event) => event.stopPropagation()}
-                                    >
-                                      <a
-                                        href={card.imageUrl}
-                                        download
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                      >
-                                        <Download className="h-3 w-3" />
-                                      </a>
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        if (card.generationId) {
-                                          setSelectedRecentId(card.generationId);
-                                        }
-                                      }}
-                                      title={copy("Fullscreen", "全屏")}
-                                    >
-                                      <Maximize2 className="h-3 w-3" />
-                                    </Button>
-                                  </div>
-                                )}
-                              </button>
-                            )}
-
-                            {card.state === "text" && (
-                              <div className="p-3 text-sm leading-relaxed">
-                                {renderThinkingBlock(card.streamThinking)}
-                                {renderAgentBlock(card.streamAgent)}
-                                <p className="whitespace-pre-wrap break-words">
-                                  {card.text || card.streamText || ""}
-                                </p>
-                              </div>
-                            )}
-
-                            {card.state === "error" && (
-                              <div className="space-y-3 p-3 text-sm text-destructive">
-                                <p className="break-words">
-                                  {card.error ||
-                                    copy("Generation failed", "生成失败")}
-                                </p>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() =>
-                                    triggerBatchGeneration({
-                                      retryCardId: card.id,
-                                    })
-                                  }
-                                >
-                                  <RefreshCcw className="h-4 w-4" />
-                                  {copy("Retry", "重试")}
-                                </Button>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+                      <WaterfallCardList renderCard={renderBatchCard} />
                       <div
                         ref={batchLoadTriggerRef}
                         className="flex h-20 flex-col items-center justify-center gap-1 text-xs text-muted-foreground"
@@ -10264,7 +9967,7 @@ export function CreatePageClient({
                 </div>
               </div>
     ),
-    [addBatchAttachments, autoSizeLabel, batchImageInputRef, batchLoadTriggerRef, batchPromptRef, batchScrollRef, batchSingleCreditFormula, batchStoppedRef, chatCustomEditSize, chatImageModel, chatMixWebFirstActive, chatQualityMultipliers, chatSuggestions, customApiBillingLabel, disableResponsesOnlyControls, effectiveWaterfallTier, formattedBalance, formattedBatchSingleCreditCost, formattedWaterfallCreditsConsumed, getBatchFallbackSize, handleBatchSubmit, handleBatchSuggestion, handleChatPaste, handleClearWaterfall, handleStopWaterfall, hasChatImageAttachments, imageModelHelpText, maxChatImages, promptOptimizationField, removeChatAttachment, renderAgentBlock, renderBackgroundSelect, renderGptModelSelect, renderHdRepairToggle, renderImageModelSelect, renderThinkingBlock, renderThinkingSelect, renderTransparentMatteToggle, responsesOnlyDisabledReason, saveBatchCardToRecent, triggerBatchGeneration, waterfallStatusText, waterfallTierOptions]
+    [addBatchAttachments, renderBatchCard, autoSizeLabel, batchImageInputRef, batchLoadTriggerRef, batchPromptRef, batchScrollRef, batchSingleCreditFormula, batchStoppedRef, chatCustomEditSize, chatImageModel, chatMixWebFirstActive, chatQualityMultipliers, chatSuggestions, customApiBillingLabel, disableResponsesOnlyControls, effectiveWaterfallTier, formattedBalance, formattedBatchSingleCreditCost, formattedWaterfallCreditsConsumed, getBatchFallbackSize, handleBatchSubmit, handleBatchSuggestion, handleChatPaste, handleClearWaterfall, handleStopWaterfall, hasChatImageAttachments, imageModelHelpText, maxChatImages, promptOptimizationField, removeChatAttachment, renderAgentBlock, renderBackgroundSelect, renderGptModelSelect, renderHdRepairToggle, renderImageModelSelect, renderThinkingBlock, renderThinkingSelect, renderTransparentMatteToggle, responsesOnlyDisabledReason, saveBatchCardToRecent, triggerBatchGeneration, waterfallStatusText, waterfallTierOptions]
   );
 
 
@@ -10483,6 +10186,7 @@ export function CreatePageClient({
         </section>
       )}
 
+      {chatPersistenceAgent}
       {selectedRecent && (
         <ImageLightbox
           generation={selectedRecent as LightboxGeneration}

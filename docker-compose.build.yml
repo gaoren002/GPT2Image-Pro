@@ -54,9 +54,3 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.chatgpt-web-proxy
-
-  chatgpt-register:
-    image: gpt2image-pro-chatgpt-register:local
-    build:
-      context: .
-      dockerfile: Dockerfile.chatgpt-register

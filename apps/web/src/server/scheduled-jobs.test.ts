@@ -21,18 +21,11 @@ vi.mock("@repo/shared/generation-maintenance", () => ({
 }));
 
 vi.mock("@repo/shared/system-settings", () => ({
-  getRuntimeSettingBoolean: vi.fn(),
   getRuntimeSettingNumber: vi.fn(),
   getRuntimeSettingSelect: mocks.getRuntimeSettingSelect,
-  getRuntimeSettingString: vi.fn(),
-}));
-
-vi.mock("@/features/image-backend-pool/chatgpt-register-runner", () => ({
-  runChatgptRegisterBatch: vi.fn(),
 }));
 
 vi.mock("@/features/image-backend-pool/service", () => ({
-  countAvailableWebAccountsInGroup: vi.fn(),
   refreshStaleWebBackendAccounts: vi.fn(),
   runAutoSub2ApiAccessTokenSync: vi.fn(),
 }));

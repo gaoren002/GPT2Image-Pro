@@ -5,15 +5,11 @@ import {
   expireStalePendingGenerations,
 } from "@repo/shared/generation-maintenance";
 import {
-  getRuntimeSettingBoolean,
   getRuntimeSettingNumber,
   getRuntimeSettingSelect,
-  getRuntimeSettingString,
 } from "@repo/shared/system-settings";
 
-import { runChatgptRegisterBatch } from "@/features/image-backend-pool/chatgpt-register-runner";
 import {
-  countAvailableWebAccountsInGroup,
   refreshStaleWebBackendAccounts,
   runAutoSub2ApiAccessTokenSync,
 } from "@/features/image-backend-pool/service";
@@ -100,80 +96,6 @@ export async function runSub2ApiSyncJob(options?: { force?: boolean }) {
   const result = await runAutoSub2ApiAccessTokenSync(options);
   return {
     ...result,
-    timestamp: new Date().toISOString(),
-  };
-}
-
-/**
- * 号池自动维持任务：目标分组可用 web 账号数低于目标值时，调注册机自动补号。
- *
- * 流程：读开关/目标分组/目标可用数/每轮上限/并发 → 统计当前可用数 → 计算缺口
- * deficit=target-available，取 min(deficit, maxPerRun) 调 runChatgptRegisterBatch
- * 注册并导入目标分组。注册成功率受 OpenAI 机房 IP 检测影响（部分尝试会失败），
- * 故单轮可能补不满，靠多轮逼近目标；maxPerRun 限制单轮突发。
- *
- * 幂等/并发：本任务由内部调度器的 PG advisory 锁保证跨副本单飞；注册机 sidecar
- * 亦自带单飞，二者叠加确保不会并发跑多批。
- */
-export async function runWebAccountsReplenishJob() {
-  const enabled = await getRuntimeSettingBoolean(
-    "CHATGPT_REGISTER_POOL_MAINTAIN_ENABLED",
-    false
-  );
-  if (!enabled) {
-    return { success: true, skipped: "disabled" as const };
-  }
-
-  const groupId = (
-    await getRuntimeSettingString("CHATGPT_REGISTER_POOL_MAINTAIN_GROUP_ID")
-  )?.trim();
-  const target = await getRuntimeSettingNumber(
-    "CHATGPT_REGISTER_POOL_MAINTAIN_TARGET",
-    0
-  );
-  if (!groupId || target <= 0) {
-    return { success: true, skipped: "not_configured" as const };
-  }
-
-  const available = await countAvailableWebAccountsInGroup(groupId);
-  const deficit = target - available;
-  if (deficit <= 0) {
-    return {
-      success: true,
-      skipped: "target_met" as const,
-      available,
-      target,
-    };
-  }
-
-  const maxPerRun = await getRuntimeSettingNumber(
-    "CHATGPT_REGISTER_POOL_MAINTAIN_MAX_PER_RUN",
-    10,
-    { positive: true }
-  );
-  const concurrency = await getRuntimeSettingNumber(
-    "CHATGPT_REGISTER_POOL_MAINTAIN_CONCURRENCY",
-    5,
-    { positive: true }
-  );
-  const toRegister = Math.min(deficit, maxPerRun);
-
-  const batch = await runChatgptRegisterBatch({
-    count: toRegister,
-    concurrency,
-    webGroupId: groupId,
-    namePrefix: "auto",
-  });
-
-  return {
-    success: true,
-    available,
-    target,
-    deficit,
-    toRegister,
-    imported: batch.imported,
-    failed: batch.failed,
-    skipped: batch.skipped,
     timestamp: new Date().toISOString(),
   };
 }

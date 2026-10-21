@@ -1695,11 +1695,6 @@ export function SystemSettingsPanel() {
       ) {
         continue;
       }
-      // 注册机相关配置（moemail、代理、IP 刷新、号池维持）统一在生图池后端的
-      // 「注册机」tab 内编辑，系统设置面板里隐藏，避免双入口。
-      if (setting.key.startsWith("CHATGPT_REGISTER_")) {
-        continue;
-      }
       map.get(setting.category)?.push(setting);
     }
     return map;

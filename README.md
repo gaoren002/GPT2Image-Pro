@@ -111,7 +111,6 @@ Chat 模式和 Agent 模式分开：Chat 更适合用户主动对话和上下文
 - **分辨率超分与高清修复**：最终图自动超分校准到目标分辨率（Real-ESRGAN，Web/Codex 也可补足到接近 4K），并可选 SCUNet 高清修复（盲复原、手动开、服务端串行）。
 - **计费与套餐**：能力矩阵、套餐订阅、按量积分包、API Key 独立额度、尺寸价格曲线、Chat/Agent 轮次价格、积分流水和用户侧计费明细。
 - **运营后台**：三级管理员、用户管理、公告、工单红点、状态监控、SLA、历史错误、照片销毁、内置定时任务和系统设置。
-- **注册机辅助工具**：仓库附带 `注册机/`，可按示例配置批量生成本项目可导入的 ChatGPT Web AT；在合适的代理和邮箱服务配置下，可支撑数百并发生成 Web AT。该工具是账号准备辅助，不是 Web 应用运行必需组件。
 
 ## 界面预览
 
@@ -396,7 +395,6 @@ Web 应用默认启用内置定时任务，会自动执行 pending 超时退款�
 - 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-web`
 - 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-migrate`
 - 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-chatgpt-web-proxy`
-- 构建并推送 `ghcr.io/gaoren002/gpt2image-pro-chatgpt-register`
 - 创建 GitHub Release 草稿，并附带 compose 部署包
 
 ```bash

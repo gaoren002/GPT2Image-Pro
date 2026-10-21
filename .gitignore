@@ -69,11 +69,6 @@ nul
 # local storage (dev-mode image files)
 /storage/
 
-# local registration tool runtime config
-注册机/config.yaml
-# at.txt 含真实 access token（机密），永不提交
-注册机/at.txt
-
 # deploy artifacts
 deploy.tgz
 

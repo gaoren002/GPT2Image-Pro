@@ -24,7 +24,6 @@
   资产前缀),服务端运行时密钥/配置(DB、各 sidecar URL/SECRET 等)在此运行时 env。
 - 单元以 **root** 运行(无 `User=`),故其写出的 `.next/cache` 归 root,清理旧 release 需 `sudo`。
 - Node:`/home/user1/.nvm/versions/node/v24.15.0/bin`
-- 注册机 sidecar:见文末「注册机 sidecar」一节。
 
 ## 部署原则
 
@@ -275,33 +274,3 @@ curl -k -I "https://<public-domain>/<asset-prefix>/_next/static/chunks/<chunk>.j
 ### release 目录异常巨大
 
 通常误复制了 `storage`。不要上线,删除/隔离后按标准命令重建。
-
-## 注册机 sidecar（chatgpt-register）
-
-后台「注册机」Tab 通过本机 sidecar 容器用 wine 跑 `ChatGPTRegister.exe`(PE32,无源码,
-必须 wine)。web 单元经 `CHATGPT_REGISTER_URL` 反代,token 入库仍在 web 侧(DB 凭据不进
-sidecar)。与 web 蓝绿无关,独立维护;镜像约 3.9GB。
-
-构建并(重新)启动容器:
-
-```bash
-cd /home/user1/GPT2Image-Pro
-DOCKER_BUILDKIT=0 docker build -f Dockerfile.chatgpt-register \
-  -t gpt2image-pro-chatgpt-register:local .
-SECRET=$(grep '^CHATGPT_REGISTER_SECRET=' /home/user1/gpt2image-shared/.env.local \
-  | sed -E 's/^[^=]+="?([^"]*)"?$/\1/')
-docker rm -f gpt2image-chatgpt-register 2>/dev/null
-docker run -d --name gpt2image-chatgpt-register --restart unless-stopped \
-  -p 127.0.0.1:3023:3023 \
-  -e CHATGPT_REGISTER_SECRET="$SECRET" -e XDG_RUNTIME_DIR=/home/app/.xdg \
-  gpt2image-pro-chatgpt-register:local
-```
-
-要点:
-
-- 仅绑 `127.0.0.1:3023`;鉴权 `X-Register-Secret` 与运行时 env 的 `CHATGPT_REGISTER_SECRET`
-  恒定时间比对,**fail-closed**(secret 为空则拒绝所有请求)。该 secret 与 `CHATGPT_REGISTER_URL`
-  在 `/home/user1/gpt2image-shared/.env.local`,web 单元据此调用。
-- moemail API Key/邮箱域名/代理在后台「注册机」Tab 配置(存系统设置,非 env)。
-- 验证:`curl -s http://127.0.0.1:3023/healthz` 应 `ok`;无 secret 打 `/register` 应 401。
-- `--restart unless-stopped` 保证宿主重启后自动拉起。

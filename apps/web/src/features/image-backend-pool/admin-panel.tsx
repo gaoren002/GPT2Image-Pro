@@ -126,7 +126,6 @@ import {
   testImageBackendApiAction,
   updateSub2ApiAutoSyncTaskOptionsAction,
 } from "./actions";
-import { ChatgptRegisterTab } from "./chatgpt-register-tab";
 import { parseImportTokensText } from "./import-token-parser";
 import type {
   AdminImageBackendAccountSummary,
@@ -337,8 +336,7 @@ type BackendPoolTab =
   | "accounts"
   | "apis"
   | "adobe"
-  | "import"
-  | "register";
+  | "import";
 
 type SyncProgressState = {
   status: "idle" | "running" | "success" | "error";
@@ -2433,13 +2431,12 @@ export function ImageBackendPoolAdminPanel({
             value === "apis" ||
             value === "adobe" ||
             value === "import" ||
-            value === "register" ||
             value === "groups"
               ? value
               : readOnly
                 ? "accounts"
                 : "groups";
-          if (readOnly && (nextTab === "import" || nextTab === "register")) return;
+          if (readOnly && nextTab === "import") return;
           setActiveTab(nextTab);
         }}
         className="w-full"
@@ -2451,7 +2448,6 @@ export function ImageBackendPoolAdminPanel({
           <TabsTrigger value="apis">API 后端</TabsTrigger>
           <TabsTrigger value="adobe">Adobe 后端</TabsTrigger>
           {!readOnly && <TabsTrigger value="import">同步 Sub2API</TabsTrigger>}
-          {!readOnly && <TabsTrigger value="register">注册机</TabsTrigger>}
         </TabsList>
 
         <TabsContent
@@ -5624,13 +5620,6 @@ export function ImageBackendPoolAdminPanel({
                 )}
               </CardContent>
             </Card>
-          </TabsContent>
-        )}
-        {!readOnly && (
-          <TabsContent value="register" className="mt-6">
-            <ChatgptRegisterTab
-              groups={groups.map((g) => ({ id: g.id, name: g.name }))}
-            />
           </TabsContent>
         )}
       </Tabs>

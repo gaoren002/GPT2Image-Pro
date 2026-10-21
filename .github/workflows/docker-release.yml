@@ -48,10 +48,6 @@ jobs:
             image: gpt2image-pro-chatgpt-web-proxy
             dockerfile: Dockerfile.chatgpt-web-proxy
             target: runner
-          - name: chatgpt-register
-            image: gpt2image-pro-chatgpt-register
-            dockerfile: Dockerfile.chatgpt-register
-            target: runner
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5（钉 SHA；dependabot 维护）

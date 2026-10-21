@@ -50,7 +50,6 @@ services:
       - ${GPT2IMAGE_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-gpt2image}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gpt2image}
-      CHATGPT_REGISTER_URL: ""
       CHATGPT_WEB_PROXY_URL: ""
       SUPER_RESOLUTION_WORKER_URL: http://super-resolution-worker:3310
       SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}

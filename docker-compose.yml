@@ -47,9 +47,6 @@ services:
       LOCAL_STORAGE_PATH: /app/storage
       CHATGPT_WEB_PROXY_URL: http://chatgpt-web-proxy:3021
       CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:-}
-      # 注册机 sidecar：未设置 URL 时后台「注册机」Tab 不可用（直接报错），不影响其余功能。
-      CHATGPT_REGISTER_URL: ${CHATGPT_REGISTER_URL:-http://chatgpt-register:3023}
-      CHATGPT_REGISTER_SECRET: ${CHATGPT_REGISTER_SECRET:-}
       SUPER_RESOLUTION_WORKER_URL: http://super-resolution-worker:3310
       SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
       GPT2IMAGE_BOOTSTRAP_CREDENTIALS_PATH: /app/.gpt2image/super-admin-credentials.txt
@@ -64,8 +61,6 @@ services:
       migrate:
         condition: service_completed_successfully
       chatgpt-web-proxy:
-        condition: service_started
-      chatgpt-register:
         condition: service_started
       super-resolution-worker:
         condition: service_healthy
@@ -113,16 +108,6 @@ services:
       CHATGPT_WEB_UPSTREAM_PROXY_URL: ${CHATGPT_WEB_UPSTREAM_PROXY_URL:-}
       CHATGPT_WEB_UPSTREAM_PROBE_INTERVAL_SECONDS: ${CHATGPT_WEB_UPSTREAM_PROBE_INTERVAL_SECONDS:-60}
       CHATGPT_WEB_UPSTREAM_PROBE_FAILURES: ${CHATGPT_WEB_UPSTREAM_PROBE_FAILURES:-3}
-
-  # 注册机 sidecar：debian + wine 跑 ChatGPTRegister.exe。仅 web 经内网调用，
-  # X-Register-Secret 鉴权；不持有 DB 凭据，token 入库由 web 完成。
-  chatgpt-register:
-    image: ghcr.io/${GPT2IMAGE_IMAGE_NAMESPACE:-gaoren002}/gpt2image-pro-chatgpt-register:${GPT2IMAGE_IMAGE_TAG:-latest}
-    restart: unless-stopped
-    environment:
-      CHATGPT_REGISTER_BIND: :3023
-      CHATGPT_REGISTER_SECRET: ${CHATGPT_REGISTER_SECRET:-}
-      CHATGPT_REGISTER_TIMEOUT_SECONDS: ${CHATGPT_REGISTER_TIMEOUT_SECONDS:-1800}
 
 volumes:
   postgres-data:

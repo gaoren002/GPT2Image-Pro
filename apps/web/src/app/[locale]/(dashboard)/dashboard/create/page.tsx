@@ -28,34 +28,39 @@ export default async function CreatePage() {
   const locale = await getLocale();
   if (!user) redirect(`/${locale}/sign-in`);
 
-  const [creditsData, recentGenerations, plan, userApiConfig, timeZone] =
-    await Promise.all([
-      getCreditsBalance(user.id),
-      getUserRecentGenerations(user.id, 6),
-      getUserPlan(user.id),
-      getUserApiConfig(user.id),
-      getAppTimeZone(),
-    ]);
+  // 三组查询此前为三段串行 await,相互独立时可并行;plan 本身只查一次,
+  // 依赖它的下游(uploadLimits/backendGroups/preference/capabilities)挂在
+  // 同一个 planPromise 链上,与无依赖查询并发执行。
+  const planPromise = getUserPlan(user.id);
   const [
+    creditsData,
+    recentGenerations,
+    plan,
+    userApiConfig,
+    timeZone,
     uploadLimits,
     backendGroups,
     selectedBackendGroupId,
     moderationEnabled,
-  ] = await Promise.all([
-    getPlanUploadLimits(plan.plan),
-    // 报价需要看到 mixed 父组的全部可用子组（包括不允许用户直接选择的隐藏组），
-    // 否则页面无法预测服务端实际命中的子组倍率。
-    listImageBackendGroupOptions({ plan: plan.plan }),
-    getUserImageBackendPreference(user.id, plan.plan),
-    isContentModerationEnabled(),
-  ]);
-  const [
     capabilities,
     imageBasePricing,
     forceWebMinPixels,
     forceWebMaxPixels,
   ] = await Promise.all([
-    getPlanCapabilitySnapshot(plan.plan),
+    getCreditsBalance(user.id),
+    getUserRecentGenerations(user.id, 6),
+    planPromise,
+    getUserApiConfig(user.id),
+    getAppTimeZone(),
+    planPromise.then((p) => getPlanUploadLimits(p.plan)),
+    // 报价需要看到 mixed 父组的全部可用子组（包括不允许用户直接选择的隐藏组），
+    // 否则页面无法预测服务端实际命中的子组倍率。
+    planPromise.then((p) => listImageBackendGroupOptions({ plan: p.plan })),
+    planPromise.then((p) =>
+      getUserImageBackendPreference(user.id, p.plan)
+    ),
+    isContentModerationEnabled(),
+    planPromise.then((p) => getPlanCapabilitySnapshot(p.plan)),
     getRuntimeImageBaseCreditPricing(),
     getRuntimeSettingNumber(
       "IMAGE_FORCE_WEB_MIN_PIXELS",

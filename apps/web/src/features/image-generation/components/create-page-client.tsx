@@ -1412,12 +1412,6 @@ function insertMentionToken(
   return `${text.slice(0, mention.start)}${token} ${text.slice(mention.end)}`;
 }
 
-function yieldToBrowser() {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
-  });
-}
-
 function getCursorAfterInsertedMention(mention: MentionState, token: string) {
   return mention.start + token.length + 1;
 }
@@ -4355,17 +4349,56 @@ export function CreatePageClient({
         );
       };
 
-      const publishStreamState = async (next?: {
-        text?: string;
-        thinking?: string;
-        agent?: string;
-        agentEvents?: AgentRunEvent[];
-        imageUrl?: string;
-      }) => {
-        const state = buildStreamState(next);
+      // 流式增量提交:rAF 攒批。上游逐 delta(text/thinking/agent)推送可达每秒
+      // 上百次,若每个 delta 都同步 setState(chatStream + chatMessages 全量 map
+      // + 瀑布流卡片 map),流式期间主线程被打满、UI 卡顿。此处把提交合并到
+      // 每帧一次:rAF 已让出主线程,无需再 await yieldToBrowser(其 setTimeout(0)
+      // 自带 4ms 强制延迟,逐 delta await 会显著拖慢流式吞吐)。
+      // 语义:commit 始终读取最新的 text/thinking/agent/agentEvents/previewUrl,
+      // 攒批只丢"中间帧"不丢内容;调用点不再 await(publish 变为同步调度)。
+      let streamCommitHandle: number | null = null;
+      const commitStreamState = () => {
+        streamCommitHandle = null;
+        const state = buildStreamState({
+          text,
+          thinking,
+          agent,
+          agentEvents,
+          imageUrl: previewUrl,
+        });
         updateChatStream(state);
         syncAssistantStreamVariant(state);
-        await yieldToBrowser();
+        // 瀑布流卡片流式文本同帧合并提交:此前每个 delta 都全量 map 一次卡片数组。
+        if (streamCardId && (text || thinking || agent)) {
+          setBatchCards((prev) =>
+            prev.map((card) =>
+              card.id === streamCardId &&
+              (card.state === "loading" || card.state === "text")
+                ? {
+                    ...card,
+                    state: "text",
+                    ...(text ? { streamText: text } : {}),
+                    ...(thinking ? { streamThinking: thinking } : {}),
+                    ...(agent ? { streamAgent: agent } : {}),
+                  }
+                : card
+            )
+          );
+        }
+      };
+      const scheduleStreamCommit = () => {
+        if (streamCommitHandle !== null) return;
+        streamCommitHandle = window.requestAnimationFrame(commitStreamState);
+      };
+      const flushStreamCommit = () => {
+        if (streamCommitHandle !== null) {
+          window.cancelAnimationFrame(streamCommitHandle);
+          streamCommitHandle = null;
+        }
+        commitStreamState();
+      };
+      const publishStreamState = () => {
+        scheduleStreamCommit();
       };
 
       const contentType = response.headers.get("content-type") || "";
@@ -4419,69 +4452,18 @@ export function CreatePageClient({
           return;
         }
 
-        if (event.type === "text_delta") {
-          text += event.delta;
-          await publishStreamState({
-            text,
-            thinking,
-            agent,
-            agentEvents,
-            imageUrl: previewUrl,
-          });
-          if (streamCardId) {
-            setBatchCards((prev) =>
-              prev.map((card) =>
-                card.id === streamCardId &&
-                (card.state === "loading" || card.state === "text")
-                  ? { ...card, state: "text", streamText: text }
-                  : card
-              )
-            );
-          }
-          return;
-        }
-
-        if (event.type === "thinking_delta") {
-          thinking += event.delta;
-          await publishStreamState({
-            text,
-            thinking,
-            agent,
-            agentEvents,
-            imageUrl: previewUrl,
-          });
-          if (streamCardId) {
-            setBatchCards((prev) =>
-              prev.map((card) =>
-                card.id === streamCardId &&
-                (card.state === "loading" || card.state === "text")
-                  ? { ...card, streamThinking: thinking }
-                  : card
-              )
-            );
-          }
-          return;
-        }
-
-        if (event.type === "agent_delta") {
-          agent += event.delta;
-          await publishStreamState({
-            text,
-            thinking,
-            agent,
-            agentEvents,
-            imageUrl: previewUrl,
-          });
-          if (streamCardId) {
-            setBatchCards((prev) =>
-              prev.map((card) =>
-                card.id === streamCardId &&
-                (card.state === "loading" || card.state === "text")
-                  ? { ...card, streamAgent: agent }
-                  : card
-              )
-            );
-          }
+        // 三类纯文本 delta 只累积本地变量,统一由 rAF 攒批提交(见
+        // scheduleStreamCommit):每帧最多一次 setState,而不是每个 token
+        // 三次(chatStream + chatMessages + 瀑布流卡片全量 map)。
+        if (
+          event.type === "text_delta" ||
+          event.type === "thinking_delta" ||
+          event.type === "agent_delta"
+        ) {
+          if (event.type === "text_delta") text += event.delta;
+          else if (event.type === "thinking_delta") thinking += event.delta;
+          else agent += event.delta;
+          publishStreamState();
           return;
         }
 
@@ -4492,13 +4474,7 @@ export function CreatePageClient({
             previewUrl = eventImageUrl;
             setStreamingPreviewUrl(eventImageUrl);
           }
-          await publishStreamState({
-            text,
-            thinking,
-            agent,
-            agentEvents,
-            imageUrl: previewUrl,
-          });
+          publishStreamState();
           return;
         }
 
@@ -4525,13 +4501,7 @@ export function CreatePageClient({
             if (layeredGeneration && event.final) {
               layeredCompositePinned = true;
             }
-            await publishStreamState({
-              text,
-              thinking,
-              agent,
-              agentEvents,
-              imageUrl: previewUrl,
-            });
+            publishStreamState();
             if (streamCardId && updateMain) {
               setBatchCards((prev) =>
                 prev.map((card) =>
@@ -4567,9 +4537,13 @@ export function CreatePageClient({
       }
 
       if (buffer.trim()) await processBlock(buffer);
+      // 流结束:把攒批中的最后一帧同步刷出,避免结束时丢帧(随后上层会用最终
+      // completed 结果覆盖 stream 状态,此帧只保证过程展示完整)。
+      flushStreamCommit();
 
       const failedResult = failed as ImageApiResult | null;
       if (!response.ok || failedResult) {
+        flushStreamCommit();
         throw createRequestError(
           failedResult?.error || `API error: ${response.status}`,
           failedResult?.creditsConsumed

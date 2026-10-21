@@ -57,6 +57,8 @@ export default async function DashboardPage() {
   const isZh = locale === "zh";
   const copy = (en: string, zh: string) => (isZh ? zh : en);
 
+  // 依赖 plan 的第二组查询挂在 planPromise 链上与第一组并发,消除串行等待。
+  const planPromise = getUserPlan(userId);
   const [
     balanceData,
     recentGenerations,
@@ -64,6 +66,9 @@ export default async function DashboardPage() {
     timeZone,
     imageBasePricing,
     userPlanInfo,
+    capabilities,
+    backendGroups,
+    selectedBackendGroupId,
   ] = await Promise.all([
     db.query.creditsBalance.findFirst({
       where: eq(creditsBalance.userId, userId),
@@ -82,19 +87,18 @@ export default async function DashboardPage() {
       .where(eq(generation.userId, userId)),
     getAppTimeZone(),
     getRuntimeImageBaseCreditPricing(),
-    getUserPlan(userId),
+    planPromise,
+    planPromise.then((p) => getPlanCapabilitySnapshot(p.plan)),
+    planPromise.then((p) => listImageBackendGroupOptions({ plan: p.plan })),
+    planPromise.then((p) =>
+      getUserImageBackendPreference(userId, p.plan)
+    ),
   ]);
 
   const balance = formatCredits(balanceData?.balance ?? 0);
   const totalGenerations = totalGenerationsResult[0]?.count ?? 0;
   const normalizedImageBasePricing =
     getImageBaseCreditPricing(imageBasePricing);
-  const [capabilities, backendGroups, selectedBackendGroupId] =
-    await Promise.all([
-      getPlanCapabilitySnapshot(userPlanInfo.plan),
-      listImageBackendGroupOptions({ plan: userPlanInfo.plan }),
-      getUserImageBackendPreference(userId, userPlanInfo.plan),
-    ]);
   const activeBackendGroup =
     backendGroups.find((group) => group.id === selectedBackendGroupId) ||
     backendGroups.find((group) => group.isDefault) ||

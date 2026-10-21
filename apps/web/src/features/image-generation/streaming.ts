@@ -51,7 +51,7 @@ export type ImageStreamEvent =
         selectedImageMessageId?: string;
       };
       backendMember?: {
-        type: "api" | "account" | "adobe";
+        type: "api" | "account";
         id: string;
         groupId?: string | null;
         accountBackend?: "web" | "responses";
@@ -65,7 +65,7 @@ export type ImageStreamEvent =
       responsesPreviousResponse?: {
         responseId: string;
         backendMember: {
-          type: "api" | "account" | "adobe";
+          type: "api" | "account";
           id: string;
           groupId?: string | null;
           accountBackend?: "web" | "responses";

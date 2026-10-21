@@ -473,46 +473,41 @@ describe("always_active failure handling (resolveAlwaysActiveFailure)", () => {
 });
 
 // 注:account 不走 memberAllowedForPhase——其车道由自身 implementationMode 天然决定
-// (见 service.ts 账号过滤注释);此处 memberAllowedForPhase 仅用于 api/adobe(无固有类型)。
-describe("memberAllowedForPhase (api/adobe 按分组车道隔离)", () => {
+// (见 service.ts 账号过滤注释);此处 memberAllowedForPhase 仅用于 api(无固有类型)。
+describe("memberAllowedForPhase (api 按分组车道隔离)", () => {
   it("mixed 分组不限车道，任何偏好都参与（谁都可请求）", async () => {
     const svc = await loadService();
-    expect(svc.memberAllowedForPhase("mixed", "web", false)).toBe(true);
-    expect(svc.memberAllowedForPhase("mixed", "responses", false)).toBe(true);
-    expect(svc.memberAllowedForPhase("mixed", undefined, false)).toBe(true);
+    expect(svc.memberAllowedForPhase("mixed", "web")).toBe(true);
+    expect(svc.memberAllowedForPhase("mixed", "responses")).toBe(true);
+    expect(svc.memberAllowedForPhase("mixed", undefined)).toBe(true);
   });
 
-  it("web 分组的 adobe 仅在 web 偏好阶段参与", async () => {
+  it("web 分组的成员仅在 web 偏好阶段参与", async () => {
     const svc = await loadService();
-    expect(svc.memberAllowedForPhase("web", "web", false)).toBe(true);
-    expect(svc.memberAllowedForPhase("web", "responses", false)).toBe(false);
+    expect(svc.memberAllowedForPhase("web", "web")).toBe(true);
+    expect(svc.memberAllowedForPhase("web", "responses")).toBe(false);
   });
 
-  it("responses(codex)分组的 adobe 仅在 codex 阶段参与，web 偏求不再漏过来", async () => {
+  it("responses(codex)分组的成员仅在 codex 阶段参与，web 偏好不再漏过来", async () => {
     const svc = await loadService();
-    expect(svc.memberAllowedForPhase("responses", "responses", false)).toBe(
-      true
-    );
-    // 复现本次问题：web 偏好请求不应再漏到 codex 车道的 adobe（cFnHu 移到 codex 子组后）。
-    expect(svc.memberAllowedForPhase("responses", "web", false)).toBe(false);
+    expect(svc.memberAllowedForPhase("responses", "responses")).toBe(true);
+    // 复现本次问题：web 偏好请求不应再漏到 codex 车道的成员（cFnHu 移到 codex 子组后）。
+    expect(svc.memberAllowedForPhase("responses", "web")).toBe(false);
   });
 
-  it("firefly 请求或请求无偏好时不受车道限制", async () => {
+  it("请求无偏好时不受车道限制", async () => {
     const svc = await loadService();
-    expect(svc.memberAllowedForPhase("responses", "web", true)).toBe(true);
-    expect(svc.memberAllowedForPhase("web", undefined, false)).toBe(true);
+    expect(svc.memberAllowedForPhase("web", undefined)).toBe(true);
   });
 
   it("codex 阶段 codex/mixed 分组的 API 参与——阶段只看车道,不再被 responses 端点能力卡掉(回归)", async () => {
     const svc = await loadService();
     // 修复前 codex 阶段用 requiresResponsesEndpoint 把 images 端点 API 挡在门外;现在阶段
     // 参与纯由车道决定(端点能力是 requestKind 维度的独立筛选,见 api-interface-mode.test)。
-    expect(svc.memberAllowedForPhase("responses", "responses", false)).toBe(
-      true
-    );
-    expect(svc.memberAllowedForPhase("mixed", "responses", false)).toBe(true);
+    expect(svc.memberAllowedForPhase("responses", "responses")).toBe(true);
+    expect(svc.memberAllowedForPhase("mixed", "responses")).toBe(true);
     // web 分组的 API 不漏到 codex 阶段。
-    expect(svc.memberAllowedForPhase("web", "responses", false)).toBe(false);
+    expect(svc.memberAllowedForPhase("web", "responses")).toBe(false);
   });
 });
 
@@ -540,17 +535,6 @@ describe("isWebCapacityWaitCandidate (满并发短等候选判定)", () => {
     expect(
       svc.isWebCapacityWaitCandidate(
         { type: "account", alwaysActive: true },
-        "web",
-        true
-      )
-    ).toBe(false);
-  });
-
-  it("adobe 不在短等集(短等仅针对 web 账号 / web API)", async () => {
-    const svc = await loadService();
-    expect(
-      svc.isWebCapacityWaitCandidate(
-        { type: "adobe", alwaysActive: false },
         "web",
         true
       )

@@ -27,7 +27,6 @@ import {
   creditsTransaction,
   generation,
   imageBackendAccount,
-  imageBackendAdobe,
   imageBackendApi,
   imageBackendSchedulerMetric,
   ticket,
@@ -89,7 +88,7 @@ type GenerationMetricRow = {
 };
 
 const RESOLUTION_DURATION_BUCKETS = ["4k", "2k", "1k", "custom"] as const;
-const BACKEND_DURATION_BUCKETS = ["web", "codex", "images", "adobe"] as const;
+const BACKEND_DURATION_BUCKETS = ["web", "codex", "images"] as const;
 
 type ResolutionDurationBucket = (typeof RESOLUTION_DURATION_BUCKETS)[number];
 type BackendDurationBucket = (typeof BACKEND_DURATION_BUCKETS)[number];
@@ -446,7 +445,6 @@ function emptyDurationBreakdown(): DurationBreakdown {
     web: emptyDurationBucketStats(),
     codex: emptyDurationBucketStats(),
     images: emptyDurationBucketStats(),
-    adobe: emptyDurationBucketStats(),
   });
   return {
     "4k": makeRow(),
@@ -472,9 +470,9 @@ async function loadGenerationWindowStats(
   // 完成耗时(秒):clamp 非负 + round,对齐 JS 侧 Math.max(0, Math.round(...))。
   const durationExpr = sql`round(greatest(0, extract(epoch from (${generation.completedAt} - ${generation.createdAt}))))`;
   const completedDurationFilter = sql`filter (where ${generation.status} = 'completed' and ${generation.completedAt} is not null)`;
-  // 后端桶:先按 backend.type=pool-adobe 识别 Adobe,否则取 accountBackend ??
+  // 后端桶:取 accountBackend ??
   // imagesUpstreamMode ?? apiInterfaceMode 映射 web / responses->codex / images。
-  const backendBucketExpr = sql`(case when ${metaJson} #>> '{backend,type}' = 'pool-adobe' then 'adobe' else (case coalesce(${metaJson} #>> '{backend,accountBackend}', ${metaJson} #>> '{backend,imagesUpstreamMode}', ${metaJson} #>> '{backend,apiInterfaceMode}') when 'web' then 'web' when 'responses' then 'codex' when 'images' then 'images' else null end) end)`;
+  const backendBucketExpr = sql`(case coalesce(${metaJson} #>> '{backend,accountBackend}', ${metaJson} #>> '{backend,imagesUpstreamMode}', ${metaJson} #>> '{backend,apiInterfaceMode}') when 'web' then 'web' when 'responses' then 'codex' when 'images' then 'images' else null end)`;
   // 请求尺寸:requestedSize -> actualSize -> size 列,统一 lower(trim())。
   const sizeValueExpr = sql`lower(btrim(coalesce(nullif(${metaJson} #>> '{outputImage,requestedSize}', ''), nullif(${metaJson} #>> '{outputImage,actualSize}', ''), ${generation.size})))`;
   // 分辨率桶:web 统一 1k;空 / auto -> custom;否则匹配预设集,余 custom。
@@ -941,7 +939,6 @@ function resolutionDurationLabel(
 function backendDurationLabel(bucket: BackendDurationBucket) {
   if (bucket === "web") return "Web";
   if (bucket === "images") return "Images";
-  if (bucket === "adobe") return "Adobe";
   return "Codex";
 }
 
@@ -1385,7 +1382,6 @@ async function loadStatusData() {
     ticketRows,
     accountRows,
     apiRows,
-    adobeRows,
     schedulerRows24h,
     schedulerRows7d,
   ] = await Promise.all([
@@ -1577,16 +1573,6 @@ async function loadStatusData() {
       .from(imageBackendApi),
     db
       .select({
-        status: imageBackendAdobe.status,
-        isEnabled: imageBackendAdobe.isEnabled,
-        cooldownUntil: imageBackendAdobe.cooldownUntil,
-        successCount: imageBackendAdobe.successCount,
-        failCount: imageBackendAdobe.failCount,
-        mode: imageBackendAdobe.mode,
-      })
-      .from(imageBackendAdobe),
-    db
-      .select({
         selectedLayer: imageBackendSchedulerMetric.selectedLayer,
         selectCount:
           sql<number>`coalesce(sum(${imageBackendSchedulerMetric.selectCount}), 0)`.mapWith(
@@ -1727,7 +1713,6 @@ async function loadStatusData() {
     },
     accounts: summarizeBackendRows(accountRows),
     apis: summarizeBackendRows(apiRows),
-    adobe: summarizeBackendRows(adobeRows),
     scheduler24h: summarizeSchedulerMetrics(schedulerRows24h),
     scheduler7d: summarizeSchedulerMetrics(schedulerRows7d),
   };
@@ -1769,12 +1754,9 @@ export default async function GlobalStatusPage({
   ]);
   const generationTotals = data.generationTotals;
   const creditBalance = data.credits.balance;
-  const backendTotal =
-    data.accounts.total + data.apis.total + data.adobe.total;
-  const backendCooling =
-    data.accounts.cooling + data.apis.cooling + data.adobe.cooling;
-  const backendErrors =
-    data.accounts.error + data.apis.error + data.adobe.error;
+  const backendTotal = data.accounts.total + data.apis.total;
+  const backendCooling = data.accounts.cooling + data.apis.cooling;
+  const backendErrors = data.accounts.error + data.apis.error;
 
   return (
     <div className="container mx-auto space-y-8 px-4 py-6 md:px-6">
@@ -2094,11 +2076,6 @@ export default async function GlobalStatusPage({
               <BackendHealthBlock
                 title={copy(locale, "External APIs", "外接 API")}
                 stats={data.apis}
-                locale={locale}
-              />
-              <BackendHealthBlock
-                title={copy(locale, "Adobe Firefly", "Adobe Firefly")}
-                stats={data.adobe}
                 locale={locale}
               />
             </div>

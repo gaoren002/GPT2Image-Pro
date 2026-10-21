@@ -99,7 +99,6 @@ import {
   IMAGE_1K_BASE_EDGE,
   IMAGE_DIMENSION_STEP,
   getExactRatioImageSize,
-  isFireflyModel,
   MAX_IMAGE_DIMENSION,
   normalizeImageSize,
   normalizeValidImageSize,
@@ -1032,15 +1031,6 @@ const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp";
 const CHAT_FILE_ACCEPT =
   ".txt,.md,.markdown,.csv,.json,.jsonl,.yaml,.yml,.log,.xml,.html,.htm,.css,.js,.jsx,.ts,.tsx,.mjs,.cjs,.py,.java,.go,.rs,.c,.cc,.cpp,.h,.hpp,.sql,.sh,.toml,.ini,.env,.pdf,text/*,application/json,application/xml,application/pdf";
 const CHAT_ATTACHMENT_ACCEPT = `${IMAGE_ACCEPT},${CHAT_FILE_ACCEPT}`;
-// Adobe Firefly 模型族（按前缀自动路由到 adobe 后端；尺寸由后端按宽高比/分辨率映射）。
-// 选中 Firefly 模型时创作页隐藏 gpt 专属选项、改用 Firefly 宽高比预设。
-const FIREFLY_MODEL_OPTIONS = [
-  { value: "firefly-nano-banana-pro", label: "Firefly · Nano Banana Pro" },
-  { value: "firefly-nano-banana", label: "Firefly · Nano Banana" },
-  { value: "firefly-nano-banana2", label: "Firefly · Nano Banana 2" },
-  { value: "firefly-gpt-image-2", label: "Firefly · GPT Image 2" },
-  { value: "firefly-gpt-image-1.5", label: "Firefly · GPT Image 1.5" },
-] as const;
 const TEXT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
   { value: "gpt-image-2.5", label: "GPT Image 2.5" },
@@ -1049,13 +1039,8 @@ const TEXT_MODEL_OPTIONS = [
   { value: "gpt-image-2", label: "GPT Image 2" },
   { value: "gpt-image-1.5", label: "GPT Image 1.5" },
   { value: "gpt-image-1-mini", label: "GPT Image 1 Mini" },
-  ...FIREFLY_MODEL_OPTIONS,
 ] as const;
-// 对话生图/Agent 不提供 firefly:它走 Codex/Responses,与 Adobe 直连不兼容,服务端也会拒收
-// (见 /api/images/chat)。故 chat 图像模型下拉用去掉 firefly 的子集。
-const CHAT_IMAGE_MODEL_OPTIONS = TEXT_MODEL_OPTIONS.filter(
-  (option) => !option.value.startsWith("firefly-")
-);
+const CHAT_IMAGE_MODEL_OPTIONS = TEXT_MODEL_OPTIONS;
 const EDIT_MODEL_OPTIONS = [
   { value: "default", label: "Default" },
   { value: "gpt-image-2.5", label: "GPT Image 2.5" },
@@ -1064,7 +1049,6 @@ const EDIT_MODEL_OPTIONS = [
   { value: "gpt-image-2", label: "GPT Image 2" },
   { value: "gpt-image-1.5", label: "GPT Image 1.5" },
   { value: "gpt-image-1-mini", label: "GPT Image 1 Mini" },
-  ...FIREFLY_MODEL_OPTIONS,
 ] as const;
 
 const QUALITY_OPTIONS: Array<{ value: ImageQuality; label: string }> = [
@@ -3020,12 +3004,8 @@ export function CreatePageClient({
     return customEditSize;
   }, [customEditSize, firstImageOutputSize, useEditFirstImageSize]);
   const batchFallbackSize = hasChatImageAttachments ? chatCustomEditSize : size;
-  // 选 Firefly 模型时,gpt/codex 专属参数(质量/审核/输出格式/思考)对 adobe 无效,统一置灰禁用。
-  const textFireflyActive = isFireflyModel(textModel);
-  const editFireflyActive = isFireflyModel(editModel);
   const textMixWebFirstActive =
     canUseMixWebFirstRouting &&
-    !textFireflyActive &&
     shouldPreferWebImageRoute({
       size,
       webFirst: textMixWebFirst,
@@ -3033,7 +3013,6 @@ export function CreatePageClient({
     });
   const editMixWebFirstActive =
     canUseMixWebFirstRouting &&
-    !editFireflyActive &&
     Boolean(effectiveEditSize) &&
     shouldPreferWebImageRoute({
       size: effectiveEditSize,
@@ -3057,20 +3036,12 @@ export function CreatePageClient({
   const textBillingRoute = predictImageBillingRoute({
     selectedGroup: selectedBackendGroup,
     groups: backendGroups,
-    preferredBackendType: textFireflyActive
-      ? undefined
-      : textMixWebFirstActive
-        ? "web"
-        : "responses",
+    preferredBackendType: textMixWebFirstActive ? "web" : "responses",
   });
   const editBillingRoute = predictImageBillingRoute({
     selectedGroup: selectedBackendGroup,
     groups: backendGroups,
-    preferredBackendType: editFireflyActive
-      ? undefined
-      : editMixWebFirstActive
-        ? "web"
-        : "responses",
+    preferredBackendType: editMixWebFirstActive ? "web" : "responses",
   });
   const chatBillingRoute = predictImageBillingRoute({
     selectedGroup: selectedBackendGroup,
@@ -7889,8 +7860,7 @@ export function CreatePageClient({
                 </div>
               )}
 
-              {!isFireflyModel(textModel) && (
-                <div className="space-y-1.5">
+              <div className="space-y-1.5">
                   <label
                     htmlFor={`text-gpt-model-${mode}`}
                     className="text-xs font-medium text-muted-foreground"
@@ -7913,10 +7883,9 @@ export function CreatePageClient({
                       "仅用于平台 Web/Codex 后端池；默认会沿用后端配置，外接 image API 仍按图片模型请求。"
                     )}
                   </p>
-                </div>
-              )}
+              </div>
 
-              {showThinkingControls && !isFireflyModel(textModel) && (
+              {showThinkingControls && (
                 <div className="space-y-1.5">
                   <label
                     htmlFor={`text-thinking-${mode}`}
@@ -8040,7 +8009,7 @@ export function CreatePageClient({
                     onValueChange={(value) =>
                       setOutputFormat(value as ImageOutputFormat)
                     }
-                    disabled={modeBusy || disableResponsesOnlyControls || textFireflyActive}
+                    disabled={modeBusy || disableResponsesOnlyControls}
                   >
                     <SelectTrigger
                       id={`image-output-format-${mode}`}
@@ -8084,7 +8053,7 @@ export function CreatePageClient({
                           )
                         )
                       }
-                      disabled={modeBusy || disableResponsesOnlyControls || textFireflyActive}
+                      disabled={modeBusy || disableResponsesOnlyControls}
                       title={outputCompressionHelpText}
                     />
                   </div>
@@ -8120,7 +8089,7 @@ export function CreatePageClient({
                     onValueChange={(value) =>
                       setModeration(value as ImageModeration)
                     }
-                    disabled={modeBusy || disableResponsesOnlyControls || textFireflyActive}
+                    disabled={modeBusy || disableResponsesOnlyControls}
                   >
                     <SelectTrigger
                       id={`image-oai-moderation-${mode}`}
@@ -8849,7 +8818,7 @@ export function CreatePageClient({
                     <Select
                       value={editModel}
                       onValueChange={setEditModel}
-                      disabled={isEditing || editMixWebFirstActive || editFireflyActive}
+                      disabled={isEditing || editMixWebFirstActive}
                     >
                       <SelectTrigger
                         id="edit-model"
@@ -8869,8 +8838,7 @@ export function CreatePageClient({
                   </div>
                 )}
 
-                {!isFireflyModel(editModel) && (
-                  <div className="space-y-2">
+                <div className="space-y-2">
                     <label
                       htmlFor="edit-gpt-model"
                       className="text-sm font-medium text-foreground"
@@ -8893,10 +8861,9 @@ export function CreatePageClient({
                         "仅用于平台 Web/Codex 后端池；默认会沿用后端配置，外接 image API 仍按图片模型请求。"
                       )}
                     </p>
-                  </div>
-                )}
+                </div>
 
-                {showThinkingControls && !isFireflyModel(editModel) && (
+                {showThinkingControls && (
                   <div className="space-y-2">
                     <label
                       htmlFor="edit-thinking"
@@ -8986,7 +8953,7 @@ export function CreatePageClient({
                         onValueChange={(value) =>
                           setOutputFormat(value as ImageOutputFormat)
                         }
-                        disabled={isEditing || editMixWebFirstActive || editFireflyActive}
+                        disabled={isEditing || editMixWebFirstActive}
                       >
                         <SelectTrigger
                           id="edit-output-format"
@@ -9040,7 +9007,7 @@ export function CreatePageClient({
                               )
                             )
                           }
-                          disabled={isEditing || editMixWebFirstActive || editFireflyActive}
+                          disabled={isEditing || editMixWebFirstActive}
                           title={outputCompressionHelpText}
                         />
                       </div>
@@ -9096,7 +9063,7 @@ export function CreatePageClient({
                         onValueChange={(value) =>
                           setModeration(value as ImageModeration)
                         }
-                        disabled={isEditing || editMixWebFirstActive || editFireflyActive}
+                        disabled={isEditing || editMixWebFirstActive}
                       >
                         <SelectTrigger
                           id="edit-oai-moderation"

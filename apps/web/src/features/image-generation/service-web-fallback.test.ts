@@ -352,7 +352,6 @@ describe("image service Web-first fallback", () => {
   it.each([
     "gpt-image-2",
     "gpt-image-2.5-flare",
-    "firefly-nano-banana",
     "arbitrary-model",
   ])("纯 Web 的生成、编辑和聊天图片字段 %s 统一为 2.5", async (model) => {
     process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";

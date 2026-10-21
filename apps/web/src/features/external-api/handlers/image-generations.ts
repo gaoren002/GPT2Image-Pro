@@ -86,9 +86,6 @@ const externalImageGenerationSchema = z.object({
   forceWeb: z.boolean().optional(),
   web_first: z.boolean().optional(),
   webFirst: z.boolean().optional(),
-  // force_firefly：强制把本次请求路由到 adobe（firefly）后端，对任意模型生效。
-  force_firefly: z.boolean().optional(),
-  forceFirefly: z.boolean().optional(),
   // 高清修复:上游图偏小需超分时选模型。默认(含省略)=SwinIR(文字/结构复原最佳,较慢);
   // 显式 false=general-x4v3(轻量快)。仅在超分主开关开且触发超分时生效。
   hdRepair: z.boolean().optional(),
@@ -273,7 +270,6 @@ export const postExternalImageGenerations = withApiLogging(
         parsed.data.webFirst ??
         parsed.data.force_web ??
         parsed.data.forceWeb,
-      forceFirefly: parsed.data.forceFirefly ?? parsed.data.force_firefly,
       hdRepair: parsed.data.hdRepair ?? parsed.data.hd_repair,
     };
     const responseFormat = parsed.data.response_format || "b64_json";

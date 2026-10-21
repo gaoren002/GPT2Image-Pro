@@ -1,5 +1,5 @@
 /**
- * 目标主组的模型路由回归测试，覆盖纯 Web 固定图片型号、Firefly 标志与重试一致性。
+ * 目标主组的模型路由回归测试，覆盖纯 Web 固定图片型号与重试一致性。
  * 只验证纯策略，不依赖数据库、账号或租约。
  */
 import { describe, expect, it } from "vitest";
@@ -14,28 +14,19 @@ describe("pool model routing for the selected primary group", () => {
       undefined,
       "gpt-image-1.5",
       "gpt-image-2.5-flare",
-      "firefly-nano-banana",
       "custom-model",
     ]) {
-      for (const forceFirefly of [false, true]) {
-        expect(
-          resolvePoolModelRouting({
-            groupBackendType: "web",
-            requestKind,
-            requestedModel,
-            forceFirefly,
-          })
-        ).toEqual({
-          requestedModel: "gpt-image-2.5",
-          forceFirefly: false,
-          fireflyOnly: false,
-          excludeAdobeBackends: true,
-        });
-      }
+      expect(
+        resolvePoolModelRouting({
+          groupBackendType: "web",
+          requestKind,
+          requestedModel,
+        })
+      ).toEqual({ requestedModel: "gpt-image-2.5" });
     }
   });
 
-  it("preserves a Web chat text model while clearing Adobe routing", () => {
+  it("preserves a Web chat text model", () => {
     for (const requestedModel of [
       "gpt-5.5",
       "gpt-6-astra",
@@ -47,14 +38,8 @@ describe("pool model routing for the selected primary group", () => {
           groupBackendType: "web",
           requestKind: "chat",
           requestedModel,
-          forceFirefly: true,
         })
-      ).toEqual({
-        requestedModel,
-        forceFirefly: false,
-        fireflyOnly: false,
-        excludeAdobeBackends: true,
-      });
+      ).toEqual({ requestedModel });
     }
   });
 
@@ -68,63 +53,41 @@ describe("pool model routing for the selected primary group", () => {
   it.each([
     "mixed",
     "responses",
-  ] as const)("preserves model and explicit Adobe intent for a %s primary group", (groupBackendType) => {
+  ] as const)("preserves the requested model for a %s primary group", (groupBackendType) => {
     expect(
       resolvePoolModelRouting({
         groupBackendType,
         requestKind: "image_generation",
         requestedModel: "gpt-image-2.5-flare",
-        forceFirefly: true,
       })
-    ).toEqual({
-      requestedModel: "gpt-image-2.5-flare",
-      forceFirefly: true,
-      fireflyOnly: true,
-      excludeAdobeBackends: false,
-    });
+    ).toEqual({ requestedModel: "gpt-image-2.5-flare" });
     expect(
       resolvePoolModelRouting({
         groupBackendType,
         requestKind: "image_edit",
-        requestedModel: " Firefly-nano-banana ",
+        requestedModel: " custom-model ",
       })
-    ).toEqual({
-      requestedModel: " Firefly-nano-banana ",
-      forceFirefly: false,
-      fireflyOnly: true,
-      excludeAdobeBackends: false,
-    });
-    expect(
-      resolvePoolModelRouting({
-        groupBackendType,
-        requestKind: "chat",
-        requestedModel: "gpt-5.5",
-      }).fireflyOnly
-    ).toBe(false);
+    ).toEqual({ requestedModel: " custom-model " });
   });
 
   it("does not turn a mixed main group into fixed Web routing for a Web candidate", () => {
     const routing = resolvePoolModelRouting({
       groupBackendType: "mixed",
-      requestedModel: "firefly-gpt-image-2",
+      requestedModel: "gpt-image-2",
     });
-    expect(routing.requestedModel).toBe("firefly-gpt-image-2");
-    expect(routing.fireflyOnly).toBe(true);
-    expect(routing.excludeAdobeBackends).toBe(false);
+    expect(routing.requestedModel).toBe("gpt-image-2");
   });
 
   it("uses identical routing when stale selection or capacity waiting retries", () => {
     const first = resolvePoolModelRouting({
       groupBackendType: "web",
       requestKind: "image_edit",
-      requestedModel: "firefly-gpt-image-2",
-      forceFirefly: true,
+      requestedModel: "gpt-image-2",
     });
     const retried = resolvePoolModelRouting({
       groupBackendType: "web",
       requestKind: "image_edit",
       requestedModel: first.requestedModel,
-      forceFirefly: first.forceFirefly,
     });
     expect(retried).toEqual(first);
   });
@@ -136,6 +99,5 @@ describe("pool model routing for the selected primary group", () => {
       requestedModel: "gpt-6-astra",
     });
     expect(routing.requestedModel).toBe("gpt-6-astra");
-    expect(routing.fireflyOnly).toBe(false);
   });
 });

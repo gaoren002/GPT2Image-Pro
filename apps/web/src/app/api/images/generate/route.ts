@@ -60,9 +60,6 @@ const generateImageSchema = z.object({
   outputCompression: z.number().int().min(0).max(100).optional(),
   mixWebFirst: z.boolean().optional(),
   mix_web_first: z.boolean().optional(),
-  // force_firefly：强制把本次请求路由到 adobe（firefly）后端，对任意模型生效。
-  force_firefly: z.boolean().optional(),
-  forceFirefly: z.boolean().optional(),
   requiresResponsesBackend: z.boolean().optional(),
   requires_responses_backend: z.boolean().optional(),
   // 高清修复:上游图偏小需超分时选模型。默认(含省略)=SwinIR;显式 false=general-x4v3(快)。
@@ -154,7 +151,6 @@ export const POST = withApiLogging(async (request: NextRequest) => {
     requiresResponsesBackend:
       parsed.data.requiresResponsesBackend ??
       parsed.data.requires_responses_backend,
-    forceFirefly: parsed.data.forceFirefly ?? parsed.data.force_firefly,
     hdRepair: parsed.data.hdRepair ?? parsed.data.hd_repair,
   };
   const requestedGenerationIds =

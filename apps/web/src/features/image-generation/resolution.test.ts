@@ -42,7 +42,6 @@ describe("纯 Web 分组图片模型", () => {
     "",
     "gpt-image-2",
     "gpt-image-2.5-flare",
-    "firefly-nano-banana",
     "custom-image-model",
   ])("将 %s 统一为 2.5，不采用后端默认型号", (model) => {
     expect(getImageModelForGroup(model, "gpt-image-2", "web")).toBe(
@@ -57,9 +56,6 @@ describe("纯 Web 分组图片模型", () => {
   ] as const)("其他分组 %s 保留型号与校验", (group) => {
     expect(getImageModelForGroup("gpt-image-2", undefined, group)).toBe(
       "gpt-image-2"
-    );
-    expect(getImageModelForGroup("firefly-nano-banana", undefined, group)).toBe(
-      "firefly-nano-banana"
     );
     expect(
       getImageModelForGroup("custom-image-model", undefined, group)
@@ -284,7 +280,6 @@ describe("image model resolution", () => {
       "gpt-image-2.5-flare",
       "gpt-image-2.5-flare-2026-09-08",
       "gpt-image-2",
-      "firefly-gpt-image-2",
     ]) {
       expect(getUpstreamImageModel(model)).toBe(model);
     }

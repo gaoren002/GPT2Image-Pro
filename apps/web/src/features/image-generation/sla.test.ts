@@ -179,7 +179,7 @@ describe("generation SLA error classification", () => {
   });
 
   it("keeps non-Web (generic) timeouts as platform errors", () => {
-    // 通用超时（codex/responses 账号、外接 API、Adobe）仍算平台，不误归审核。
+    // 通用超时（codex/responses 账号、外接 API）仍算平台，不误归审核。
     expect(classifyGenerationError(IMAGE_GENERATION_TIMEOUT_ERROR)).toBe(
       "platform"
     );

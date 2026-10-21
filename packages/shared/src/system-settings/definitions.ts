@@ -152,7 +152,6 @@ export type SettingKey =
   | "CREDITS_RENEWAL_EXTENDS_EXPIRY"
   | "IMAGE_BASE_CREDITS_1024"
   | "IMAGE_BASE_CREDITS_4K"
-  | "IMAGE_MODEL_MULTIPLIERS"
   | "IMAGE_SUPER_RESOLUTION_ENABLED"
   | "IMAGE_RESTORATION_ENABLED"
   | "EDITABLE_FILE_PPT_CREDITS"
@@ -1446,15 +1445,6 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     min: 0,
     max: 100_000,
     defaultValue: 25,
-  },
-  {
-    key: "IMAGE_MODEL_MULTIPLIERS",
-    label: "图像模型族倍率",
-    description:
-      '按 firefly 图像模型族设置计费倍率的 JSON（family → 倍率，缺省/非正回退 1）。键为 firefly 图像族：gpt-image-2.5（含 sunburst/flare 变体）、gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro。例：{"gpt-image-2.5":2,"nano-banana-pro":1.5}。',
-    category: "credits",
-    valueType: "json",
-    exampleValue: '{"gpt-image-2": 1, "nano-banana-pro": 1.5}',
   },
   {
     key: "CREDIT_PACKAGE_MATRIX",

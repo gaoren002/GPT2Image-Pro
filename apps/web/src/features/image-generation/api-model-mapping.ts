@@ -1,14 +1,13 @@
 /**
  * API 后端出站模型映射（纯函数，DB-free）。
  *
- * 本站内部型号（gpt-image-2.5 / firefly-nano-banana-pro 等）与上游网关 id
+ * 本站内部型号（gpt-image-2.5 / nano-banana-pro 等）与上游网关 id
  * （如 gpt-image-2-ad / gemini-3.1-flash-image-preview-ad）往往不同；
  * 单字段 `model` 只作缺省，不能按请求改写。本模块把「本站 from → 上游 to」
  * 做成每条 API 可配的规则表，并支持按 quality 分档（高清走 gpt-image-2-high）。
  *
  * 使用方：image-generation 派发层、后台/用户 API 配置表单、测活。
  */
-import { pickAdobeFamilyFromModel } from "./adobe-sourced-firefly";
 
 export const API_MODEL_MAPPING_MAX_ENTRIES = 50;
 export const API_MODEL_MAPPING_FIELD_MAX = 120;
@@ -39,7 +38,7 @@ export type ApiModelMappingEntry = {
 const QUALITY_SET = new Set<string>(API_MODEL_MAPPING_QUALITIES);
 
 /**
- * GPT Image Adobe 兼容上游：普通档 gpt-image-2-ad，高清 gpt-image-2-high。
+ * -ad 后缀兼容上游预设：普通档 gpt-image-2-ad，高清 gpt-image-2-high。
  * 高清必须显式 quality=high，否则与普通档完全一致。
  */
 export const PRESET_GPT_IMAGE_ADOBE_MAPPING: ApiModelMappingEntry[] = [
@@ -105,7 +104,7 @@ function addKey(keys: string[], value: string) {
 }
 
 /**
- * 为一条请求型号生成匹配键：精确 id、去掉 firefly- 前缀、Adobe 家族、2.5 变体前缀。
+ * 为一条请求型号生成匹配键：精确 id、去掉 firefly- 前缀、2.5 变体前缀。
  * 顺序即优先级（越靠前越具体）。
  */
 export function collectApiModelMappingKeys(
@@ -115,8 +114,6 @@ export function collectApiModelMappingKeys(
   const normalized = normalizeKey(model);
   if (!normalized) return keys;
   addKey(keys, normalized);
-  const family = pickAdobeFamilyFromModel(normalized);
-  if (family) addKey(keys, family);
   if (normalized.startsWith("firefly-")) {
     addKey(keys, normalized.slice("firefly-".length));
   }

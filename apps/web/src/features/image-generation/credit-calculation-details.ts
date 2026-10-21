@@ -10,7 +10,6 @@ export type GenerationCreditDetails = {
   billingMultiplier: number;
   /** 倍率分量留痕（新记录才有；旧记录为 null，展示退回总倍率单行）。 */
   backendBillingMultiplier: number | null;
-  modelFamilyMultiplier: number | null;
   poolApiModelBillingMultiplier: number | null;
   poolApiModelBillingReplacesQuality: boolean | null;
   qualityBillingMultiplier: number | null;
@@ -159,7 +158,6 @@ export function extractGenerationCreditDetails(
     backendBillingMultiplier: readPositiveNumber(
       metadata.backendBillingMultiplier
     ),
-    modelFamilyMultiplier: readPositiveNumber(metadata.modelFamilyMultiplier),
     poolApiModelBillingMultiplier: readPositiveNumber(
       metadata.poolApiModelBillingMultiplier
     ),

@@ -4,9 +4,9 @@
  * 同一个上游 API 服务不同模型时成本差异可能很大（如 2.5 系贵于 2 系、
  * 改写后的 -gzs/-zx 变体另有定价）。本模块把「模型 id → 计费倍率」做成
  * 每个池 API 成员可配的表（存 metadata.modelBilling），在 operations.ts
- * 与组倍率、Adobe 模型族倍率叠乘：
+ * 与组倍率叠乘：
  *
- *   billingMultiplier = 后端池倍率 × 模型族倍率(firefly) × 模型倍率(本模块,仅 pool-api) × 质量倍率
+ *   billingMultiplier = 后端池倍率 × 模型倍率(本模块,仅 pool-api) × 质量倍率
  *
  * 值支持两种形态：
  * - 数字：该模型对所有质量档统一按此倍率（与成员级质量表叠乘）；
@@ -17,7 +17,7 @@
  * 匹配规则：【精确命中】。键与出站模型 id 全等（大小写敏感）才生效，
  * 不做前缀/族匹配——避免 gpt-image-2 误伤 gpt-image-2.5；要给改写变体
  * 定价就把改写后的完整 id 配成键。
- * 仅作用于 pool-api 成员（账号/Adobe 走各自倍率链，不读此表）。
+ * 仅作用于 pool-api 成员（账号不读此表）。
  */
 
 import { QUALITY_BILLING_LEVELS, type QualityBillingLevel } from "./quality-billing";

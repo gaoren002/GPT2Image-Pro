@@ -75,40 +75,6 @@ const schemaMock = vi.hoisted(() => {
       "createdAt",
       "updatedAt",
     ]),
-    imageBackendAdobe: table("image_backend_adobe", [
-      "id",
-      "groupId",
-      "name",
-      "baseUrl",
-      "apiKey",
-      "enabledModels",
-      "defaultRatio",
-      "defaultResolution",
-      "gptImageQuality",
-      "billingMultiplier",
-      "supportsVideo",
-      "contentSafetyEnabled",
-      "isEnabled",
-      "alwaysActive",
-      "priority",
-      "concurrency",
-      "failureCooldownEnabled",
-      "successCount",
-      "failCount",
-      "status",
-      "lastUsedAt",
-      "lastAcquiredAt",
-      "cooldownUntil",
-      "lastError",
-      "lastErrorAt",
-      "metadata",
-      "createdAt",
-      "updatedAt",
-    ]),
-    imageBackendAdobeGroup: table("image_backend_adobe_group", [
-      "adobeId",
-      "groupId",
-    ]),
     imageBackendGroup: table("image_backend_group", [
       "id",
       "name",
@@ -176,7 +142,6 @@ const dbMock = vi.hoisted(() => {
     groups: [] as Row[],
     accounts: [] as Row[],
     apis: [] as Row[],
-    adobes: [] as Row[],
     userPreferences: [] as Row[],
     externalApiKeys: [] as Row[],
     stickyBindings: [] as Row[],
@@ -202,8 +167,6 @@ const dbMock = vi.hoisted(() => {
         return state.accounts;
       case "image_backend_api":
         return state.apis;
-      case "image_backend_adobe":
-        return state.adobes;
       case "image_backend_group":
         return state.groups;
       case "image_backend_sticky_binding":
@@ -519,32 +482,6 @@ function makeAccount(index: number) {
   };
 }
 
-function makeAdobe(index: number, overrides: Row = {}) {
-  return {
-    matchedGroupId: "group-a",
-    id: `adobe-${index}`,
-    groupId: null,
-    name: `Adobe ${index}`,
-    mode: "direct",
-    baseUrl: "https://firefly.example.test",
-    apiKey: "adobe-key",
-    enabledModels: null,
-    defaultRatio: "1x1",
-    defaultResolution: "2k",
-    gptImageQuality: "high",
-    billingMultiplier: 1,
-    supportsVideo: false,
-    contentSafetyEnabled: true,
-    priority: 10,
-    concurrency: 10,
-    lastUsedAt: null,
-    lastAcquiredAt: null,
-    createdAt: new Date(2026, 0, index),
-    metadata: null,
-    ...overrides,
-  };
-}
-
 describe("image backend pool scheduler selection", () => {
   beforeEach(() => {
     resetImageBackendInflightForTests();
@@ -567,7 +504,6 @@ describe("image backend pool scheduler selection", () => {
       makeAccount(index + 1)
     );
     dbMock.state.apis = [];
-    dbMock.state.adobes = [];
     dbMock.state.userPreferences = [];
     dbMock.state.externalApiKeys = [];
     dbMock.state.stickyBindings = [];
@@ -1124,8 +1060,6 @@ describe("image backend pool scheduler selection", () => {
         chatCompletionsUpstreamMode: "responses",
         imageUpstreamMode: "responses",
         useStream: false,
-        adobeSourced: false,
-        billingMultiplier: 1,
         contentSafetyEnabled: true,
         alwaysActive: false,
         priority: 1,
@@ -1623,126 +1557,4 @@ describe("image backend pool scheduler selection", () => {
     });
   });
 
-  // adobe 作为特殊 firefly account 成员参与分组调度的路由语义。
-  describe("adobe firefly group-based routing", () => {
-    beforeEach(() => {
-      // 用 responses 分组：responses 账号与 adobe 同组,普通 image_generation 请求两者皆候选。
-      dbMock.state.accounts = [makeAccount(1)];
-      dbMock.state.adobes = [makeAdobe(1)];
-    });
-
-    it("普通图像请求同组含 adobe 与 account 时,二者都是候选(adobe 不被排除)", async () => {
-      // account priority=10、adobe priority=10 同层；两者同 createdAt 排序,account 在前
-      // (apiMembers→accountMembers→adobeMembers 拼接顺序),故首选 account,但 adobe 仍在候选池。
-      const first = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-      });
-      const second = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-      });
-
-      const picked = [first, second].map(
-        (r) => `${r?.memberType}:${r?.memberId}`
-      );
-      // 两个候选都被选中(并发各 1),证明 adobe 与 account 同池参与,adobe 未被排除。
-      expect(picked).toContain("account:acct-1");
-      expect(picked).toContain("adobe:adobe-1");
-    });
-
-    it("低优先级 adobe 仅作兜底:account 优先,account 饱和后才落 adobe", async () => {
-      dbMock.state.accounts = [
-        { ...makeAccount(1), priority: 1, concurrency: 1 },
-      ];
-      dbMock.state.adobes = [makeAdobe(1, { priority: 50 })];
-
-      const first = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-      });
-      const second = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-      });
-
-      expect(first?.memberType).toBe("account");
-      expect(first?.memberId).toBe("acct-1");
-      // account 并发饱和后,低优先级 adobe 兜底入选。
-      expect(second?.memberType).toBe("adobe");
-      expect(second?.memberId).toBe("adobe-1");
-    });
-
-    it("force_firefly 时只有 adobe 是候选(account 被排除)", async () => {
-      dbMock.state.accounts = [{ ...makeAccount(1), priority: 1 }];
-      dbMock.state.adobes = [makeAdobe(1, { priority: 50 })];
-
-      const result = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-        forceFirefly: true,
-      });
-
-      expect(result?.memberType).toBe("adobe");
-      expect(result?.memberId).toBe("adobe-1");
-    });
-
-    it("force_firefly 但同组无 adobe 时无可用后端(不回落 account)", async () => {
-      dbMock.state.accounts = [makeAccount(1)];
-      dbMock.state.adobes = [];
-
-      await expect(
-        resolveImageBackendPoolConfig({
-          userId: "user-a",
-          requestKind: "image_generation",
-          forceFirefly: true,
-        })
-      ).resolves.toBeNull();
-    });
-
-    it("firefly-* 模型只有 adobe 是候选(account 被排除)", async () => {
-      dbMock.state.accounts = [{ ...makeAccount(1), priority: 1 }];
-      dbMock.state.adobes = [makeAdobe(1, { priority: 50 })];
-
-      const result = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-        requestedModel: "firefly-nano-banana-pro",
-      });
-
-      expect(result?.memberType).toBe("adobe");
-      expect(result?.memberId).toBe("adobe-1");
-    });
-
-    it("把 fireflyOnly 盖在解析结果 config 上(供换号重试保持只走 Adobe)", async () => {
-      dbMock.state.accounts = [{ ...makeAccount(1), priority: 1 }];
-      dbMock.state.adobes = [makeAdobe(1, { priority: 50 })];
-
-      // firefly-* 模型:fireflyOnly 盖 true,且只选到 adobe。
-      const firefly = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-        requestedModel: "firefly-nano-banana-pro",
-      });
-      expect(firefly?.memberType).toBe("adobe");
-      expect(firefly?.config.backend?.fireflyOnly).toBe(true);
-
-      // force_firefly 同样盖 true。
-      const forced = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-        forceFirefly: true,
-      });
-      expect(forced?.config.backend?.fireflyOnly).toBe(true);
-
-      // 普通请求不盖(undefined/false)。
-      dbMock.state.accounts = [makeAccount(1)];
-      dbMock.state.adobes = [];
-      const normal = await resolveImageBackendPoolConfig({
-        userId: "user-a",
-        requestKind: "image_generation",
-      });
-      expect(normal?.config.backend?.fireflyOnly).toBeFalsy();
-    });
-  });
 });

@@ -50,10 +50,10 @@ const DEFAULT_LABELS: ApiModelMappingEditorLabels = {
   setQuality: "出站质量",
   anyQuality: "任意",
   add: "添加映射",
-  presetAdobe: "填入 Adobe GPT Image 预设",
+  presetAdobe: "填入 GPT Image -ad 预设",
   presetGemini: "填入 Gemini 预设",
   presetHint:
-    "Adobe 渠道令牌只能调 gpt-image-2-ad / gpt-image-2-high；Gemini 渠道只能调 gemini-*-ad，且不要走 /v1/images/*。",
+    "-ad 后缀上游令牌只能调 gpt-image-2-ad / gpt-image-2-high；Gemini 渠道只能调 gemini-*-ad，且不要走 /v1/images/*。",
 };
 
 function qualitySelectValue(

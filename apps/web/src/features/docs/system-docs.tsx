@@ -122,11 +122,6 @@ const sections = {
             "chat / agent / responses 走 Responses 语义（image_generation 工具循环、多轮）。普通图像生成与图生图改走该账号的 /images/generations、/images/edits 直连端点（同一 OAuth 凭据，JSON 体、size 走顶层；图生图的输入图/mask 以 base64 data URL 放在 images[].image_url / mask.image_url），以确定性遵循 size 等尺寸参数；Codex 托管的 image_generation 工具不尊重 size，故纯生成/编辑不再用它（codex images 端点要 JSON,不接受 multipart）。即便上游返回尺寸偏小，最终图也会经自动超分校准补足到目标分辨率（见下「分辨率超分与高清修复」），故 Web/Codex 出图同样支持接近 4K 的目标尺寸。",
         },
         {
-          title: "Adobe（Firefly）账号池",
-          description:
-            "在非纯 Web 主组中，作为特殊成员按 priority 挂入分组同池调度，触发于：① 模型名以 firefly- 开头（显式选族）；② 请求带 force_firefly:true（强制）；③ 普通请求兜底——仅当 Adobe 挂在该分组、且组内 web/codex/api 限流、耗尽或可切换失败时，按 Adobe 的 priority（越大越靠后）轮到它。命中后把标准请求兼容转换成 Firefly 格式（默认族 gpt-image-2、size→比例/分辨率、quality→detailLevel、图生图 referenceBlobs），不支持的参数静默忽略。",
-        },
-        {
           title: "外接 API 后端",
           description:
             "管理员配置的 OpenAI 兼容 Base URL/API Key；按当前请求类型调用 images 或 responses 端点。",
@@ -303,8 +298,7 @@ const sections = {
         "用户已启用“接入其他站 API”时，普通 /v1/chat/completions、/v1/images/generations、/v1/images/edits 和 /v1/responses 仍优先使用用户自接 API；命中时 credits_consumed 为 0，不扣本站余额，也不增加本站 API Key 已用额度。",
         "/v1/agents/images 和需要 Codex/Responses 能力的页面功能会忽略用户自接 API，按平台后端池或外接后端池结算本站积分。",
         "image 接口的 web_first / webFirst / force_web / forceWeb（chat 对应 mix_web_first）是 Web-first 优先路由，不是硬性只走 Web，且默认开启。开启时（不传或显式 true）按 Web-first 像素区间（IMAGE_FORCE_WEB_MIN_PIXELS / IMAGE_FORCE_WEB_MAX_PIXELS，默认 0.66MP-2MP）判定：尺寸落在区间内才优先 Web、失败回退 Codex/Responses，超出区间（如 4K）则走正常调度；auto 或无法解析的尺寸视为可优先 Web。显式传 false 则不优先 Web。该路由只对 mixed 后端分组生效（纯 Web / 纯 Codex-Responses 分组无此概念），不会覆盖用户自接 API；agent 始终走 Codex/Responses，不受此项影响。",
-        "进入平台池后，纯 Web 主组的图片请求接受任意图片别名并统一使用 gpt-image-2.5，force_firefly 不覆盖此规则，Adobe 与 Adobe 来源 API 均不参与调度。其他主组保留原模型规则；Chat/Responses 顶层文本模型白名单与套餐权限不变。",
-        "Adobe（Firefly）后端：在非纯 Web 主组中，作为特殊成员按 priority 挂入分组同池调度——firefly-* 模型或 force_firefly=true 会把候选收敛到仅 Adobe；普通请求则只有当组内 web/codex/api 限流/耗尽/可切换失败时才兜底到 Adobe（取决于 Adobe 是否在该组及其优先级，priority 越大越靠后）。是否进 Adobe、计费倍率均随 admin「Adobe 后端」tab 配置变化。图像计费 = 尺寸基础积分 × 模型族倍率 × Adobe 后端倍率 × 分组倍率；视频计费见 /v1/videos/generations。路由兜底详见 /docs/adobe-firefly-routing，兼容转换（站内参数→Adobe 字段、被忽略参数、算例）详见 /docs/adobe-firefly-compat。",
+        "进入平台池后，纯 Web 主组的图片请求接受任意图片别名并统一使用 gpt-image-2.5。其他主组保留原模型规则；Chat/Responses 顶层文本模型白名单与套餐权限不变。",
         "异步任务（async）：body async:true 或 URL ?async=true（等价、不能与 stream 同用）会立即返回 task_... 任务，需用 GET /v1/images/{task_id} 轮询；task_... 为进程内内存对象，30 分钟后过期，服务重启或多实例切换即无法再查询。若需持久查询，改用响应里的 generation_id（gen_...）作为 GET /v1/images/{id} 的路径参数——它从数据库取回，跨重启/多实例都可查（同步请求也可用此方式按 generation_id 复查）。callback_url 是可选的完成回调 webhook——任务结束时服务端把任务对象 POST 到该公网地址，已发出的回调不受过期/重启影响。",
       ],
       officialRefsTitle: "官方参考",
@@ -325,14 +319,6 @@ const sections = {
           label: "Models API",
           href: "https://developers.openai.com/api/reference/resources/models/methods/list",
         },
-        {
-          label: "Adobe 路由与兜底调度",
-          href: "/docs/adobe-firefly-routing",
-        },
-        {
-          label: "Adobe 兼容转换",
-          href: "/docs/adobe-firefly-compat",
-        },
       ],
       fieldHeaders: ["字段", "要求", "说明"],
       responseHeaders: ["返回字段", "说明"],
@@ -347,7 +333,7 @@ const sections = {
           path: "/v1/models",
           contentType: "无请求体",
           description:
-            "兼容 OpenAI List models，列出当前 API Key 所属用户可见的图片模型与 Responses 模型：默认图片模型 gpt-image-2.5、gpt-image-2.5-sunburst、gpt-image-2.5-flare、兼容图片模型 gpt-image-2、Adobe Firefly 图像族 id、Firefly 视频模型 id（均受 externalApi.images.generate 门控，未开启不列出），以及当前套餐可用的 Chat/Responses 模型。",
+            "兼容 OpenAI List models，列出当前 API Key 所属用户可见的图片模型与 Responses 模型：默认图片模型 gpt-image-2.5、gpt-image-2.5-sunburst、gpt-image-2.5-flare、兼容图片模型 gpt-image-2（均受 externalApi.images.generate 门控，未开启不列出），以及当前套餐可用的 Chat/Responses 模型。",
           example: `curl https://gpt2image.superapi.buzz/v1/models \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY"`,
           responseExample: `{
@@ -394,7 +380,7 @@ const sections = {
             {
               name: "data[].id",
               description:
-                "模型 ID。包含默认图片模型 gpt-image-2.5、gpt-image-2.5-sunburst、gpt-image-2.5-flare、兼容图片模型 gpt-image-2、Adobe Firefly 图像族 id 与 Firefly 视频模型 id（受 externalApi.images.generate 门控），以及当前套餐可用的 Chat/Responses 模型。",
+                "模型 ID。包含默认图片模型 gpt-image-2.5、gpt-image-2.5-sunburst、gpt-image-2.5-flare、兼容图片模型 gpt-image-2（受 externalApi.images.generate 门控），以及当前套餐可用的 Chat/Responses 模型。",
             },
             {
               name: "data[].object / created / owned_by",
@@ -404,7 +390,7 @@ const sections = {
           notes: [
             "本站当前只实现模型列表，不实现 /v1/models/{model} 详情。",
             "gpt-image-2.5 是本站默认别名，出站映射为 gpt-image-2.5-sunburst；也可显式选择 gpt-image-2.5-flare。gpt-image-2 保留为兼容选项。",
-            "返回模型按套餐能力过滤：Firefly 图像/视频需 externalApi.images.generate（入门版+）；Chat 和 Responses 模型分别需对应接口能力。普通套餐的文本模型仅 gpt-5.5；models.premium 默认向旗舰版及以上开放 gpt-6-astra、gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna。免费版模型列表仅含图片模型。",
+            "返回模型按套餐能力过滤：图片模型需 externalApi.images.generate（入门版+）；Chat 和 Responses 模型分别需对应接口能力。普通套餐的文本模型仅 gpt-5.5；models.premium 默认向旗舰版及以上开放 gpt-6-astra、gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna。免费版模型列表仅含图片模型。",
           ],
         },
         {
@@ -1031,14 +1017,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               name: "model",
               requirement: "可选",
               description:
-                "图片模型：纯 Web 主组接受任意图片别名（含旧版、Sunburst、Flare 和 firefly-*），统一使用 gpt-image-2.5；不改变 Chat/Responses 顶层文本模型白名单与套餐权限。其他分组默认 gpt-image-2.5（API/Codex 出站映射为 gpt-image-2.5-sunburst），可显式选择 Flare 或 gpt-image-2，并接受 gpt-image-* 类图片模型（gpt-image-2.5-sunburst / gpt-image-2.5-flare 支持 xhigh/max 质量档）；也接受 Adobe Firefly 模型 id（firefly-<family>-<resolution>-<ratio>，如 firefly-nano-banana-pro-2k-16x9，或只写族名如 firefly-gpt-image-2），在非纯 Web 主组中路由到 Adobe（含 Adobe 来源 API）后端。family ∈ gpt-image-2、gpt-image-1.5、nano-banana、nano-banana2、nano-banana-pro；resolution ∈ 1k、2k、4k；ratio ∈ 1x1、16x9、9x16、4x3、3x4。Responses 对话模型请使用 /v1/responses。",
-            },
-            {
-              name: "force_firefly / forceFirefly",
-              requirement: "可选",
-              custom: true,
-              description:
-                "本站扩展：纯 Web 主组忽略此标志，图片仍统一使用 GPT Image 2.5；其他分组中 true 时把候选收敛到 Adobe（含 Adobe 来源 API）后端，使用标准参数（你的 prompt/size/quality/model）。未传 firefly-* 模型时默认族为 gpt-image-2；size 映射到 firefly 宽高比/分辨率（长边≤1024→1k、≤2048→2k、否则 4k），quality 的 low/medium/high→detailLevel 1/3/5、auto→后端 gpt_image_quality；不支持的参数（output_format、background、thinking、moderation 等级、output_compression）静默忽略。完整映射表与算例见 /docs/adobe-firefly-compat。",
+                "图片模型：纯 Web 主组接受任意图片别名（含旧版、Sunburst、Flare），统一使用 gpt-image-2.5；不改变 Chat/Responses 顶层文本模型白名单与套餐权限。其他分组默认 gpt-image-2.5（API/Codex 出站映射为 gpt-image-2.5-sunburst），可显式选择 Flare 或 gpt-image-2，并接受 gpt-image-* 类图片模型（gpt-image-2.5-sunburst / gpt-image-2.5-flare 支持 xhigh/max 质量档）。Responses 对话模型请使用 /v1/responses。",
             },
             {
               name: "n",
@@ -1355,14 +1334,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               name: "model",
               requirement: "可选",
               description:
-                "图片模型：纯 Web 主组接受任意图片别名并统一使用 gpt-image-2.5；不改变 Chat/Responses 顶层文本模型白名单与套餐权限。其他分组默认 gpt-image-2.5（API/Codex 出站映射为 gpt-image-2.5-sunburst），可显式选择 Flare 或 gpt-image-2，需为 gpt-image-* 类图片模型；也接受 Adobe Firefly 模型 id（firefly-<family>-<resolution>-<ratio>，或只写族名如 firefly-gpt-image-2），在非纯 Web 主组中路由到 Adobe（含 Adobe 来源 API）后端。取值范围同 /v1/images/generations。",
-            },
-            {
-              name: "force_firefly / forceFirefly",
-              requirement: "可选",
-              custom: true,
-              description:
-                "本站扩展：纯 Web 主组忽略此标志，图片仍统一使用 GPT Image 2.5；其他分组中 true 时把候选收敛到 Adobe（含 Adobe 来源 API）后端，使用标准参数。未传 firefly-* 模型时默认族为 gpt-image-2；size 映射 firefly 宽高比/分辨率，quality low/medium/high→detailLevel 1/3/5；不支持的参数静默忽略。详见 /v1/images/generations 与 /docs/adobe-firefly-compat。",
+                "图片模型：纯 Web 主组接受任意图片别名并统一使用 gpt-image-2.5；不改变 Chat/Responses 顶层文本模型白名单与套餐权限。其他分组默认 gpt-image-2.5（API/Codex 出站映射为 gpt-image-2.5-sunburst），可显式选择 Flare 或 gpt-image-2，需为 gpt-image-* 类图片模型。取值范围同 /v1/images/generations。",
             },
             {
               name: "n",
@@ -2128,7 +2100,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       description:
         "走 ChatGPT 网页生图能力，适合复用 Web 账号额度，但不是严格参数化的 Images/Responses API。",
       valid: [
-        "纯 Web 主组接受任意图片别名并固定使用 gpt-image-2.5，包含旧版、Sunburst、Flare 和 firefly-*；force_firefly 不覆盖此规则，Adobe 与 Adobe 来源 API 均不参与该主组调度。混合分组仍保留 Web 优先调度。",
+        "纯 Web 主组接受任意图片别名并固定使用 gpt-image-2.5，包含旧版、Sunburst 和 Flare。混合分组仍保留 Web 优先调度。",
         "**分辨率不可严格控制；size 只能作为提示/记录参考，不能保证按请求尺寸输出。**",
         "**不能保证 4K 输出；是否出高分辨率取决于 ChatGPT Web 当前能力和账号状态。**",
         "可控制主 GPT 对话模型和 Web 思考强度。",
@@ -2156,20 +2128,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       invalid: [
         "不是 ChatGPT Web，不支持 Web 专属能力或 Web 额度语义。",
         "账号限流、额度不足、凭据失效时，调度器会冷却/标错并尝试轮换。",
-      ],
-    },
-    adobe: {
-      title: "Adobe（Firefly）账号",
-      description:
-        "直连 Adobe Firefly 的自管账号/token 池，作为特殊成员按 priority 挂入分组兜底。",
-      valid: [
-        "**分辨率只接受 1k / 2k / 4k 三档，不是任意像素分辨率；传入的 size 会被映射到最近的比例（1x1/16x9/9x16/4x3/3x4）与最近的档位（长边 ≤1024→1k、≤2048→2k、否则 4k）。**",
-        "非纯 Web 主组中，firefly-* 模型或 force_firefly 会强制走 Adobe（含 Adobe 来源 API）；命中后把标准请求兼容转换成 Firefly 格式（默认族 gpt-image-2、quality→detailLevel、图生图用 referenceBlobs）。",
-        "自管账号/token 池，作为特殊成员按 priority 挂入分组兜底。",
-      ],
-      invalid: [
-        "不支持的参数会被静默忽略，不报错。",
-        "无法严格按任意像素尺寸输出；只能落到 1k/2k/4k 三档之一。",
       ],
     },
     api: {
@@ -2323,11 +2281,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           title: "Codex/Responses Pool",
           description:
             "chat / agent / responses use Responses semantics (image_generation tool loop, multi-round). Plain image generation and image edits instead route to that account's direct /images/generations and /images/edits endpoints (same OAuth credential, JSON body, size at the top level; image-to-image input/mask passed as base64 data URLs in images[].image_url / mask.image_url) to deterministically honor size — the Codex-hosted image_generation tool ignores size, so plain generation/edit no longer uses it (the codex images endpoints take JSON, not multipart). Even when the upstream returns a smaller image, the final image is auto-upscaled to the target resolution (see 'Super-Resolution And HD Repair' below), so Web/Codex output likewise supports near-4K target sizes.",
-        },
-        {
-          title: "Adobe (Firefly) Pool",
-          description:
-            "In groups whose primary type is not Web-only, joins as a special member scheduled by priority. It is reached when: (1) the model name starts with firefly- (explicit family); (2) the request carries force_firefly:true (forced); or (3) as an ordinary-request fallback — only when Adobe is attached to that group and the group's web/codex/api members are rate-limited, exhausted, or fail with a switchable error, so Adobe is reached by its priority (larger = later). On a hit the standard request is compat-converted into Firefly format (default family gpt-image-2, size to ratio/resolution, quality to detailLevel, image-to-image referenceBlobs); unsupported parameters are silently ignored.",
         },
         {
           title: "External API Backend",
@@ -2516,8 +2469,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
         "If the user has enabled a custom upstream API, ordinary /v1/chat/completions, /v1/images/generations, /v1/images/edits, and /v1/responses still use that custom API first. When it wins, credits_consumed is 0 and GPT2IMAGE does not charge account credits or API key quota.",
         "/v1/agents/images and page features that require Codex/Responses capability ignore user custom API and are billed through the platform or external backend pool.",
         "Image endpoint web_first / webFirst / force_web / forceWeb (chat: mix_web_first) is a Web-first preference route, not hard Web-only, and is on by default. When on (omitted or explicit true) it uses the Web-first pixel range (IMAGE_FORCE_WEB_MIN_PIXELS / IMAGE_FORCE_WEB_MAX_PIXELS, default 0.66MP-2MP): only sizes inside the range prefer Web (fall back to Codex/Responses on failure), sizes outside (e.g. 4K) use normal scheduling, auto or unparseable sizes may prefer Web; explicit false disables it. It only applies to mixed backend groups (no effect for Web-only / Codex-Responses-only groups) and never overrides user custom API; agent always uses Codex/Responses and is unaffected.",
-        "Within the platform pool, a Web-only primary group accepts any image alias and always uses gpt-image-2.5. force_firefly cannot override this rule, and Adobe and Adobe-sourced APIs are excluded. Other primary groups retain their model rules; the Chat/Responses top-level text-model allowlist and plan permissions remain unchanged.",
-        "Adobe (Firefly) backend: in groups whose primary type is not Web-only, it joins as a special pool member ranked by priority. A firefly-* model or force_firefly=true narrows candidates to Adobe only; ordinary requests only fall back to Adobe once the group's web/codex/api members are rate-limited, exhausted, or fail with a switchable error (and only if Adobe is in that group — the larger its priority, the later it is tried). Whether a request reaches Adobe and its billing multiplier follow the admin 'Adobe backend' tab config. Image billing = size base credits × model-family multiplier × Adobe backend multiplier × group multiplier; see /v1/videos/generations for video billing. Routing/fallback: /docs/adobe-firefly-routing; compatibility conversion (in-app params → Adobe fields, ignored params, worked example): /docs/adobe-firefly-compat.",
+        "Within the platform pool, a Web-only primary group accepts any image alias and always uses gpt-image-2.5. Other primary groups retain their model rules; the Chat/Responses top-level text-model allowlist and plan permissions remain unchanged.",
         "Async tasks (async): body async:true or URL ?async=true (equivalent, and cannot be combined with stream) returns a task_... object immediately; poll GET /v1/images/{task_id} for the result. Tasks are in-memory objects that expire after 30 minutes and become unavailable after a restart or multi-instance switch. For persistent lookups, use the generation_id (gen_...) from the response as the GET /v1/images/{id} path parameter — it is read from the DB and survives restarts / multi-instance switches (sync requests can re-query by generation_id this way too). callback_url is an optional completion webhook — when the task finishes the server POSTs the task object to that public URL, and an already-sent callback is unaffected by expiry or restart.",
       ],
       officialRefsTitle: "Official References",
@@ -2538,14 +2490,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           label: "Models API",
           href: "https://developers.openai.com/api/reference/resources/models/methods/list",
         },
-        {
-          label: "Adobe routing and fallback scheduling",
-          href: "/docs/adobe-firefly-routing",
-        },
-        {
-          label: "Adobe compatibility conversion",
-          href: "/docs/adobe-firefly-compat",
-        },
       ],
       fieldHeaders: ["Field", "Requirement", "Notes"],
       responseHeaders: ["Response field", "Notes"],
@@ -2560,7 +2504,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           path: "/v1/models",
           contentType: "No request body",
           description:
-            "Compatible with OpenAI List models. Lists the image and Responses models visible to the current API key's user: the default image model gpt-image-2.5, gpt-image-2.5-sunburst, gpt-image-2.5-flare, the legacy image model gpt-image-2, Adobe Firefly image-family ids and Firefly video model ids (gated by externalApi.images.generate, omitted when disabled), plus the Chat/Responses models available to the plan.",
+            "Compatible with OpenAI List models. Lists the image and Responses models visible to the current API key's user: the default image model gpt-image-2.5, gpt-image-2.5-sunburst, gpt-image-2.5-flare, and the legacy image model gpt-image-2 (gated by externalApi.images.generate, omitted when disabled), plus the Chat/Responses models available to the plan.",
           example: `curl https://gpt2image.superapi.buzz/v1/models \\
   -H "Authorization: Bearer $GPT2IMAGE_API_KEY"`,
           responseExample: `{
@@ -2607,7 +2551,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
             {
               name: "data[].id",
               description:
-                "Model ID. Includes the default image model gpt-image-2.5, gpt-image-2.5-sunburst, gpt-image-2.5-flare, the legacy image model gpt-image-2, Adobe Firefly image-family ids and Firefly video model ids (gated by externalApi.images.generate), plus the Chat/Responses models available to the current plan.",
+                "Model ID. Includes the default image model gpt-image-2.5, gpt-image-2.5-sunburst, gpt-image-2.5-flare, and the legacy image model gpt-image-2 (gated by externalApi.images.generate), plus the Chat/Responses models available to the current plan.",
             },
             {
               name: "data[].object / created / owned_by",
@@ -2617,7 +2561,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           notes: [
             "Only model listing is implemented; /v1/models/{model} is not implemented.",
             "gpt-image-2.5 is the GPT2IMAGE default alias and maps to gpt-image-2.5-sunburst upstream. Select gpt-image-2.5-flare explicitly for Flare; gpt-image-2 remains available for compatibility.",
-            "Returned models are filtered by plan capability: Firefly image/video need externalApi.images.generate (Starter+); Chat and Responses models require their respective API capabilities. Standard plans have only gpt-5.5 for text; models.premium adds gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, and gpt-5.6-luna for Ultra and above by default. Free users see only image models.",
+            "Returned models are filtered by plan capability: image models need externalApi.images.generate (Starter+); Chat and Responses models require their respective API capabilities. Standard plans have only gpt-5.5 for text; models.premium adds gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, and gpt-5.6-luna for Ultra and above by default. Free users see only image models.",
           ],
         },
         {
@@ -3104,14 +3048,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               name: "model",
               requirement: "Optional",
               description:
-                "Image model: Web-only primary groups accept any image alias (including legacy, Sunburst, Flare, and firefly-* names) and always use gpt-image-2.5. The Chat/Responses top-level text-model allowlist and plan permissions remain unchanged. Other groups default to gpt-image-2.5 (mapped to gpt-image-2.5-sunburst for API/Codex); explicit Flare, gpt-image-2, and gpt-image-* style models remain available (gpt-image-2.5-sunburst / gpt-image-2.5-flare support xhigh/max quality levels). It also accepts Adobe Firefly model ids (firefly-<family>-<resolution>-<ratio>, e.g. firefly-nano-banana-pro-2k-16x9, or just a family such as firefly-gpt-image-2), which route to Adobe backends (including Adobe-sourced APIs) outside Web-only primary groups. family ∈ gpt-image-2, gpt-image-1.5, nano-banana, nano-banana2, nano-banana-pro; resolution ∈ 1k, 2k, 4k; ratio ∈ 1x1, 16x9, 9x16, 4x3, 3x4. Use /v1/responses for Responses chat models.",
-            },
-            {
-              name: "force_firefly / forceFirefly",
-              requirement: "Optional",
-              custom: true,
-              description:
-                "GPT2IMAGE extension: ignored by a Web-only primary group, which always uses GPT Image 2.5 for images. In other groups, true narrows candidates to Adobe backends (including Adobe-sourced APIs), using standard parameters (your prompt/size/quality/model). When no firefly-* model is given, the default family is gpt-image-2; size maps to the firefly ratio/resolution (longest edge ≤1024→1k, ≤2048→2k, else 4k); quality low/medium/high → detailLevel 1/3/5, auto → backend gpt_image_quality; unsupported parameters (output_format, background, thinking, moderation level, output_compression) are silently ignored. Full mapping table and worked example: /docs/adobe-firefly-compat.",
+                "Image model: Web-only primary groups accept any image alias (including legacy, Sunburst, and Flare names) and always use gpt-image-2.5. The Chat/Responses top-level text-model allowlist and plan permissions remain unchanged. Other groups default to gpt-image-2.5 (mapped to gpt-image-2.5-sunburst for API/Codex); explicit Flare, gpt-image-2, and gpt-image-* style models remain available (gpt-image-2.5-sunburst / gpt-image-2.5-flare support xhigh/max quality levels). Use /v1/responses for Responses chat models.",
             },
             {
               name: "n",
@@ -3422,14 +3359,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               name: "model",
               requirement: "Optional",
               description:
-                "Image model: Web-only primary groups accept any image alias and always use gpt-image-2.5. The Chat/Responses top-level text-model allowlist and plan permissions remain unchanged. Other groups default to gpt-image-2.5 (mapped to gpt-image-2.5-sunburst for API/Codex); explicit Flare and gpt-image-2 remain available. Other groups accept a gpt-image-* style model, or an Adobe Firefly model id (firefly-<family>-<resolution>-<ratio>, or just a family such as firefly-gpt-image-2) that routes to Adobe backends (including Adobe-sourced APIs) outside Web-only primary groups. Same value range as /v1/images/generations.",
-            },
-            {
-              name: "force_firefly / forceFirefly",
-              requirement: "Optional",
-              custom: true,
-              description:
-                "GPT2IMAGE extension: ignored by a Web-only primary group, which always uses GPT Image 2.5 for images. In other groups, true narrows candidates to Adobe backends (including Adobe-sourced APIs), using standard parameters. When no firefly-* model is given, the default family is gpt-image-2; size maps to the firefly ratio/resolution; quality low/medium/high → detailLevel 1/3/5; unsupported parameters are silently ignored. See /v1/images/generations and /docs/adobe-firefly-compat.",
+                "Image model: Web-only primary groups accept any image alias and always use gpt-image-2.5. The Chat/Responses top-level text-model allowlist and plan permissions remain unchanged. Other groups default to gpt-image-2.5 (mapped to gpt-image-2.5-sunburst for API/Codex); explicit Flare, gpt-image-2, and gpt-image-* style models remain available. Same value range as /v1/images/generations.",
             },
             {
               name: "n",
@@ -4196,7 +4126,7 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       description:
         "Uses ChatGPT Web image generation. It can reuse Web account quota, but it is not a strictly parameterized Images/Responses API.",
       valid: [
-        "Web-only primary groups accept any image alias (including legacy, Sunburst, Flare, and firefly-* names) and always use gpt-image-2.5. force_firefly cannot override this rule; Adobe and Adobe-sourced APIs are excluded from those groups. Mixed groups retain Web-first routing.",
+        "Web-only primary groups accept any image alias (including legacy, Sunburst, and Flare names) and always use gpt-image-2.5. Mixed groups retain Web-first routing.",
         "**Resolution is not strictly controllable; size is only a hint/record value and output may differ.**",
         "**4K output is not guaranteed; high-resolution output depends on current ChatGPT Web capability and account state.**",
         "The main GPT conversation model and Web thinking level can be controlled.",
@@ -4225,20 +4155,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
       invalid: [
         "Not ChatGPT Web, so Web-only capability or quota semantics do not apply.",
         "On rate limits, quota errors, or invalid credentials, the scheduler cools down/marks the account and tries another one.",
-      ],
-    },
-    adobe: {
-      title: "Adobe (Firefly) Account",
-      description:
-        "A self-managed account/token pool that connects directly to Adobe Firefly, attached to a group as a special priority member for fallback.",
-      valid: [
-        "**Resolution only accepts the 1k / 2k / 4k tiers, not arbitrary pixel resolutions; the incoming size is auto-mapped to the nearest ratio (1x1/16x9/9x16/4x3/3x4) and nearest tier (long edge <=1024 -> 1k, <=2048 -> 2k, otherwise 4k).**",
-        "Outside Web-only primary groups, firefly-* models or force_firefly force the Adobe path (including Adobe-sourced APIs); matched requests are converted from the standard request into Firefly format (default family gpt-image-2, quality -> detailLevel, image-to-image via referenceBlobs).",
-        "Self-managed account/token pool, attached to a group as a special priority member for fallback.",
-      ],
-      invalid: [
-        "Unsupported parameters are silently ignored rather than rejected.",
-        "Cannot output arbitrary pixel sizes; output always lands on one of the 1k/2k/4k tiers.",
       ],
     },
     api: {
@@ -4634,11 +4550,10 @@ function ExternalApiDocs({
             <h3 className="mt-4 text-sm font-medium">{docs.commonTitle}</h3>
             <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
               {docs.common.map((item) => {
-                // Adobe（Firefly）后端与异步任务（async）两条规则加粗并取消灰字,
-                // 使其在通用规则里更醒目。前缀严格匹配,避免误命中无关条目:
-                // "Adobe"(zh/en 共用)、"异步任务（async）"(zh)、"Async tasks (async)"(en)。
+                // 异步任务（async）规则加粗并取消灰字，使其在通用规则里更醒目。
+                // 前缀严格匹配，避免误命中无关条目：
+                // "异步任务（async）"(zh)、"Async tasks (async)"(en)。
                 const emphasize =
-                  item.startsWith("Adobe") ||
                   item.startsWith("异步任务（async）") ||
                   item.startsWith("Async tasks (async)");
                 return (
@@ -5023,7 +4938,7 @@ export function SystemDocsContent({
       </Card>
 
       <div className="scroll-mt-32 grid gap-4 lg:grid-cols-3" id="backends">
-        {[content.web, content.codex, content.adobe, content.api].map(
+        {[content.web, content.codex, content.api].map(
           (section) => (
             <Card className="rounded-lg" key={section.title}>
               <CardHeader>

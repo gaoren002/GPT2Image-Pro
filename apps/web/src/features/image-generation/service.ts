@@ -8,10 +8,6 @@ import {
   isResponsesImageModel,
   RESPONSES_IMAGE_MODELS,
 } from "@repo/shared/config/subscription-plan";
-import {
-  buildAdobeImageRequestBody,
-  parseAdobeMediaResult,
-} from "@repo/shared/adobe";
 import { logError, logWarn } from "@repo/shared/logger";
 import { canUsePlanCapability } from "@repo/shared/subscription/services/plan-capabilities";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
@@ -39,11 +35,6 @@ import type {
   ImageBackendPreferenceMode,
   ImageBackendRequestKind,
 } from "@/features/image-backend-pool/types";
-import { runAdobeDirectImageRequest } from "./adobe-direct";
-import {
-  pickAdobeFamilyFromModel,
-  reverseFireflyToGptRequest,
-} from "./adobe-sourced-firefly";
 import {
   applyApiModelMapping,
   parseApiModelMapping,
@@ -244,7 +235,7 @@ function getModel(config: ApiConfig, model?: string) {
 }
 
 /**
- * 出站图片型号：Adobe 来源反向转换 → 站内别名 → 该 API 的映射表。
+ * 出站图片型号：站内别名 → 该 API 的映射表。
  * 映射可按 quality 改写上游 id（如 gpt-image-2.5 + high → gpt-image-2-high）。
  */
 function resolveOutgoingImageRequest(
@@ -253,13 +244,7 @@ function resolveOutgoingImageRequest(
   requestedSize: string | null | undefined,
   quality?: string | null
 ): { model: string; size: string | undefined; quality: string | undefined } {
-  const fireflyRewrite = reverseAdobeSourcedApiFirefly(
-    config,
-    requestedModel,
-    requestedSize
-  );
-  const resolvedModel =
-    fireflyRewrite?.model ?? getModel(config, requestedModel ?? undefined);
+  const resolvedModel = getModel(config, requestedModel ?? undefined);
   const mapped = applyApiModelMapping({
     requestedModel,
     resolvedModel,
@@ -268,11 +253,7 @@ function resolveOutgoingImageRequest(
   });
   return {
     model: mapped.model,
-    size:
-      applyUpstreamSizeDialect(
-        config,
-        fireflyRewrite?.size ?? requestedSize
-      ) ?? undefined,
+    size: applyUpstreamSizeDialect(config, requestedSize) ?? undefined,
     quality: mapped.quality,
   };
 }
@@ -282,7 +263,7 @@ function resolveOutgoingImageRequest(
  * - exact-ratio：吸附到最近精确比例栅格（上游拒收约等于比例的 WxH）；
  * - ratio-string：预设档位比例改发比例串（如 "3:2"），上游自己定尺寸；
  *   自定义/非标 WxH 原样保留（比例串表达不了精确像素）。
- * auto 与比例串入参原样透传；其余（含 pool-account/pool-adobe/user-api）不动。
+ * auto 与比例串入参原样透传；其余（含 pool-account/user-api）不动。
  */
 function applyUpstreamSizeDialect(
   config: ApiConfig,
@@ -647,7 +628,7 @@ function truncateResponseBody(value: string) {
 function getHttpErrorMessage(
   response: Response,
   rawBody: string,
-  apiName: "Images API" | "Responses API" | "Adobe Firefly API"
+  apiName: "Images API" | "Responses API"
 ) {
   const fallback = `Upstream ${apiName} returned HTTP ${response.status}`;
   const trimmedBody = truncateResponseBody(rawBody);
@@ -924,8 +905,7 @@ async function reportPoolBackendResult(
   if (!config.backend?.reportResult) return false;
   if (
     config.backend.type !== "pool-api" &&
-    config.backend.type !== "pool-account" &&
-    config.backend.type !== "pool-adobe"
+    config.backend.type !== "pool-account"
   ) {
     return false;
   }
@@ -1117,16 +1097,6 @@ function isNoImageOutputError(error?: string | null) {
   );
 }
 
-// firefly-* / force_firefly 请求只允许落 Adobe：pool-adobe 直连,或上游即 Adobe 的
-// adobe_sourced pool-api。换号重试时据此约束目标,防止按 Adobe 计费的请求漂到非 Adobe。
-function isAdobeRoutedBackend(backend: ApiConfig["backend"]): boolean {
-  if (!backend) return false;
-  return (
-    backend.type === "pool-adobe" ||
-    (backend.type === "pool-api" && backend.adobeSourced === true)
-  );
-}
-
 async function retryPoolBackendResult(
   config: ApiConfig,
   run: (candidate: ApiConfig) => Promise<GenerateImageResult>,
@@ -1140,18 +1110,12 @@ async function retryPoolBackendResult(
     signal?: AbortSignal;
   }
 ) {
-  // 仅"不需要上报"的后端直接跑一次返回。pool-adobe 等带 reportResult 的池后端必须进入
-  // 下方主循环(跑一次→上报→释放租约→因非 api/account 而 break 不切换);若在此提前
-  // return run(config),config 仍带 reportResult=true,generateImage 会再次进入本函数,
-  // 形成同步无限递归(Maximum call stack size exceeded)。
+  // 仅"不需要上报"的后端直接跑一次返回。带 reportResult 的池后端必须进入下方主循环。
   if (!config.backend?.reportResult) {
     return run(config);
   }
 
   const requestKind = config.backend.requestKind;
-  // firefly 意图(解析时盖在 config 上,反映请求口径而非后端类型)。换号 re-resolve 时强制
-  // forceFirefly 以保持「只走 Adobe」,并对换号结果做不变量校验兜底。
-  const fireflyRequest = config.backend.fireflyOnly === true;
   const excluded = new Set<string>();
   let accountBackendPreference: ImageBackendAccountBackend | undefined =
     options?.accountBackendPreference ||
@@ -1219,7 +1183,6 @@ async function retryPoolBackendResult(
         allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
         spanGroupsForWeb: options?.spanGroupsForWeb,
         webRequestMode: options?.webRequestMode,
-        forceFirefly: fireflyRequest,
       });
     } catch (fallbackError) {
       if (fallbackError instanceof ImageBackendPoolUnavailableError) {
@@ -1266,8 +1229,7 @@ async function retryPoolBackendResult(
     }
     const hasPoolBackend =
       currentBackend?.type === "pool-api" ||
-      currentBackend?.type === "pool-account" ||
-      currentBackend?.type === "pool-adobe";
+      currentBackend?.type === "pool-account";
     const acquiredBeforeRun =
       hasPoolBackend && currentBackend.inflightLease !== true;
     if (acquiredBeforeRun) {
@@ -1356,7 +1318,6 @@ async function retryPoolBackendResult(
           allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
           spanGroupsForWeb: options?.spanGroupsForWeb,
           webRequestMode: options?.webRequestMode,
-          forceFirefly: fireflyRequest,
           ...(typeof minPriorityExclusive === "number"
             ? { minPriorityExclusive }
             : {}),
@@ -1428,12 +1389,6 @@ async function retryPoolBackendResult(
           nextBackendType: nextPriorityMember.config.backend.type,
           nextBackendId: nextPriorityMember.config.backend.id,
         });
-        if (fireflyRequest && !isAdobeRoutedBackend(nextPriorityMember.config.backend)) {
-          await releaseResolvedLease(nextPriorityMember);
-          return withAttemptDiagnostics(
-            attachStickyBackendMember(candidate, result)
-          );
-        }
         await recordImageBackendSchedulerSwitch({
           requestKind,
           memberType: poolBackendMemberType(
@@ -1454,15 +1409,6 @@ async function retryPoolBackendResult(
       if (shouldFallbackFromWebPreference()) {
         const codexFallback = await resolveResponsesFallback(result.error);
         if (codexFallback?.config?.backend) {
-          if (
-            fireflyRequest &&
-            !isAdobeRoutedBackend(codexFallback.config.backend)
-          ) {
-            await releaseResolvedLease(codexFallback);
-            return withAttemptDiagnostics(
-              attachStickyBackendMember(candidate, result)
-            );
-          }
           logWarn("同优先级换号预算用尽，混合分组回退 Codex", {
             attempt,
             requestKind,
@@ -1534,26 +1480,6 @@ async function retryPoolBackendResult(
       next = await resolveResponsesFallback(result.error);
     }
     if (!next?.config?.backend) break;
-    // 不变量兜底:firefly 请求的换号目标必须仍是 Adobe 路由(pool-adobe 或 adobe_sourced
-    // api)。正常已由上面的 forceFirefly 约束保证;此处 fail-closed 拦截任何未来回归,宁可
-    // 不换号失败,也不让按 Adobe 计费的请求落到非 Adobe 后端。
-    if (fireflyRequest && !isAdobeRoutedBackend(next.config.backend)) {
-      await releaseImageBackendInflightLease({
-        memberType: poolBackendMemberType(next.config.backend.type),
-        memberId: next.config.backend.id,
-        leaseId: next.config.backend.inflightLeaseId,
-        leasePersisted: next.config.backend.inflightLeasePersisted,
-      });
-      next.config.backend.inflightLease = false;
-      logError(new Error("firefly 请求换号命中非 Adobe 后端，已阻断"), {
-        source: "image-backend-pool",
-        operation: "firefly-retry-guard",
-        requestKind,
-        nextBackendType: next.config.backend.type,
-        nextBackendId: next.config.backend.id,
-      });
-      break;
-    }
     if (poolBackendMemberKey(next.config) === memberKey) {
       await releaseImageBackendInflightLease({
         memberType: poolBackendMemberType(next.config.backend.type),
@@ -4343,13 +4269,11 @@ export async function getEffectiveConfig(
     requestKind?: ImageBackendRequestKind;
     requestedModel?: string;
     preferredMemberId?: string;
-    preferredMemberType?: "api" | "account" | "adobe";
+    preferredMemberType?: "api" | "account";
     stickyPreviousResponseId?: string;
     stickySessionKey?: string;
     accountBackendPreference?: ImageBackendAccountBackend;
     accountBackendPreferenceMode?: ImageBackendPreferenceMode;
-    // force_firefly：强制把候选收敛到 adobe（firefly）后端，对任意模型生效。
-    forceFirefly?: boolean;
     ignoreUserConfig?: boolean;
     allowAnyResponsesBackend?: boolean;
     /** 内部能力可跨越用户偏好/密钥分组，只选择真正的 ChatGPT Web 账号。 */
@@ -4378,7 +4302,6 @@ export async function getEffectiveConfig(
         stickySessionKey: options.stickySessionKey,
         accountBackendPreference: options.accountBackendPreference,
         accountBackendPreferenceMode: options.accountBackendPreferenceMode,
-        forceFirefly: options.forceFirefly,
         allowAnyResponsesBackend: options.allowAnyResponsesBackend,
         spanGroupsForWeb: options.allowAnyWebBackend,
         webRequestMode: options.webRequestMode,
@@ -4393,16 +4316,8 @@ export async function getEffectiveConfig(
       return { config: poolConfig.config, useCredits: true };
     }
   }
-  // firefly-* / nano-banana 仅由 Adobe / adobe_sourced 后端出图。若这些后端因限流或上游错误
-  // (502/服务不可用)被标 error 踢空,resolve 返回 null——此处给出指向 Adobe 后端的明确报错,
-  // 避免运维误以为是"模型检索不到/模型不存在"。
-  const isFireflyRequest =
-    options?.forceFirefly === true ||
-    /^firefly-/i.test((options?.requestedModel || "").trim());
   throw new ImageBackendPoolUnavailableError(
-    isFireflyRequest
-      ? "没有可用的 Adobe（Firefly）后端：firefly-* / nano-banana 仅由 Adobe / adobe_sourced 后端出图，当前该分组内此类后端均不可用（可能被限流，或因上游 502/服务不可用被标记 error 踢出）。请在账号池检查 Adobe / adobe_sourced 后端状态并测活或重新启用。"
-      : "没有可用的默认生图后端，请在账号池中配置默认分组和 API/账号"
+    "没有可用的默认生图后端，请在账号池中配置默认分组和 API/账号"
   );
 }
 
@@ -4490,88 +4405,12 @@ async function rehostApiBackendInputImages(
 }
 
 // 把池后端的 backend.type 映射为调度成员类型（用于 reportImageBackendResult / 租约
-// 键）。pool-adobe → adobe；pool-api → api；其余（pool-account）→ account。
+// 键）。pool-api → api；其余（pool-account）→ account。
 export function poolBackendMemberType(
   backendType: string | undefined
-): "api" | "account" | "adobe" {
+): "api" | "account" {
   if (backendType === "pool-api") return "api";
-  if (backendType === "pool-adobe") return "adobe";
   return "account";
-}
-
-// 「Adobe 来源」api 接 firefly-* 请求的反向转换薄封装：仅判定后端（pool-api + adobeSourced），
-// 纯映射逻辑（截家族名 + 推 size，可选 backendModel 覆盖）见 ./adobe-sourced-firefly。
-function reverseAdobeSourcedApiFirefly(
-  config: ApiConfig,
-  requestedModel: string | null | undefined,
-  requestedSize: string | null | undefined
-): { model: string; size: string | undefined } | null {
-  if (config.backend?.type !== "pool-api" || !config.backend.adobeSourced) {
-    return null;
-  }
-  return reverseFireflyToGptRequest({
-    requestedModel,
-    requestedSize,
-    backendModel: config.model,
-  });
-}
-
-// adobe（pool-adobe）派发：用 Firefly 适配器构造 /v1/chat/completions 请求，解析产物
-// URL 后取回字节返回 base64（由管线 re-host），不长期依赖 adobe2api 本机 /generated URL。
-// 文生图只传 prompt；图生图把输入图以 base64 data URL 放进 messages。
-async function runAdobeImageRequest(
-  config: ApiConfig,
-  params: {
-    prompt: string;
-    model?: string | null;
-    size?: string | null;
-    quality?: string | null;
-    images?: Array<{ data: Buffer; type?: string | null }>;
-    signal?: AbortSignal;
-  }
-): Promise<GenerateImageResult> {
-  // direct 模式：用本仓库移植的逆向逻辑直连 Adobe Firefly（经 Go TLS 旁路），不走网关。
-  if (config.backend?.adobeMode === "direct") {
-    return runAdobeDirectImageRequest(config, params);
-  }
-  // 网关模式：family 优先取请求 model 的族（firefly-*）；非 firefly 模型（如普通 gpt-image
-  // 经 force_firefly 强制路由到 adobe）一律落 gpt-image-2，而非后端 enabledModels 首项。
-  const family = pickAdobeFamilyFromModel(params.model) ?? "gpt-image-2";
-  const body = buildAdobeImageRequestBody({
-    family,
-    prompt: params.prompt,
-    size: params.size,
-    ...(params.images && params.images.length > 0
-      ? { images: params.images }
-      : {}),
-  });
-  const response = await fetch(
-    `${stripTrailingSlash(config.baseUrl)}/v1/chat/completions`,
-    {
-      method: "POST",
-      redirect: "manual",
-      signal: params.signal,
-      headers: getHeaders(config, { "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    }
-  );
-  if (!response.ok) {
-    const rawBody = await response.text().catch(() => "");
-    return {
-      error: getHttpErrorMessage(response, rawBody, "Adobe Firefly API"),
-    };
-  }
-  const json = (await response.json().catch(() => null)) as unknown;
-  const parsed = parseAdobeMediaResult(json, config.baseUrl);
-  if ("error" in parsed) return { error: parsed.error };
-  const mediaResponse = await fetch(parsed.url, { signal: params.signal });
-  if (!mediaResponse.ok) {
-    return {
-      error: `Adobe Firefly 媒体下载失败 HTTP ${mediaResponse.status}`,
-    };
-  }
-  const buffer = Buffer.from(await mediaResponse.arrayBuffer());
-  return { imageBase64: buffer.toString("base64") };
 }
 
 export async function generateImage(
@@ -4621,19 +4460,6 @@ export async function generateImage(
         model,
         gptModel: params.gptModel,
       })
-    );
-  }
-  if (config.backend?.type === "pool-adobe") {
-    return requireImageOutput(
-      applyPromptOptimizationResultVisibility(
-        await runAdobeImageRequest(config, {
-          prompt: getEffectivePrompt(params),
-          model,
-          size: params.size,
-          quality: params.quality,
-          signal: params.signal,
-        })
-      )
     );
   }
   if (
@@ -4809,20 +4635,6 @@ export async function editImage(
         model,
         gptModel: params.gptModel,
       })
-    );
-  }
-  if (config.backend?.type === "pool-adobe") {
-    return requireImageOutput(
-      applyPromptOptimizationResultVisibility(
-        await runAdobeImageRequest(config, {
-          prompt: effectiveEditPrompt,
-          model,
-          size: params.size,
-          quality: params.quality,
-          images: params.images,
-          signal: params.signal,
-        })
-      )
     );
   }
   // codex(pool-account responses)图生图:直连 JSON /images/edits(照 CPA codex 直连格式)。

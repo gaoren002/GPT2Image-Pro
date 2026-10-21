@@ -1,7 +1,6 @@
 /** 统一图像生成管线：校验套餐和模型、选择后端并完成队列、扣费与结果保存。 */
 import { db } from "@repo/database";
 import { generation, user } from "@repo/database/schema";
-import { resolveImageModelMultiplier } from "@repo/shared/adobe";
 import { consumeCredits } from "@repo/shared/credits/core";
 import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
@@ -25,7 +24,6 @@ import {
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import {
   getRuntimeSettingBoolean,
-  getRuntimeSettingJson,
   getRuntimeSettingNumber,
   getRuntimeSettingString,
 } from "@repo/shared/system-settings";
@@ -72,7 +70,6 @@ import {
   type ImageBaseCreditPricing,
   type ImageQualityLevel,
   type ImageThinkingLevel,
-  isFireflyModel,
   normalizeImageSize,
   getUpstreamImageModel,
   roundCreditAmount,
@@ -119,12 +116,11 @@ type RunImageGenerationInput =
       relayOnly?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
-      preferredBackendMemberType?: "api" | "account" | "adobe";
+      preferredBackendMemberType?: "api" | "account";
       stickyPreviousResponseId?: string;
       stickySessionKey?: string;
       mixWebFirst?: boolean;
       forceWebBackend?: boolean;
-      forceFirefly?: boolean;
       requiresResponsesBackend?: boolean;
     } & GenerateImageParams)
   | ({
@@ -135,12 +131,11 @@ type RunImageGenerationInput =
       relayOnly?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
-      preferredBackendMemberType?: "api" | "account" | "adobe";
+      preferredBackendMemberType?: "api" | "account";
       stickyPreviousResponseId?: string;
       stickySessionKey?: string;
       mixWebFirst?: boolean;
       forceWebBackend?: boolean;
-      forceFirefly?: boolean;
       requiresResponsesBackend?: boolean;
     } & EditImageParams)
   | ({
@@ -151,13 +146,12 @@ type RunImageGenerationInput =
       relayOnly?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
-      preferredBackendMemberType?: "api" | "account" | "adobe";
+      preferredBackendMemberType?: "api" | "account";
       stickyPreviousResponseId?: string;
       stickySessionKey?: string;
       maxChatContextChars?: number;
       mixWebFirst?: boolean;
       forceWebBackend?: boolean;
-      forceFirefly?: boolean;
       requiresResponsesBackend?: boolean;
       webChat?: boolean;
     } & ChatImageParams);
@@ -226,8 +220,7 @@ function normalizeBillingMultiplier(value: unknown) {
 function getConfigBillingMultiplier(config: ApiConfig) {
   if (
     config.backend?.type !== "pool-account" &&
-    config.backend?.type !== "pool-api" &&
-    config.backend?.type !== "pool-adobe"
+    config.backend?.type !== "pool-api"
   ) {
     return 1;
   }
@@ -241,8 +234,7 @@ function getPoolQualityBillingMultiplier(
 ) {
   if (
     config.backend?.type !== "pool-account" &&
-    config.backend?.type !== "pool-api" &&
-    config.backend?.type !== "pool-adobe"
+    config.backend?.type !== "pool-api"
   ) {
     return 1;
   }
@@ -252,7 +244,7 @@ function getPoolQualityBillingMultiplier(
 }
 
 /** 池 API 成员的按模型计价倍率（metadata.modelBilling，精确命中）。
- * 仅 pool-api 读取；账号/Adobe 不参与（走各自倍率链）。
+ * 仅 pool-api 读取；账号不参与。
  * 模型配置为质量分档表时 replacesQualityBilling=true，调用方跳过成员级
  * 质量表（分档表已按质量定价，避免双重计价）。 */
 function getPoolApiModelBilling(
@@ -272,16 +264,6 @@ function getPoolApiModelBilling(
     multiplier: normalizeBillingMultiplier(resolved.multiplier),
     replacesQualityBilling: resolved.replacesQualityBilling,
   };
-}
-
-/** 把系统设置里的图像模型倍率 JSON 收窄成 family→正数 的 map。 */
-function parseImageModelMultipliers(value: unknown): Record<string, number> {
-  if (!value || typeof value !== "object") return {};
-  const out: Record<string, number> = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof raw === "number" && Number.isFinite(raw)) out[key] = raw;
-  }
-  return out;
 }
 
 function applyBillingMultiplier(credits: number, multiplier: number) {
@@ -1092,9 +1074,7 @@ async function releasePoolBackendConfigLease(config?: ApiConfig | null) {
   const backend = config?.backend;
   if (
     !backend?.inflightLease ||
-    (backend.type !== "pool-api" &&
-      backend.type !== "pool-account" &&
-      backend.type !== "pool-adobe")
+    (backend.type !== "pool-api" && backend.type !== "pool-account")
   ) {
     return;
   }
@@ -1170,12 +1150,11 @@ export async function runImageGenerationForUser(
   // 统一的 Web-first 偏好(默认开启,详见 shouldForceWebBackend)。两个变量同值,
   // 分别供 gen/edit 路径(forceWebBackend)与 chat 路径(mixWebFirst)透传到 service 层;
   // chat 的 mix_web_first 已并入该决策,不再单独走像素区间判定。
-  // Firefly 型号及强制标志在非纯 Web 组沿用 Adobe 路由，因此不主动施加 Web 优先偏好。
-  // 纯 Web 主组在后端池内优先归一为 2.5，不受此处未施加偏好的影响。
-  const preferWebFirst =
-    !isFireflyModel(input.model) &&
-    !input.forceFirefly &&
-    shouldForceWebBackend(input, size, forceWebPixelRange);
+  const preferWebFirst = shouldForceWebBackend(
+    input,
+    size,
+    forceWebPixelRange
+  );
   const forceWebBackend = preferWebFirst;
   const mixWebFirst = preferWebFirst;
   const preferWebWithFallback = preferWebFirst;
@@ -1355,7 +1334,6 @@ export async function runImageGenerationForUser(
                 accountBackendPreferenceMode: forceWebBackend
                   ? "mixed-only"
                   : undefined,
-                forceFirefly: input.forceFirefly,
                 ignoreUserConfig: requiresResponsesBackend,
               });
             } catch (error) {
@@ -1378,7 +1356,6 @@ export async function runImageGenerationForUser(
                 accountBackendPreferenceMode: forceWebBackend
                   ? "mixed-only"
                   : undefined,
-                forceFirefly: input.forceFirefly,
                 ignoreUserConfig: requiresResponsesBackend,
               });
             }
@@ -1394,7 +1371,7 @@ export async function runImageGenerationForUser(
 
           const { config, useCredits } = effectiveConfig;
           leasedConfig = config;
-          // 先按已选主分组确定实际图片型号，再计算倍率和记录，避免 Web 按输入的 Firefly 族计费。
+          // 先按已选主分组确定实际图片型号，再计算倍率和记录。
           const imageModel = getImageModelForGroup(
             input.mode === "chat" ? input.imageModel : input.model,
             config.model,
@@ -1407,22 +1384,13 @@ export async function runImageGenerationForUser(
               generationId,
             };
           }
-          // 整体计费倍率 = 整个 Adobe(后端)倍率 × 该 firefly 图像模型族倍率 × 质量倍率。
-          // 模型族倍率与质量倍率只在此处折入一次,得到的 effectiveMultiplier 作为本次
+          // 整体计费倍率 = 后端(分组/成员)倍率 × 模型计价倍率 × 质量倍率。
+          // 各倍率只在此处折入一次,得到的 effectiveMultiplier 作为本次
           // 请求统一的 billingMultiplier 向下传递,确保扣费/明细/退款/元数据口径一致
           // (退款须按相同倍率结算,故元数据上报的 billingMultiplier 即 effectiveMultiplier)。
           // 质量倍率按用户【请求的 quality】解析(默认 auto),不改写出站口径——出站
           // 质量改写(model_mapping.setQuality)属路由层行为,不回灌计价。
           const backendBillingMultiplier = getConfigBillingMultiplier(config);
-          const imageModelMultipliers = parseImageModelMultipliers(
-            await getRuntimeSettingJson("IMAGE_MODEL_MULTIPLIERS")
-          );
-          const modelFamilyMultiplier = resolveImageModelMultiplier(
-            config.backend?.groupBackendType === "web"
-              ? imageModel
-              : input.model,
-            imageModelMultipliers
-          );
           // 池 API 按模型计价（metadata.modelBilling，精确命中出站模型 id）：
           // 模型 id 取出站口径（站内别名解析 + model_mapping 改写后的完整 id），
           // 与实际发给上游的一致，未配置则 1。值为质量分档表时按请求 quality
@@ -1445,7 +1413,6 @@ export async function runImageGenerationForUser(
           const poolApiModelBillingMultiplier = apiModelBilling.multiplier;
           const billingMultiplier =
             backendBillingMultiplier *
-            modelFamilyMultiplier *
             poolApiModelBillingMultiplier *
             qualityBillingMultiplier;
           const moderationEnabled =
@@ -1570,7 +1537,6 @@ export async function runImageGenerationForUser(
             billingMultiplier,
             qualityBillingMultiplier,
             backendBillingMultiplier,
-            modelFamilyMultiplier,
             poolApiModelBillingMultiplier,
             apiModelBilling,
             imageModel,
@@ -1625,7 +1591,6 @@ async function runQueuedImageGenerationForUser({
   billingMultiplier,
   qualityBillingMultiplier,
   backendBillingMultiplier,
-  modelFamilyMultiplier,
   poolApiModelBillingMultiplier,
   apiModelBilling,
   imageModel,
@@ -1660,7 +1625,6 @@ async function runQueuedImageGenerationForUser({
   billingMultiplier: number;
   qualityBillingMultiplier: number;
   backendBillingMultiplier: number;
-  modelFamilyMultiplier: number;
   poolApiModelBillingMultiplier: number;
   apiModelBilling: { multiplier: number; replacesQualityBilling: boolean };
   imageModel: string;
@@ -1687,11 +1651,10 @@ async function runQueuedImageGenerationForUser({
   });
   const billingMetadata = {
     billingMultiplier,
-    // 倍率分量留痕：billingMultiplier 为乘积（后端×模型族×池API模型×质量），
+    // 倍率分量留痕：billingMultiplier 为乘积（后端×池API模型×质量），
     // 拆出各分量便于对账时区分定价来源；各分量与乘积同期写入，旧记录无此字段。
     qualityBillingMultiplier,
     backendBillingMultiplier,
-    modelFamilyMultiplier,
     poolApiModelBillingMultiplier,
     poolApiModelBillingReplacesQuality: apiModelBilling.replacesQualityBilling,
     requestedQuality: input.quality ?? null,

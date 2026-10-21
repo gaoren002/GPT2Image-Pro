@@ -99,15 +99,13 @@ function formatMultiplier(value: number) {
 }
 
 /**
- * 计费倍率明细行：总倍率 = 分组/成员 × 模型族 × 池API模型 × 质量。
+ * 计费倍率明细行：总倍率 = 分组/成员 × 池API模型 × 质量。
  * 新记录带各分量时逐行拆出（等于 1 的分量跳过，噪音控制）；按模型分档
  * 取代质量表时质量行标注「已并入模型计价」。旧记录无分量只显示总倍率。
  */
 function buildMultiplierRows(creditDetails: GenerationCreditDetails) {
   const total = `x${formatMultiplier(creditDetails.billingMultiplier)}`;
-  const has =
-    creditDetails.backendBillingMultiplier !== null &&
-    creditDetails.modelFamilyMultiplier !== null;
+  const has = creditDetails.backendBillingMultiplier !== null;
   if (!has) {
     return [{ label: "计费倍率", value: total }];
   }
@@ -122,7 +120,6 @@ function buildMultiplierRows(creditDetails: GenerationCreditDetails) {
     rows.push({ label, value: `x${formatMultiplier(multiplier)}` });
   };
   push("· 分组/成员倍率", creditDetails.backendBillingMultiplier);
-  push("· 模型族倍率", creditDetails.modelFamilyMultiplier);
   push("· 模型计价倍率", creditDetails.poolApiModelBillingMultiplier);
   if (creditDetails.poolApiModelBillingReplacesQuality) {
     rows.push({

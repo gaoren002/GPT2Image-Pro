@@ -89,36 +89,26 @@ import {
 import {
   bulkDeleteImageBackendAccountsAction,
   bulkUpdateImageBackendAccountsAction,
-  deleteAdobeAccountAction,
   deleteAllErrorImageBackendAccountsAction,
   deleteImageBackendGroupAction,
   deleteImageBackendMemberAction,
   deleteSub2ApiAutoSyncTaskAction,
   getAdminImageBackendAccountsAction,
   getAdminImageBackendPoolAction,
-  getAdobeModelMultipliersAction,
   getSub2ApiAutoSyncTasksAction,
   getSub2ApiSourceGroupsAction,
   getSub2ApiSyncProgressAction,
   getSub2ApiSyncStatusAction,
-  importAdobeAccountAction,
-  importAdobeAccountsAction,
   importImageBackendAccountsFromRefreshTokensAction,
   importImageBackendWebAccountsFromAccessTokensAction,
-  listAdobeAccountsAction,
   refreshImageBackendAccountInfoAction,
   refreshImageBackendAccountsInfoAction,
   runSub2ApiAutoSyncTaskNowAction,
   runSub2ApiManualSyncAction,
   saveImageBackendAccountAction,
-  saveImageBackendAdobeAction,
   saveImageBackendApiAction,
   saveImageBackendGroupAction,
-  setAdobeAccountEnabledAction,
-  setAdobeModelMultipliersAction,
   setImageBackendAccountAlwaysActiveAction,
-  setImageBackendAdobeAlwaysActiveAction,
-  setImageBackendAdobeEnabledAction,
   setImageBackendApiAlwaysActiveAction,
   setImageBackendApiEnabledAction,
   setSub2ApiAutoSyncTaskEnabledAction,
@@ -224,8 +214,6 @@ type Api = {
   failureCooldownEnabled: boolean;
   priority: number;
   concurrency: number;
-  adobeSourced: boolean;
-  billingMultiplier: number;
   status: string;
   successCount: number;
   failCount: number;
@@ -233,52 +221,6 @@ type Api = {
   cooldownUntil: Date | string | null;
   lastError: string | null;
   lastErrorAt: Date | string | null;
-};
-
-type Adobe = {
-  id: string;
-  groupId: string | null;
-  groupIds: string[];
-  name: string;
-  mode: "gateway" | "direct";
-  baseUrl: string;
-  enabledModels: string[] | null;
-  defaultRatio: string;
-  defaultResolution: string;
-  gptImageQuality: string;
-  // list 接口把 numeric 列回传为字符串。
-  billingMultiplier: number | string;
-  supportsVideo: boolean;
-  contentSafetyEnabled: boolean;
-  isEnabled: boolean;
-  alwaysActive: boolean;
-  failureCooldownEnabled: boolean;
-  priority: number;
-  concurrency: number;
-  status: string;
-  successCount: number;
-  failCount: number;
-  lastUsedAt: Date | string | null;
-  cooldownUntil: Date | string | null;
-  lastError: string | null;
-  lastErrorAt: Date | string | null;
-};
-
-type AdobeAccountRow = {
-  id: string;
-  name: string;
-  displayName: string | null;
-  email: string | null;
-  isEnabled: boolean;
-  status: string;
-  lastRefreshAt: Date | string | null;
-  lastRefreshError: string | null;
-  consecutiveFailures: number;
-  creditsTotal: number | null;
-  creditsUsed: number | null;
-  creditsAvailable: number | null;
-  creditsUpdatedAt: Date | string | null;
-  creditsError: string | null;
 };
 
 type ContentSafetyFormValue = "inherit" | "enabled" | "disabled";
@@ -331,12 +273,7 @@ type Sub2ApiAutoSyncTask = {
   };
 };
 
-type BackendPoolTab =
-  | "groups"
-  | "accounts"
-  | "apis"
-  | "adobe"
-  | "import";
+type BackendPoolTab = "groups" | "accounts" | "apis" | "import";
 
 type SyncProgressState = {
   status: "idle" | "running" | "success" | "error";
@@ -346,46 +283,6 @@ type SyncProgressState = {
 
 const MANUAL_TOKEN_IMPORT_LIMIT = 10_000;
 const MANUAL_RT_IMPORT_BATCH_SIZE = 50;
-
-// Adobe per-model 计费倍率：图像模型族行（与后端 family 枚举一一对应）。
-const ADOBE_IMAGE_MULTIPLIER_FAMILIES = [
-  "gpt-image-2.5",
-  "gpt-image-2",
-  "gpt-image-1.5",
-  "nano-banana",
-  "nano-banana2",
-  "nano-banana-pro",
-] as const;
-
-/** 把 family→倍率 的 map 转成"输入框字符串"草稿；缺省/非正显示为空（即默认 1）。 */
-function multipliersToDraft(
-  families: readonly string[],
-  map: Record<string, number>
-): Record<string, string> {
-  const draft: Record<string, string> = {};
-  for (const family of families) {
-    const value = map[family];
-    draft[family] =
-      typeof value === "number" && Number.isFinite(value) && value > 0
-        ? String(value)
-        : "";
-  }
-  return draft;
-}
-
-/** 把"输入框字符串"草稿收窄回 family→正数 的 map；空白/非正/非法项不写入（回退默认 1）。 */
-function draftToMultipliers(
-  draft: Record<string, string>
-): Record<string, number> {
-  const map: Record<string, number> = {};
-  for (const [family, raw] of Object.entries(draft)) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    const numeric = Number(trimmed);
-    if (Number.isFinite(numeric) && numeric > 0) map[family] = numeric;
-  }
-  return map;
-}
 
 type BulkAccountForm = {
   selectionGroupId: string;
@@ -866,7 +763,6 @@ export function ImageBackendPoolAdminPanel({
   const accountRequestKeyRef = useRef<string | null>(null);
   const loadedAccountQueryKeyRef = useRef<string | null>(null);
   const [apis, setApis] = useState<Api[]>([]);
-  const [adobes, setAdobes] = useState<Adobe[]>([]);
   const [groupForm, setGroupForm] = useState({
     id: "",
     name: "",
@@ -916,32 +812,6 @@ export function ImageBackendPoolAdminPanel({
     imagesUpstreamMode: "images" as ImagesUpstreamModeFormValue,
     sizeDialect: "wxh" as ApiSizeDialectFormValue,
     useStream: false,
-    contentSafetyEnabled: true,
-    isEnabled: true,
-    alwaysActive: false,
-    failureCooldownEnabled: false,
-    priority: 50,
-    concurrency: 10,
-    // Adobe 来源：上游实为 Adobe 的 gpt 格式 api（计费吃成员倍率 + 进 firefly 候选）。
-    adobeSourced: false,
-    // 成员计费倍率（仅 adobeSourced 时生效），字符串便于输入框编辑。
-    billingMultiplier: "1",
-  });
-  const [adobeForm, setAdobeForm] = useState({
-    id: "",
-    groupId: "default",
-    groupIds: [] as string[],
-    name: "",
-    mode: "gateway" as "gateway" | "direct",
-    baseUrl: "",
-    apiKey: "",
-    // 逗号分隔的 Firefly 模型家族（如 gpt-image,nano-banana-pro）；空=不限制。
-    enabledModels: "",
-    defaultRatio: "1x1",
-    defaultResolution: "2k",
-    gptImageQuality: "high" as "low" | "medium" | "high",
-    billingMultiplier: "1",
-    supportsVideo: false,
     contentSafetyEnabled: true,
     isEnabled: true,
     alwaysActive: false,
@@ -1206,8 +1076,6 @@ export function ImageBackendPoolAdminPanel({
       failureCooldownEnabled: false,
       priority: 50,
       concurrency: 10,
-      adobeSourced: false,
-      billingMultiplier: "1",
     });
 
   const resetManualImportForm = () => {
@@ -1365,78 +1233,7 @@ export function ImageBackendPoolAdminPanel({
       failureCooldownEnabled: api.failureCooldownEnabled,
       priority: api.priority,
       concurrency: api.concurrency,
-      adobeSourced: api.adobeSourced ?? false,
-      billingMultiplier: String(api.billingMultiplier ?? "1"),
     });
-  };
-
-  const resetAdobeForm = () =>
-    setAdobeForm({
-      id: "",
-      groupId: "default",
-      groupIds: [],
-      name: "",
-      mode: "gateway",
-      baseUrl: "",
-      apiKey: "",
-      enabledModels: "",
-      defaultRatio: "1x1",
-      defaultResolution: "2k",
-      gptImageQuality: "high",
-      billingMultiplier: "1",
-      supportsVideo: false,
-      contentSafetyEnabled: true,
-      isEnabled: true,
-      alwaysActive: false,
-      failureCooldownEnabled: false,
-      priority: 50,
-      concurrency: 10,
-    });
-
-  const toggleAdobeFormGroup = (groupId: string, checked: boolean) => {
-    setAdobeForm((current) => {
-      const currentGroupIds = normalizeAccountGroupIds(current.groupIds);
-      const nextGroupIds = checked
-        ? normalizeAccountGroupIds([...currentGroupIds, groupId])
-        : currentGroupIds.filter((id) => id !== groupId);
-      return {
-        ...current,
-        groupIds: nextGroupIds,
-        groupId: nextGroupIds[0] || "default",
-      };
-    });
-  };
-
-  const editAdobe = (adobe: Adobe) => {
-    const selectedGroupIds = normalizeAccountGroupIds(adobe.groupIds);
-    setAdobeForm({
-      id: adobe.id,
-      groupId: selectedGroupIds[0] || "default",
-      groupIds: selectedGroupIds,
-      name: adobe.name,
-      mode: adobe.mode === "direct" ? "direct" : "gateway",
-      baseUrl: adobe.baseUrl,
-      apiKey: "",
-      enabledModels: (adobe.enabledModels || []).join(","),
-      defaultRatio: adobe.defaultRatio || "1x1",
-      defaultResolution: adobe.defaultResolution || "2k",
-      gptImageQuality:
-        (adobe.gptImageQuality as "low" | "medium" | "high") || "high",
-      billingMultiplier: String(adobe.billingMultiplier ?? "1"),
-      supportsVideo: adobe.supportsVideo,
-      contentSafetyEnabled: adobe.contentSafetyEnabled,
-      isEnabled: adobe.isEnabled,
-      alwaysActive: adobe.alwaysActive,
-      failureCooldownEnabled: adobe.failureCooldownEnabled,
-      priority: adobe.priority,
-      concurrency: adobe.concurrency,
-    });
-    // 编辑表单是内联卡片(非弹窗),点击后滚动到它,避免"点了没反应"的观感。
-    if (typeof document !== "undefined") {
-      document
-        .getElementById("adobe-backend-form")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
   };
 
   const { execute: loadPool, isPending: isLoading } = useAction(
@@ -1445,7 +1242,6 @@ export function ImageBackendPoolAdminPanel({
       onSuccess: ({ data }) => {
         setGroups((data?.groups || []) as Group[]);
         setApis((data?.apis || []) as Api[]);
-        setAdobes((data?.adobes || []) as Adobe[]);
       },
       onError: ({ error }) =>
         toast.error(error.serverError || "加载生图后端池失败"),
@@ -1662,156 +1458,6 @@ export function ImageBackendPoolAdminPanel({
       onError: ({ error }) =>
         toast.error(error.serverError || "更新「遇错仍可用」失败"),
     });
-
-  const { execute: saveAdobe, isPending: isSavingAdobe } = useAction(
-    saveImageBackendAdobeAction,
-    {
-      onSuccess: () => {
-        toast.success("Adobe 后端已保存");
-        resetAdobeForm();
-        reload();
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "保存 Adobe 后端失败"),
-    }
-  );
-
-  const { execute: setAdobeEnabled, isPending: isSettingAdobeEnabled } =
-    useAction(setImageBackendAdobeEnabledAction, {
-      onSuccess: () => {
-        toast.success("Adobe 后端状态已更新");
-        reload();
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "更新 Adobe 后端状态失败"),
-    });
-
-  const {
-    execute: setAdobeAlwaysActive,
-    isPending: isSettingAdobeAlwaysActive,
-  } = useAction(setImageBackendAdobeAlwaysActiveAction, {
-    onSuccess: () => {
-      toast.success("已更新「遇错仍可用」设置");
-      reload();
-    },
-    onError: ({ error }) =>
-      toast.error(error.serverError || "更新「遇错仍可用」失败"),
-  });
-
-  // ===== Adobe 直连账号（mode=direct）=====
-  const [adobeAccounts, setAdobeAccounts] = useState<AdobeAccountRow[]>([]);
-  const [adobeCookieInput, setAdobeCookieInput] = useState("");
-
-  // ===== Adobe 模型计费倍率（图像 per-model）=====
-  // 草稿态用字符串保存输入框原始值（含空白），保存时再收窄成 family→正数 的 map。
-  const [imageMultiplierDraft, setImageMultiplierDraft] = useState<
-    Record<string, string>
-  >(() => multipliersToDraft(ADOBE_IMAGE_MULTIPLIER_FAMILIES, {}));
-
-  const { execute: loadModelMultipliers } = useAction(
-    getAdobeModelMultipliersAction,
-    {
-      onSuccess: ({ data }) => {
-        setImageMultiplierDraft(
-          multipliersToDraft(
-            ADOBE_IMAGE_MULTIPLIER_FAMILIES,
-            data?.image ?? {}
-          )
-        );
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "加载模型计费倍率失败"),
-    }
-  );
-
-  const { execute: saveModelMultipliers, isPending: isSavingMultipliers } =
-    useAction(setAdobeModelMultipliersAction, {
-      onSuccess: () => {
-        toast.success("模型计费倍率已保存");
-        loadModelMultipliers();
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "保存模型计费倍率失败"),
-    });
-  const [adobeAccountName, setAdobeAccountName] = useState("");
-
-  const { execute: loadAdobeAccounts } = useAction(listAdobeAccountsAction, {
-    onSuccess: ({ data }) =>
-      setAdobeAccounts((data?.accounts || []) as AdobeAccountRow[]),
-    onError: ({ error }) =>
-      toast.error(error.serverError || "加载 Adobe 账号失败"),
-  });
-
-  const { execute: importAdobeAccountExec, isPending: isImportingAdobeAccount } =
-    useAction(importAdobeAccountAction, {
-      onSuccess: () => {
-        toast.success("Adobe 账号已导入并验证");
-        setAdobeCookieInput("");
-        setAdobeAccountName("");
-        if (adobeForm.id) loadAdobeAccounts({ adobeId: adobeForm.id });
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "导入 Adobe 账号失败"),
-    });
-
-  const [adobeBatchSummary, setAdobeBatchSummary] = useState("");
-  const {
-    execute: importAdobeAccountsExec,
-    isPending: isImportingAdobeAccounts,
-  } = useAction(importAdobeAccountsAction, {
-    onSuccess: ({ data }) => {
-      const result = data?.result;
-      if (!result) return;
-      const summary = `共 ${result.total}：导入 ${result.imported}，跳过 ${result.skipped}，失败 ${result.failed}${
-        result.failed && result.firstError
-          ? `；首个错误：${result.firstError}`
-          : ""
-      }`;
-      setAdobeBatchSummary(summary);
-      // 有失败则保留文本便于修正后重试（已导入项会按身份自动跳过）；全部成功才清空。
-      if (result.failed > 0) {
-        toast.error(summary);
-      } else {
-        toast.success(summary);
-        setAdobeCookieInput("");
-        setAdobeAccountName("");
-      }
-      if (adobeForm.id) loadAdobeAccounts({ adobeId: adobeForm.id });
-    },
-    onError: ({ error }) =>
-      toast.error(error.serverError || "批量导入 Adobe 账号失败"),
-  });
-
-  const { execute: deleteAdobeAccountExec } = useAction(
-    deleteAdobeAccountAction,
-    {
-      onSuccess: () => {
-        toast.success("账号已删除");
-        if (adobeForm.id) loadAdobeAccounts({ adobeId: adobeForm.id });
-      },
-      onError: ({ error }) => toast.error(error.serverError || "删除账号失败"),
-    }
-  );
-
-  const { execute: setAdobeAccountEnabledExec } = useAction(
-    setAdobeAccountEnabledAction,
-    {
-      onSuccess: () => {
-        if (adobeForm.id) loadAdobeAccounts({ adobeId: adobeForm.id });
-      },
-      onError: ({ error }) =>
-        toast.error(error.serverError || "更新账号状态失败"),
-    }
-  );
-
-  useEffect(() => {
-    if (adobeForm.id && adobeForm.mode === "direct") {
-      loadAdobeAccounts({ adobeId: adobeForm.id });
-    } else {
-      setAdobeAccounts([]);
-    }
-    // loadAdobeAccounts 来自 useAction，引用稳定。
-  }, [adobeForm.id, adobeForm.mode, loadAdobeAccounts]);
 
   const {
     execute: setAccountAlwaysActive,
@@ -2350,15 +1996,8 @@ export function ImageBackendPoolAdminPanel({
     if (!readOnly) {
       loadSub2ApiSyncStatus();
       loadSub2ApiSyncTasks();
-      loadModelMultipliers();
     }
-  }, [
-    loadPool,
-    loadSub2ApiSyncStatus,
-    loadSub2ApiSyncTasks,
-    loadModelMultipliers,
-    readOnly,
-  ]);
+  }, [loadPool, loadSub2ApiSyncStatus, loadSub2ApiSyncTasks, readOnly]);
 
   useEffect(() => {
     if (sub2ApiConfigured) {
@@ -2411,7 +2050,6 @@ export function ImageBackendPoolAdminPanel({
           const nextTab =
             value === "accounts" ||
             value === "apis" ||
-            value === "adobe" ||
             value === "import" ||
             value === "groups"
               ? value
@@ -2428,7 +2066,6 @@ export function ImageBackendPoolAdminPanel({
           <TabsTrigger value="groups">分组</TabsTrigger>
           <TabsTrigger value="accounts">账号池</TabsTrigger>
           <TabsTrigger value="apis">API 后端</TabsTrigger>
-          <TabsTrigger value="adobe">Adobe 后端</TabsTrigger>
           {!readOnly && <TabsTrigger value="import">同步 Sub2API</TabsTrigger>}
         </TabsList>
 
@@ -4169,83 +3806,6 @@ export function ImageBackendPoolAdminPanel({
                     }
                   />
                 </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div>
-                    <Label>Adobe 来源（按 Adobe 计费 + 进 firefly 调度）</Label>
-                    <p className="text-xs text-muted-foreground">
-                      上游实为 Adobe 的 gpt 格式 api。开启后：计费吃下方成员倍率
-                      （命中组倍率 × 成员倍率，与 Adobe 伪账号同口径）；调度上参与
-                      firefly 候选，firefly-* 请求自动反向转换成 gpt 请求后由本后端处理。
-                    </p>
-                  </div>
-                  <Switch
-                    checked={apiForm.adobeSourced}
-                    onCheckedChange={(checked) =>
-                      setApiForm((current) => ({
-                        ...current,
-                        adobeSourced: checked,
-                      }))
-                    }
-                  />
-                </div>
-                {apiForm.adobeSourced && (
-                  <div className="space-y-1.5">
-                    <Label>计费倍率（成员）</Label>
-                    <Input
-                      type="number"
-                      min={0.01}
-                      max={100}
-                      step={0.01}
-                      value={apiForm.billingMultiplier}
-                      onChange={(event) =>
-                        setApiForm((current) => ({
-                          ...current,
-                          billingMultiplier: event.target.value,
-                        }))
-                      }
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      仅「Adobe 来源」开启时生效。最终扣费 = 向上保留两位(向上保留两位
-                      (基础价 + 审核附加) × 模型倍率 × 命中组倍率 × 本成员倍率)。
-                    </p>
-                    {(() => {
-                      // 实时算例：以 nano-banana-pro · 1024×1024 为例，套上方输入的成员
-                      // 倍率，与"含分组倍率示例"同口径（基础价 6 + 审核附加 0.04 + 嵌套
-                      // ceil2），再叠模型倍率（线上 IMAGE_MODEL_MULTIPLIERS：
-                      // nano-banana-pro x1.5）与示例组倍率。香蕉 pro 是"多一些乘数"的典型。
-                      const member = Number(apiForm.billingMultiplier) || 1;
-                      const sampleGroup = 1.2;
-                      const modelMultiplier = 1.5;
-                      const ceil2 = (v: number) =>
-                        Math.ceil(v * 100 - 1e-9) / 100;
-                      const final = ceil2(
-                        ceil2(6.04) * modelMultiplier * sampleGroup * member
-                      );
-                      return (
-                        <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
-                          <div className="font-medium">
-                            算例：nano-banana-pro · 1024×1024
-                          </div>
-                          <div className="text-muted-foreground">
-                            模型 x{modelMultiplier} · 组 x{sampleGroup}（示例） ·
-                            成员 x{member}
-                          </div>
-                          <div className="text-muted-foreground">
-                            向上保留两位(向上保留两位(6 基础价 + 0.04 审核附加) x{" "}
-                            {modelMultiplier} x {sampleGroup} x {member})
-                          </div>
-                          <div className="font-medium text-foreground">
-                            = {final} 积分/张
-                          </div>
-                          <p className="text-muted-foreground">
-                            模型倍率（如 nano-banana-pro x1.5）按 IMAGE_MODEL_MULTIPLIERS
-                            配置、与本成员倍率叠乘；关闭「Adobe 来源」则成员 x1（同普通 api）。
-                          </p>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
                 <Button
                   className="w-full"
                   onClick={() =>
@@ -4422,673 +3982,6 @@ export function ImageBackendPoolAdminPanel({
                 </CardContent>
               </Card>
             ))}
-          </div>
-        </TabsContent>
-
-        <TabsContent
-          value="adobe"
-          className={cn(
-            "mt-6 grid gap-4",
-            readOnly ? "lg:grid-cols-1" : "lg:grid-cols-[360px_1fr]"
-          )}
-        >
-          {!readOnly && (
-            <Card
-              id="adobe-backend-form"
-              className={
-                adobeForm.id
-                  ? "ring-2 ring-primary transition-shadow"
-                  : "transition-shadow"
-              }
-            >
-              <CardHeader>
-                <CardTitle className="text-base">
-                  {adobeForm.id ? "正在编辑 Adobe 后端" : "新增 Adobe 后端"}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <Input
-                  placeholder="名称"
-                  value={adobeForm.name}
-                  onChange={(event) =>
-                    setAdobeForm((current) => ({
-                      ...current,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">
-                    接入模式
-                  </Label>
-                  <Select
-                    value={adobeForm.mode}
-                    onValueChange={(value) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        mode: value === "direct" ? "direct" : "gateway",
-                      }))
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="gateway">
-                        网关（外部 adobe2api）
-                      </SelectItem>
-                      <SelectItem value="direct">
-                        直连（本仓库逆向 + Adobe 账号）
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    直连模式凭据为下方导入的 Adobe cookie 账号，经 TLS 旁路直连
-                    Firefly，无需外部 adobe2api。
-                  </p>
-                </div>
-                {adobeForm.mode === "gateway" && (
-                  <>
-                    <Input
-                      placeholder="adobe2api 地址，如 http://127.0.0.1:6001"
-                      value={adobeForm.baseUrl}
-                      onChange={(event) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          baseUrl: event.target.value,
-                        }))
-                      }
-                    />
-                    <Input
-                      type="password"
-                      placeholder={
-                        adobeForm.id
-                          ? "Service API Key，留空不修改"
-                          : "Service API Key"
-                      }
-                      value={adobeForm.apiKey}
-                      onChange={(event) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          apiKey: event.target.value,
-                        }))
-                      }
-                    />
-                  </>
-                )}
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">
-                    启用模型家族（逗号分隔，留空不限制）
-                  </Label>
-                  <Input
-                    placeholder="gpt-image,nano-banana-pro"
-                    value={adobeForm.enabledModels}
-                    onChange={(event) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        enabledModels: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">
-                      默认宽高比
-                    </Label>
-                    <Select
-                      value={adobeForm.defaultRatio}
-                      onValueChange={(value) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          defaultRatio: value,
-                        }))
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1x1">1x1</SelectItem>
-                        <SelectItem value="16x9">16x9</SelectItem>
-                        <SelectItem value="9x16">9x16</SelectItem>
-                        <SelectItem value="4x3">4x3</SelectItem>
-                        <SelectItem value="3x4">3x4</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">
-                      默认分辨率
-                    </Label>
-                    <Select
-                      value={adobeForm.defaultResolution}
-                      onValueChange={(value) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          defaultResolution: value,
-                        }))
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1k">1k</SelectItem>
-                        <SelectItem value="2k">2k</SelectItem>
-                        <SelectItem value="4k">4k</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">
-                    GPT Image 质量（auto 映射）
-                  </Label>
-                  <Select
-                    value={adobeForm.gptImageQuality}
-                    onValueChange={(value) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        gptImageQuality: value as "low" | "medium" | "high",
-                      }))
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="low">low</SelectItem>
-                      <SelectItem value="medium">medium</SelectItem>
-                      <SelectItem value="high">high</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    用户选 auto 时映射到此质量；显式选 low/medium/high 则按用户的来。
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">
-                    计费倍率（整个 Adobe 后端，图像+视频）
-                  </Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={adobeForm.billingMultiplier}
-                    onChange={(event) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        billingMultiplier: event.target.value,
-                      }))
-                    }
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    对 adobe 图像与视频积分成本统一乘以此倍率;与分组倍率叠加。
-                  </p>
-                </div>
-                <div className="space-y-2 rounded-md border p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <Label>所属分组</Label>
-                    <span className="text-xs text-muted-foreground">可多选</span>
-                  </div>
-                  <div className="grid max-h-40 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
-                    {groups.map((group) => (
-                      <Label
-                        key={group.id}
-                        className="flex min-h-9 items-center gap-2 rounded-md border px-2 text-sm"
-                      >
-                        <Checkbox
-                          checked={adobeForm.groupIds.includes(group.id)}
-                          onCheckedChange={(checked) =>
-                            toggleAdobeFormGroup(group.id, Boolean(checked))
-                          }
-                        />
-                        <span className="truncate">{group.name}</span>
-                      </Label>
-                    ))}
-                    {!groups.length && (
-                      <p className="text-xs text-muted-foreground">
-                        还没有可选分组。
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">
-                      优先级
-                    </Label>
-                    <Input
-                      type="number"
-                      value={adobeForm.priority}
-                      onChange={(event) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          priority: Number(event.target.value) || 0,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-muted-foreground">并发</Label>
-                    <Input
-                      type="number"
-                      value={adobeForm.concurrency}
-                      onChange={(event) =>
-                        setAdobeForm((current) => ({
-                          ...current,
-                          concurrency: Number(event.target.value) || 1,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <Label>启用</Label>
-                  <Switch
-                    checked={adobeForm.isEnabled}
-                    onCheckedChange={(checked) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        isEnabled: checked,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div>
-                    <Label>遇错仍可用（常驻）</Label>
-                    <p className="text-xs text-muted-foreground">
-                      无视冷却/临时故障始终入选；终态错误（鉴权失效等）仍下线。
-                    </p>
-                  </div>
-                  <Switch
-                    checked={adobeForm.alwaysActive}
-                    onCheckedChange={(checked) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        alwaysActive: checked,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <Label>失败进入冷却</Label>
-                  <Switch
-                    checked={adobeForm.failureCooldownEnabled}
-                    onCheckedChange={(checked) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        failureCooldownEnabled: checked,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <Label>内容审核</Label>
-                  <Switch
-                    checked={adobeForm.contentSafetyEnabled}
-                    onCheckedChange={(checked) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        contentSafetyEnabled: checked,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
-                  <div>
-                    <Label>允许视频模型</Label>
-                    <p className="text-xs text-muted-foreground">
-                      Phase 1 仅图像；视频后续支持。
-                    </p>
-                  </div>
-                  <Switch
-                    checked={adobeForm.supportsVideo}
-                    onCheckedChange={(checked) =>
-                      setAdobeForm((current) => ({
-                        ...current,
-                        supportsVideo: checked,
-                      }))
-                    }
-                  />
-                </div>
-                <Button
-                  className="w-full"
-                  onClick={() =>
-                    saveAdobe({
-                      ...adobeForm,
-                      groupId: adobeForm.groupIds[0] || "default",
-                      groupIds: adobeForm.groupIds,
-                      enabledModels: adobeForm.enabledModels
-                        .split(",")
-                        .map((value) => value.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                  disabled={
-                    isSavingAdobe ||
-                    !adobeForm.name ||
-                    (adobeForm.mode === "gateway" &&
-                      (!adobeForm.baseUrl ||
-                        (!adobeForm.id && !adobeForm.apiKey)))
-                  }
-                >
-                  {isSavingAdobe && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
-                  保存 Adobe 后端
-                </Button>
-                {adobeForm.mode === "direct" && (
-                  <div className="space-y-3 rounded-md border p-3">
-                    <div>
-                      <Label>Adobe 账号（cookie）</Label>
-                      <p className="text-xs text-muted-foreground">
-                        {adobeForm.id
-                          ? "粘贴 Adobe 浏览器 cookie 或插件导出的 JSON；导入时会刷新一次以验证。批量导入支持每行一个 cookie 或 JSON 数组，逐条验证、按 Adobe 账号身份去重。可用仓库 tools/adobe-cookie-exporter/ 浏览器扩展导出（含 HttpOnly cookie）。"
-                          : "请先保存后端，再导入 Adobe 账号。"}
-                      </p>
-                    </div>
-                    {adobeForm.id && (
-                      <>
-                        <Input
-                          placeholder="账号备注名（单条）/ 名称前缀（批量，自动加序号）"
-                          value={adobeAccountName}
-                          onChange={(event) =>
-                            setAdobeAccountName(event.target.value)
-                          }
-                        />
-                        <Textarea
-                          placeholder="单条：粘贴一个 cookie 或 JSON；批量：每行一个 cookie，或粘贴 JSON 数组"
-                          value={adobeCookieInput}
-                          rows={4}
-                          onChange={(event) =>
-                            setAdobeCookieInput(event.target.value)
-                          }
-                        />
-                        <Button
-                          variant="secondary"
-                          className="w-full"
-                          disabled={
-                            isImportingAdobeAccount || !adobeCookieInput.trim()
-                          }
-                          onClick={() =>
-                            importAdobeAccountExec({
-                              adobeId: adobeForm.id,
-                              name: adobeAccountName.trim() || undefined,
-                              cookie: adobeCookieInput.trim(),
-                            })
-                          }
-                        >
-                          {isImportingAdobeAccount && (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          )}
-                          导入并验证账号
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          className="w-full"
-                          disabled={
-                            isImportingAdobeAccounts ||
-                            !adobeCookieInput.trim()
-                          }
-                          onClick={() =>
-                            importAdobeAccountsExec({
-                              adobeId: adobeForm.id,
-                              cookiesText: adobeCookieInput,
-                              namePrefix:
-                                adobeAccountName.trim() || undefined,
-                            })
-                          }
-                        >
-                          {isImportingAdobeAccounts && (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          )}
-                          批量导入（每行一个 cookie / JSON 数组）
-                        </Button>
-                        {adobeBatchSummary && (
-                          <p className="text-xs text-muted-foreground">
-                            {adobeBatchSummary}
-                          </p>
-                        )}
-                        <div className="space-y-2">
-                          {!adobeAccounts.length && (
-                            <p className="text-xs text-muted-foreground">
-                              还没有账号。
-                            </p>
-                          )}
-                          {adobeAccounts.map((account) => (
-                            <div
-                              key={account.id}
-                              className="flex items-center justify-between gap-2 rounded-md border px-2 py-1.5"
-                            >
-                              <div className="min-w-0">
-                                <p className="truncate text-sm">
-                                  {account.displayName ||
-                                    account.email ||
-                                    account.name}
-                                </p>
-                                <p className="truncate text-xs text-muted-foreground">
-                                  {account.status}
-                                  {account.lastRefreshError
-                                    ? ` · ${account.lastRefreshError}`
-                                    : ""}
-                                </p>
-                                <p className="truncate text-xs text-muted-foreground">
-                                  {account.creditsError
-                                    ? `余额读取失败: ${account.creditsError}`
-                                    : account.creditsAvailable !== null ||
-                                        account.creditsTotal !== null
-                                      ? `Firefly 余额 ${account.creditsAvailable ?? "?"} / ${account.creditsTotal ?? "?"}`
-                                      : "余额未知（刷新后获取）"}
-                                </p>
-                              </div>
-                              <div className="flex shrink-0 items-center gap-2">
-                                <Switch
-                                  checked={account.isEnabled}
-                                  onCheckedChange={(checked) =>
-                                    setAdobeAccountEnabledExec({
-                                      id: account.id,
-                                      isEnabled: checked,
-                                    })
-                                  }
-                                />
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() =>
-                                    deleteAdobeAccountExec({ id: account.id })
-                                  }
-                                >
-                                  删除
-                                </Button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-                {adobeForm.id && (
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={resetAdobeForm}
-                  >
-                    取消编辑
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          <div className="space-y-3">
-            {!adobes.length && (
-              <p className="text-sm text-muted-foreground">
-                还没有 Adobe 后端。新增一个 adobe2api 实例即可被调度。
-              </p>
-            )}
-            {adobes.map((adobe) => (
-              <Card key={adobe.id}>
-                <CardContent className="space-y-2 p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{adobe.name}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {adobe.mode === "direct"
-                          ? "直连模式（Adobe 账号）"
-                          : adobe.baseUrl}
-                      </p>
-                    </div>
-                    <span
-                      className={cn(
-                        "flex shrink-0 items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs",
-                        adobe.status === "error"
-                          ? "bg-destructive/10 text-destructive"
-                          : adobe.isEnabled
-                            ? "bg-success/10 text-success"
-                            : "bg-muted text-muted-foreground"
-                      )}
-                    >
-                      {adobe.isEnabled && adobe.status !== "error" && (
-                        // 在线状态点:CSS 呼吸,尊重减动效偏好。
-                        <span
-                          aria-hidden="true"
-                          className="h-1.5 w-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none"
-                        />
-                      )}
-                      {adobe.isEnabled ? adobe.status : "已停用"}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    模型：
-                    {adobe.enabledModels?.length
-                      ? adobe.enabledModels.join(", ")
-                      : "不限"}
-                    {" · 默认 "}
-                    {adobe.defaultResolution}/{adobe.defaultRatio}
-                    {" · 优先级 "}
-                    {adobe.priority}
-                    {" · 并发 "}
-                    {adobe.concurrency}
-                    {" · 成功 "}
-                    {adobe.successCount}
-                    {" / 失败 "}
-                    {adobe.failCount}
-                  </p>
-                  {adobe.lastError && (
-                    <p className="truncate text-xs text-destructive">
-                      最近错误：{adobe.lastError}
-                    </p>
-                  )}
-                  {!readOnly && (
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => editAdobe(adobe)}
-                      >
-                        编辑
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={isSettingAdobeEnabled}
-                        onClick={() =>
-                          setAdobeEnabled({
-                            id: adobe.id,
-                            isEnabled: !adobe.isEnabled,
-                          })
-                        }
-                      >
-                        {adobe.isEnabled ? "停用" : "启用"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={isSettingAdobeAlwaysActive}
-                        onClick={() =>
-                          setAdobeAlwaysActive({
-                            id: adobe.id,
-                            alwaysActive: !adobe.alwaysActive,
-                          })
-                        }
-                      >
-                        {adobe.alwaysActive ? "取消常驻" : "设为常驻"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={isDeletingMember}
-                        onClick={() =>
-                          deleteMember({ type: "adobe", id: adobe.id })
-                        }
-                      >
-                        删除
-                      </Button>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-
-            {!readOnly && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">模型计费倍率</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <p className="text-xs text-muted-foreground">
-                    最终积分 = 基础(按尺寸) × 模型倍率 × 整个 Adobe
-                    倍率 × 分组倍率。留空表示该模型不加倍率（默认 1）。
-                  </p>
-
-                  <div className="space-y-2">
-                    <Label className="text-xs text-muted-foreground">
-                      图像模型倍率
-                    </Label>
-                    <div className="space-y-2">
-                      {ADOBE_IMAGE_MULTIPLIER_FAMILIES.map((family) => (
-                        <div
-                          key={family}
-                          className="grid grid-cols-[1fr_120px] items-center gap-2"
-                        >
-                          <span className="truncate text-sm">{family}</span>
-                          <Input
-                            type="number"
-                            inputMode="decimal"
-                            min="0"
-                            step="0.01"
-                            placeholder="1"
-                            value={imageMultiplierDraft[family] ?? ""}
-                            onChange={(event) =>
-                              setImageMultiplierDraft((current) => ({
-                                ...current,
-                                [family]: event.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <Button
-                    size="sm"
-                    disabled={isSavingMultipliers}
-                    onClick={() =>
-                      saveModelMultipliers({
-                        image: draftToMultipliers(imageMultiplierDraft),
-                      })
-                    }
-                  >
-                    {isSavingMultipliers ? "保存中…" : "保存模型倍率"}
-                  </Button>
-                </CardContent>
-              </Card>
-            )}
           </div>
         </TabsContent>
 

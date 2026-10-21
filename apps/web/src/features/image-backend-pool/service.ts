@@ -5,8 +5,6 @@ import {
   externalApiKey,
   imageBackendAccount,
   imageBackendAccountGroup,
-  imageBackendAdobe,
-  imageBackendAdobeGroup,
   imageBackendApi,
   imageBackendApiGroup,
   imageBackendGroup,
@@ -148,20 +146,18 @@ type ResolveBackendOptions = {
   // Web 请求用途。text 只使用 ChatGPT 文本能力，不受图片生成额度及其冷却状态限制；
   // 缺省保持现有图片请求行为。
   webRequestMode?: "image" | "text";
-  // 请求模型：纯 Web 主组的图片请求统一用 GPT Image 2.5；其他组保留 Firefly 前缀路由。
+  // 请求模型：纯 Web 主组的图片请求统一用 GPT Image 2.5；其他组保留原始模型。
   // chat 的顶层模型是文本模型，不随图片型号归一而更改。
   requestedModel?: string;
   preferredMemberId?: string;
-  preferredMemberType?: "api" | "account" | "adobe";
+  preferredMemberType?: "api" | "account";
   stickyPreviousResponseId?: string;
   stickySessionKey?: string;
   accountBackendPreference?: ImageBackendAccountBackend;
   accountBackendPreferenceMode?: ImageBackendPreferenceMode;
   // 账号 plan 过滤(opt-in,默认 "any" 不过滤)。"paid" 仅选付费级账号,供 PPT/PSD
-  // 可编辑文件生成用(代码解释器限付费)。只作用于 account 候选,不影响 api/adobe。
+  // 可编辑文件生成用(代码解释器限付费)。只作用于 account 候选,不影响 api。
   accountPlanFilter?: ImageBackendAccountPlanFilter;
-  // 非纯 Web 主组可强制走 Adobe；纯 Web 主组固定图片型号的规则优先于此标志。
-  forceFirefly?: boolean;
   allowAnyResponsesBackend?: boolean;
   // 跨组选真 web 账号(忽略 apiKeyId/用户偏好的分组作用域)：PPT/PSD 用 paid 过滤寻找付费
   // Web；审核提示词修剪用 text 模式寻找任意有效 Web。开启后遍历全部启用分组，只返回
@@ -172,7 +168,7 @@ type ResolveBackendOptions = {
 };
 
 type StickyBindingMember = {
-  type: "api" | "account" | "adobe";
+  type: "api" | "account";
   id: string;
   groupId?: string | null;
   accountBackend?: "web" | "responses";
@@ -209,11 +205,6 @@ type PoolMember =
       chatCompletionsUpstreamMode: ChatCompletionsUpstreamMode;
       imagesUpstreamMode: ImagesUpstreamMode;
       useStream: boolean;
-      // Adobe 来源：上游实为 Adobe 的 gpt 格式 api。开启后计费套用下方 billingMultiplier
-      // （与分组倍率相乘，复用 Adobe 伪账号倍率链），并参与 firefly 候选（含反向转换）。
-      adobeSourced: boolean;
-      // 计费倍率（仅当 adobeSourced 时生效）。
-      billingMultiplier: number;
       contentSafetyEnabled: boolean;
       priority: number;
       concurrency: number;
@@ -251,47 +242,13 @@ type PoolMember =
       lastAcquiredAt: Date | null;
       createdAt: Date;
       metadata: Record<string, unknown> | null;
-    }
-  | {
-      // Adobe Firefly（adobe2api）后端成员。与 api 类似（baseUrl + apiKey），但请求/
-      // 响应走 adobe 适配器（model id 编码宽高比/分辨率、产物为 URL 需 re-host）。
-      type: "adobe";
-      id: string;
-      alwaysActive: boolean;
-      groupId: string | null;
-      groupIds: string[];
-      groupMetadata: Record<string, unknown> | null;
-      groupContentSafetyEnabled: boolean | null;
-      name: string;
-      // gateway：外部 adobe2api；direct：本仓库直连 Firefly。
-      mode: string;
-      baseUrl: string;
-      apiKey: string;
-      enabledModels: string[] | null;
-      defaultRatio: string;
-      defaultResolution: string;
-      gptImageQuality: string;
-      // 本 Adobe 后端的计费倍率（图像+视频统一）；与分组倍率相乘。
-      billingMultiplier: number;
-      supportsVideo: boolean;
-      contentSafetyEnabled: boolean;
-      priority: number;
-      concurrency: number;
-      leaseId?: string;
-      leasePersisted?: boolean;
-      leaseTouchedMember?: boolean;
-      schedulerLayer?: SchedulerSelectionLayer;
-      lastUsedAt: Date | null;
-      lastAcquiredAt: Date | null;
-      createdAt: Date;
-      metadata: Record<string, unknown> | null;
     };
 
 export type ResolvedImageBackendPoolConfig = {
   config: ApiConfig;
   groupId: string | null;
   memberId: string;
-  memberType: "api" | "account" | "adobe";
+  memberType: "api" | "account";
   contentSafetyEnabled: boolean;
   schedulerLayer?: SchedulerSelectionLayer;
 };
@@ -304,7 +261,7 @@ export class ImageBackendPoolUnavailableError extends Error {
 }
 
 export type ImageBackendReportResultInput = {
-  memberType?: "api" | "account" | "adobe";
+  memberType?: "api" | "account";
   memberId?: string;
   success: boolean;
   error?: string | null;
@@ -514,20 +471,18 @@ function getGroupSizeTier(
   return asGroupMetadata(metadata).sizeTier === "full" ? "full" : "standard";
 }
 
-// 池成员(api / account / adobe)按其所在分组的 backendType 决定参与哪个"车道阶段"。
+// 池成员(api / account)按其所在分组的 backendType 决定参与哪个"车道阶段"。
 // 阶段(web / codex)参与与否【纯由车道决定】,与"该后端能否服务某请求类型(images vs
 // responses 端点)"是两件独立的事——后者由 requestKind 维度的接口判定负责,绝不在此用
 // 阶段去卡(否则 codex 阶段会误把 images 端点的 API 挡在门外)。
 // - mixed 分组(直接挂在混合分组):不区分车道,任何偏好阶段都参与(谁都可请求);
 // - web 分组:仅当请求当前偏好为 web 时参与;responses(codex)分组:仅 codex 阶段参与;
-// - firefly 请求(fireflyOnly,必走 adobe)或请求无偏好时:不受车道限制。
+// - 请求无偏好时:不受车道限制。
 export function memberAllowedForPhase(
   groupBackendType: ImageBackendGroupBackendType,
-  effectivePreference: ImageBackendAccountBackend | undefined,
-  fireflyOnly: boolean
+  effectivePreference: ImageBackendAccountBackend | undefined
 ): boolean {
   return (
-    fireflyOnly ||
     !effectivePreference ||
     groupBackendType === "mixed" ||
     groupBackendType === effectivePreference
@@ -541,7 +496,7 @@ export function memberAllowedForPhase(
 // 推迟回退(否则会被常驻永久卡住回退,详见车道兜底设计)。冷却成员不在调用方传入的集合里
 // (已被 DB WHERE 滤除并视作"已尝试"),天然不参与短等。
 export function isWebCapacityWaitCandidate(
-  member: { type: "api" | "account" | "adobe"; alwaysActive: boolean },
+  member: { type: "api" | "account"; alwaysActive: boolean },
   effectivePreference: ImageBackendAccountBackend | undefined,
   atCapacity: boolean
 ): boolean {
@@ -839,7 +794,7 @@ function schedulerMetricBucket(date = new Date()) {
 async function recordSchedulerMetric(input: {
   requestKind?: ImageBackendRequestKind;
   layer: SchedulerSelectionLayer | "switch";
-  memberType?: "api" | "account" | "adobe" | null;
+  memberType?: "api" | "account" | null;
   memberId?: string | null;
   groupId?: string | null;
   candidateCount?: number;
@@ -913,7 +868,7 @@ async function recordSchedulerMetric(input: {
 
 export async function recordImageBackendSchedulerSwitch(input: {
   requestKind?: ImageBackendRequestKind;
-  memberType?: "api" | "account" | "adobe" | null;
+  memberType?: "api" | "account" | null;
   memberId?: string | null;
   groupId?: string | null;
 }) {
@@ -1101,20 +1056,6 @@ async function acquirePoolMemberInflightLease(
         ) {
           return "stale";
         }
-      } else if (member.type === "adobe") {
-        const [locked] = await tx
-          .select({ lastAcquiredAt: imageBackendAdobe.lastAcquiredAt })
-          .from(imageBackendAdobe)
-          .where(eq(imageBackendAdobe.id, member.id))
-          .for("update");
-        lockedLastAcquiredAt = locked?.lastAcquiredAt;
-        if (!locked) return "full";
-        if (
-          options?.enforceLastAcquiredSnapshot &&
-          !sameMemberTimestamp(lockedLastAcquiredAt, member.lastAcquiredAt)
-        ) {
-          return "stale";
-        }
       } else {
         const [locked] = await tx
           .select({ lastAcquiredAt: imageBackendAccount.lastAcquiredAt })
@@ -1161,17 +1102,6 @@ async function acquirePoolMemberInflightLease(
             updatedAt: now,
           })
           .where(eq(imageBackendApi.id, member.id));
-      } else if (member.type === "adobe") {
-        await tx
-          .update(imageBackendAdobe)
-          .set({
-            status: "active",
-            cooldownUntil: null,
-            lastUsedAt: now,
-            lastAcquiredAt: now,
-            updatedAt: now,
-          })
-          .where(eq(imageBackendAdobe.id, member.id));
       } else {
         await tx
           .update(imageBackendAccount)
@@ -1259,7 +1189,7 @@ async function isUnrecoverableBackendError(error?: string | null) {
 }
 
 export function acquireImageBackendInflight(input: {
-  memberType?: "api" | "account" | "adobe";
+  memberType?: "api" | "account";
   memberId?: string;
 }) {
   if (!input.memberType || !input.memberId) return;
@@ -1268,7 +1198,7 @@ export function acquireImageBackendInflight(input: {
 }
 
 export function releaseImageBackendInflight(input: {
-  memberType?: "api" | "account" | "adobe";
+  memberType?: "api" | "account";
   memberId?: string;
 }) {
   if (!input.memberType || !input.memberId) return;
@@ -1282,7 +1212,7 @@ export function releaseImageBackendInflight(input: {
 }
 
 export async function releaseImageBackendInflightLease(input: {
-  memberType?: "api" | "account" | "adobe";
+  memberType?: "api" | "account";
   memberId?: string;
   leaseId?: string | null;
   leasePersisted?: boolean | null;
@@ -1501,9 +1431,6 @@ export function isMissingImageToolBackendError(error?: string | null) {
  *   的中转不自愈），由测活/重新启用复活；当次请求仍换号重试（文案含 502/temporarily
  *   unavailable，被 isRecoverableBackendError 判为可切换）。
  * 这类不会自愈，应踢出轮换直到管理员处理（测活/重新启用/常驻）。
- * 注意副作用：firefly-* / nano-banana 仅由 Adobe / adobe_sourced 后端出图，若这些后端因本
- * 错误被全部踢出，firefly 请求将无后端可解析——此时由 getEffectiveConfig 给出「无可用 Adobe
- * 后端」的明确报错（而非泛化的"默认后端缺失"），便于运维定位是后端被踢空而非模型问题。
  */
 function isDeadRelayBackendError(error?: string | null) {
   const normalized = (error || "").toLowerCase();
@@ -2087,19 +2014,15 @@ export async function classifyFailure(
  * 凭证废/缺图像工具/中转坏）。
  */
 function resolveEffectiveFailureForMember(
-  memberType: "api" | "account" | "adobe",
+  memberType: "api" | "account",
   failure: {
     status?: string;
     cooldownUntil?: Date | null;
   },
   apiFailureCooldownEnabled: boolean
 ) {
-  // adobe 与 api 同属"中转型"后端，受各自 failureCooldownEnabled 门控；account 永远按
-  // 分类结果走。
-  if (
-    (memberType !== "api" && memberType !== "adobe") ||
-    apiFailureCooldownEnabled
-  ) {
+  // api 属"中转型"后端，受 failureCooldownEnabled 门控；account 永远按分类结果走。
+  if (memberType !== "api" || apiFailureCooldownEnabled) {
     return failure;
   }
   return {
@@ -2127,12 +2050,10 @@ export function resolveAlwaysActiveFailure(
 function isBackendAvailableStatus(
   statusColumn:
     | typeof imageBackendAccount.status
-    | typeof imageBackendApi.status
-    | typeof imageBackendAdobe.status,
+    | typeof imageBackendApi.status,
   cooldownColumn:
     | typeof imageBackendAccount.cooldownUntil
-    | typeof imageBackendApi.cooldownUntil
-    | typeof imageBackendAdobe.cooldownUntil,
+    | typeof imageBackendApi.cooldownUntil,
   now: Date
 ) {
   return or(
@@ -2385,27 +2306,24 @@ async function selectPoolMember(
   requestKind?: ImageBackendRequestKind,
   excluded?: Set<string>,
   preferredMemberId?: string,
-  preferredMemberType?: "api" | "account" | "adobe",
+  preferredMemberType?: "api" | "account",
   stickyPreviousMember?: StickyBindingMember | null,
   stickySessionMember?: StickyBindingMember | null,
   accountBackendPreference?: ImageBackendAccountBackend,
   accountBackendPreferenceMode?: ImageBackendPreferenceMode,
   requestedModel?: string,
-  forceFirefly = false,
   staleRetryCount = 0,
   capacityWaitCount = 0,
   accountPlanFilter: ImageBackendAccountPlanFilter = "any",
   webRequestMode: "image" | "text" = "image",
   minPriorityExclusive?: number
 ): Promise<PoolMember | null> {
-  // 只看目标主组；mixed 组选中 Web 子组时仍保留其原始模型与 Adobe 路由规则。
+  // 只看目标主组；mixed 组选中 Web 子组时仍保留其原始模型。
   const modelRouting = resolvePoolModelRouting({
     groupBackendType: getGroupBackendType(groupMetadata),
     requestKind,
     requestedModel,
-    forceFirefly,
   });
-  const fireflyOnly = modelRouting.fireflyOnly;
   const selectionStartedAt = Date.now();
   const contexts = groupContexts?.length
     ? groupContexts
@@ -2643,8 +2561,6 @@ async function selectPoolMember(
             imageBackendApi.chatCompletionsUpstreamMode,
           imageUpstreamMode: imageBackendApi.imageUpstreamMode,
           useStream: imageBackendApi.useStream,
-          adobeSourced: imageBackendApi.adobeSourced,
-          billingMultiplier: imageBackendApi.billingMultiplier,
           contentSafetyEnabled: imageBackendApi.contentSafetyEnabled,
           priority: imageBackendApi.priority,
           concurrency: imageBackendApi.concurrency,
@@ -2683,8 +2599,6 @@ async function selectPoolMember(
             imageBackendApi.chatCompletionsUpstreamMode,
           imageUpstreamMode: imageBackendApi.imageUpstreamMode,
           useStream: imageBackendApi.useStream,
-          adobeSourced: imageBackendApi.adobeSourced,
-          billingMultiplier: imageBackendApi.billingMultiplier,
           contentSafetyEnabled: imageBackendApi.contentSafetyEnabled,
           priority: imageBackendApi.priority,
           concurrency: imageBackendApi.concurrency,
@@ -2706,91 +2620,9 @@ async function selectPoolMember(
           asc(imageBackendApi.createdAt)
         );
 
-  // adobe（Firefly）候选：与 api 同构的入选条件（always_active 仅豁免临时故障，
-  // status="error" 终态仍踢出）。
-  const adobeBaseWhere = and(
-    eq(imageBackendAdobe.isEnabled, true),
-    or(
-      and(
-        eq(imageBackendAdobe.alwaysActive, true),
-        sql`${imageBackendAdobe.status} <> 'error'`
-      ),
-      and(
-        isBackendAvailableStatus(
-          imageBackendAdobe.status,
-          imageBackendAdobe.cooldownUntil,
-          now
-        ),
-        or(
-          sql`${imageBackendAdobe.cooldownUntil} IS NULL`,
-          sql`${imageBackendAdobe.cooldownUntil} <= ${now}`
-        )
-      )
-    )
-  );
-  const adobeSelection = {
-    matchedGroupId: imageBackendAdobe.groupId,
-    id: imageBackendAdobe.id,
-    alwaysActive: imageBackendAdobe.alwaysActive,
-    groupId: imageBackendAdobe.groupId,
-    name: imageBackendAdobe.name,
-    mode: imageBackendAdobe.mode,
-    baseUrl: imageBackendAdobe.baseUrl,
-    apiKey: imageBackendAdobe.apiKey,
-    enabledModels: imageBackendAdobe.enabledModels,
-    defaultRatio: imageBackendAdobe.defaultRatio,
-    defaultResolution: imageBackendAdobe.defaultResolution,
-    gptImageQuality: imageBackendAdobe.gptImageQuality,
-    billingMultiplier: imageBackendAdobe.billingMultiplier,
-    supportsVideo: imageBackendAdobe.supportsVideo,
-    contentSafetyEnabled: imageBackendAdobe.contentSafetyEnabled,
-    priority: imageBackendAdobe.priority,
-    concurrency: imageBackendAdobe.concurrency,
-    lastUsedAt: imageBackendAdobe.lastUsedAt,
-    lastAcquiredAt: imageBackendAdobe.lastAcquiredAt,
-    createdAt: imageBackendAdobe.createdAt,
-    metadata: imageBackendAdobe.metadata,
-  };
-  // adobe 作为特殊 firefly account 成员，按分组归属参与调度（与 api/account 同源）：只从
-  // 本次请求命中的分组拉取 adobe 后端，不再全局忽略分组。挂低优先级即天然成为兜底。
-  const adobeRowsPromise = groupIds.length
-    ? db
-        .select({
-          ...adobeSelection,
-          matchedGroupId: imageBackendAdobeGroup.groupId,
-        })
-        .from(imageBackendAdobe)
-        .innerJoin(
-          imageBackendAdobeGroup,
-          eq(imageBackendAdobeGroup.adobeId, imageBackendAdobe.id)
-        )
-        .where(
-          and(adobeBaseWhere, inArray(imageBackendAdobeGroup.groupId, groupIds))
-        )
-        .orderBy(
-          asc(imageBackendAdobe.priority),
-          asc(imageBackendAdobe.lastUsedAt),
-          asc(imageBackendAdobe.createdAt)
-        )
-    : db
-        .select(adobeSelection)
-        .from(imageBackendAdobe)
-        .where(
-          and(
-            adobeBaseWhere,
-            groupId ? eq(imageBackendAdobe.groupId, groupId) : sql`true`
-          )
-        )
-        .orderBy(
-          asc(imageBackendAdobe.priority),
-          asc(imageBackendAdobe.lastUsedAt),
-          asc(imageBackendAdobe.createdAt)
-        );
-
-  const [apiRows, accountRows, adobeRows] = await Promise.all([
+  const [apiRows, accountRows] = await Promise.all([
     apiRowsPromise,
     accountRowsPromise,
-    adobeRowsPromise,
   ]);
 
   const apiMembers: PoolMember[] = apiRows
@@ -2800,19 +2632,13 @@ async function selectPoolMember(
       const metadata = context?.metadata ?? groupMetadata;
       const effectiveRequestKind = requestKind || "image_generation";
       return (
-        // fireflyOnly（force_firefly 或 firefly-* 模型）时通用 API 不参与、只走 adobe；
-        // 但「Adobe 来源」api（上游即 Adobe）参与 firefly 候选：force_firefly 直接以 gpt
-        // 格式服务，显式 firefly-* 由下游反向转换成 gpt 请求后服务。
-        (!modelRouting.excludeAdobeBackends || !row.adobeSourced) &&
-        (!fireflyOnly || row.adobeSourced) &&
         // 阶段参与纯按车道:web 偏好只取 web/mixed 分组的 API、codex 偏好只取 codex/mixed
         // 分组的 API（mixed 谁都可请求）。是否经 responses 端点出图属于"能否服务该
         // requestKind"的独立维度,交由下方 imageBackendApiInterfaceAllowsRequest 按请求
         // 类型筛(images-only API 对 responses/chat 请求自然返回 false),不在此用阶段去卡。
         memberAllowedForPhase(
           getGroupBackendType(metadata),
-          effectiveAccountBackendPreference,
-          fireflyOnly
+          effectiveAccountBackendPreference
         ) &&
         groupBackendAllowsRequest(metadata, effectiveRequestKind) &&
         imageBackendApiInterfaceAllowsRequest(
@@ -2847,8 +2673,6 @@ async function selectPoolMember(
         ),
         imagesUpstreamMode: normalizeImagesUpstreamMode(row.imageUpstreamMode),
         useStream: row.useStream,
-        adobeSourced: row.adobeSourced,
-        billingMultiplier: Number(row.billingMultiplier) || 1,
         contentSafetyEnabled: row.contentSafetyEnabled,
         priority: row.priority,
         concurrency: row.concurrency,
@@ -2869,13 +2693,11 @@ async function selectPoolMember(
         ? effectiveContextPreferences.get(matchedGroupId)
         : effectiveAccountBackendPreference;
       return (
-        // fireflyOnly（force_firefly 或 firefly-* 模型）时只走 adobe，codex/web 账号不参与。
-        !fireflyOnly &&
         // 账号的"车道"由其自身 implementationMode（web / responses）天然决定:web 账号属 web
         // 车道、responses 账号属 codex 车道。故按「该分组生效偏好 rowPreference == 账号
         // implementationMode」过滤即已实现 web/codex 阶段隔离——mixed 分组 web 阶段只取 web
         // 账号,responses 账号留待回退后的 codex 阶段(届时 rowPreference="responses" 命中)。
-        // 这与 api/adobe 不同:后者无固有类型,用 memberAllowedForPhase 按【分组】车道判定;此处
+        // 这与 api 不同:后者无固有类型,用 memberAllowedForPhase 按【分组】车道判定;此处
         // 刻意不套 memberAllowedForPhase,否则会把 responses 账号误放进 web 阶段、破坏 web 先行。
         (!rowPreference || rowPreference === backend) &&
         groupBackendAllowsAccount(metadata, backend) &&
@@ -2918,65 +2740,9 @@ async function selectPoolMember(
       metadata: row.metadata,
     }));
 
-  // 非纯 Web 主组中，Adobe 对生成/编辑请求作为同池候选；纯 Web 固定 2.5 时排除
-  // 会改回旧型号的 Adobe，避免已授权的组路由在实际出站时失效。
-  const adobeMembers: PoolMember[] = adobeRows
-    .filter((row) => {
-      const matchedGroupId = row.matchedGroupId || row.groupId;
-      const context = matchedGroupId ? contextMap.get(matchedGroupId) : null;
-      const metadata = context?.metadata ?? groupMetadata;
-      const effectiveRequestKind = requestKind || "image_generation";
-      return (
-        !modelRouting.excludeAdobeBackends &&
-        (effectiveRequestKind === "image_generation" ||
-          effectiveRequestKind === "image_edit") &&
-        groupBackendAllowsRequest(metadata, effectiveRequestKind) &&
-        // adobe 按所在分组的 backendType 充当该车道兜底:web 偏好请求不再漏到 codex
-        // 等非 web 车道的 adobe(挂在混合分组的不限车道,谁都可请求）。
-        memberAllowedForPhase(
-          getGroupBackendType(metadata),
-          effectiveAccountBackendPreference,
-          fireflyOnly
-        )
-      );
-    })
-    .map((row) => {
-      const matchedGroupId = row.matchedGroupId || row.groupId;
-      const context = matchedGroupId ? contextMap.get(matchedGroupId) : null;
-      return {
-        type: "adobe" as const,
-        id: row.id,
-        alwaysActive: row.alwaysActive,
-        groupId: matchedGroupId,
-        groupIds: normalizeAccountGroupIds([row.groupId, row.matchedGroupId]),
-        groupMetadata: context?.metadata ?? groupMetadata ?? null,
-        groupContentSafetyEnabled:
-          context?.contentSafetyEnabled ?? groupContentSafetyEnabled ?? null,
-        name: row.name,
-        mode: row.mode,
-        baseUrl: row.baseUrl,
-        apiKey: row.apiKey,
-        enabledModels: row.enabledModels ?? null,
-        defaultRatio: row.defaultRatio,
-        defaultResolution: row.defaultResolution,
-        gptImageQuality: row.gptImageQuality,
-        // DB numeric 取回为字符串，强转并兜底 1。
-        billingMultiplier: Number(row.billingMultiplier) || 1,
-        supportsVideo: row.supportsVideo,
-        contentSafetyEnabled: row.contentSafetyEnabled,
-        priority: row.priority,
-        concurrency: row.concurrency,
-        lastUsedAt: row.lastUsedAt,
-        lastAcquiredAt: row.lastAcquiredAt,
-        createdAt: row.createdAt,
-        metadata: row.metadata,
-      };
-    });
-
   const notExcludedCandidates = [
     ...apiMembers,
     ...accountMembers,
-    ...adobeMembers,
   ].filter(
     (member) =>
       !excluded?.has(backendKey(member)) &&
@@ -3142,7 +2908,6 @@ async function selectPoolMember(
       accountBackendPreference,
       accountBackendPreferenceMode,
       modelRouting.requestedModel,
-      modelRouting.forceFirefly,
       staleRetryCount + 1,
       capacityWaitCount,
       accountPlanFilter,
@@ -3174,7 +2939,6 @@ async function selectPoolMember(
       accountBackendPreference,
       accountBackendPreferenceMode,
       modelRouting.requestedModel,
-      modelRouting.forceFirefly,
       staleRetryCount,
       capacityWaitCount + 1,
       accountPlanFilter,
@@ -3202,20 +2966,6 @@ async function touchSelectedMember(
         updatedAt: now,
       })
       .where(eq(imageBackendApi.id, member.id));
-    return;
-  }
-
-  if (member.type === "adobe") {
-    await db
-      .update(imageBackendAdobe)
-      .set({
-        status: "active",
-        cooldownUntil: null,
-        lastUsedAt: now,
-        lastAcquiredAt: now,
-        updatedAt: now,
-      })
-      .where(eq(imageBackendAdobe.id, member.id));
     return;
   }
 
@@ -3284,13 +3034,9 @@ function toResolvedPoolConfig(
             options.accountBackendPreference === "responses",
           // 尺寸方言（metadata.sizeDialect）：见 image-generation/types.ts 注释。
           sizeDialect: normalizeApiSizeDialect(member.metadata),
-          adobeSourced: member.adobeSourced,
           billingGroupId: fallbackGroupId,
-          // Adobe 来源 api：组倍率 × 本后端倍率（复用 Adobe 伪账号同一倍率链）；
-          // 普通 api 不套成员倍率，仅组倍率。
-          billingMultiplier: member.adobeSourced
-            ? billingMultiplier * (member.billingMultiplier || 1)
-            : billingMultiplier,
+          // 仅组倍率，不套成员倍率。
+          billingMultiplier,
           // 质量计价倍率表（quality → 倍率）：由 operations.ts 按请求 quality 解析
           // 后折入总倍率，与组/成员倍率相乘。
           qualityBilling: member.qualityBilling ?? null,
@@ -3309,45 +3055,6 @@ function toResolvedPoolConfig(
       groupId,
       memberId: member.id,
       memberType: "api",
-      contentSafetyEnabled,
-      schedulerLayer: member.schedulerLayer,
-    };
-  }
-
-  if (member.type === "adobe") {
-    return {
-      config: {
-        baseUrl: stripTrailingSlash(member.baseUrl),
-        apiKey: member.apiKey,
-        contentSafetyEnabled,
-        backend: {
-          type: "pool-adobe",
-          id: member.id,
-          groupId,
-          groupBackendType,
-          userId: options.userId,
-          apiKeyId: options.apiKeyId,
-          requestKind: options.requestKind,
-          adobeMode: member.mode === "direct" ? "direct" : "gateway",
-          adobeEnabledModels: member.enabledModels,
-          adobeDefaultRatio: member.defaultRatio,
-          adobeDefaultResolution: member.defaultResolution,
-          adobeGptImageQuality: member.gptImageQuality,
-          adobeSupportsVideo: member.supportsVideo,
-          billingGroupId: fallbackGroupId,
-          // 组倍率 × 本 Adobe 后端倍率（叠加），作用于图像与视频扣费。
-          billingMultiplier:
-            billingMultiplier * (member.billingMultiplier || 1),
-          priority: member.priority,
-          reportResult: true,
-          inflightLease: true,
-          inflightLeaseId: member.leaseId,
-          inflightLeasePersisted: member.leasePersisted,
-        },
-      },
-      groupId,
-      memberId: member.id,
-      memberType: "adobe",
       contentSafetyEnabled,
       schedulerLayer: member.schedulerLayer,
     };
@@ -3464,7 +3171,6 @@ async function resolvePoolMember(
     groupBackendType: getGroupBackendType(group.metadata),
     requestKind: options.requestKind,
     requestedModel: options.requestedModel,
-    forceFirefly: options.forceFirefly,
   });
   const member = await selectPoolMember(
     group.id,
@@ -3484,7 +3190,6 @@ async function resolvePoolMember(
     options.accountBackendPreference,
     options.accountBackendPreferenceMode,
     modelRouting.requestedModel,
-    modelRouting.forceFirefly,
     0,
     0,
     options.accountPlanFilter ?? "any",
@@ -3494,7 +3199,6 @@ async function resolvePoolMember(
   if (!member) {
     const fallback = await resolveAnyResponsesMember();
     if (fallback) return fallback;
-    // 默认 Web 组同样保留已验权的组上下文，避免上层按被忽略的 Firefly 名称误报 Adobe 故障。
     if (
       requestedGroup.explicit ||
       getGroupBackendType(group.metadata) === "web"
@@ -3535,7 +3239,6 @@ async function resolveAnyWebPoolMember(
       groupBackendType: getGroupBackendType(group.metadata),
       requestKind: options.requestKind,
       requestedModel: options.requestedModel,
-      forceFirefly: options.forceFirefly,
     });
     const groupContexts = await listSelectableGroupContexts(
       group,
@@ -3557,7 +3260,6 @@ async function resolveAnyWebPoolMember(
         "web",
         options.accountBackendPreferenceMode,
         modelRouting.requestedModel,
-        modelRouting.forceFirefly,
         0,
         0,
         options.accountPlanFilter ?? "any",
@@ -3609,7 +3311,6 @@ async function resolveAnyResponsesPoolMember(
       groupBackendType: getGroupBackendType(group.metadata),
       requestKind: "responses",
       requestedModel: options.requestedModel,
-      forceFirefly: options.forceFirefly,
     });
     const member = await selectPoolMember(
       group.id,
@@ -3625,7 +3326,6 @@ async function resolveAnyResponsesPoolMember(
       "responses",
       options.accountBackendPreferenceMode,
       modelRouting.requestedModel,
-      modelRouting.forceFirefly,
       0,
       0,
       options.accountPlanFilter ?? "any",
@@ -3655,22 +3355,12 @@ export async function resolveImageBackendPoolConfig(
           resolved.member.implementationMode === "web",
       });
     }
-    const result = toResolvedPoolConfig(
+    return toResolvedPoolConfig(
       resolved.group.id,
       resolved.member,
       options,
       resolved.group.metadata
     );
-    // 与选号使用同一主组策略；纯 Web 组不得在写回时恢复原始 Firefly 意图。
-    if (result?.config.backend) {
-      result.config.backend.fireflyOnly = resolvePoolModelRouting({
-        groupBackendType: getGroupBackendType(resolved.group.metadata),
-        requestKind: options.requestKind,
-        requestedModel: options.requestedModel,
-        forceFirefly: options.forceFirefly,
-      }).fireflyOnly;
-    }
-    return result;
   } catch (error) {
     await releaseImageBackendInflightLease({
       memberType: resolved.member.type,
@@ -3768,94 +3458,6 @@ export async function reportImageBackendResult(
       .where(eq(imageBackendApi.id, input.memberId));
     if (!input.success) {
       logWarn("生图 API 后端失败，已更新调度状态", {
-        memberType: input.memberType,
-        memberId: input.memberId,
-        status: effectiveFailure.status || "unchanged",
-        cooldownUntil: effectiveFailure.cooldownUntil
-          ? effectiveFailure.cooldownUntil.toISOString()
-          : null,
-        retryable: outcome.retryable,
-        switchable: outcome.switchable,
-        error,
-      });
-    }
-    return outcome;
-  }
-
-  if (input.memberType === "adobe") {
-    const [adobe] = await db
-      .select({
-        metadata: imageBackendAdobe.metadata,
-        alwaysActive: imageBackendAdobe.alwaysActive,
-        status: imageBackendAdobe.status,
-        failureCooldownEnabled: imageBackendAdobe.failureCooldownEnabled,
-      })
-      .from(imageBackendAdobe)
-      .where(eq(imageBackendAdobe.id, input.memberId))
-      .limit(1);
-    const alwaysActive = adobe?.alwaysActive ?? false;
-    const effectiveFailure = input.success
-      ? failure
-      : resolveEffectiveFailureForMember(
-          "adobe",
-          failure,
-          adobe?.failureCooldownEnabled ?? false
-        );
-    const outcome = {
-      success: input.success,
-      status: effectiveFailure.status,
-      cooldownUntil: effectiveFailure.cooldownUntil,
-      retryable:
-        !input.success &&
-        isClassifiedFailureRecoverable(error, effectiveFailure),
-      switchable: !input.success && isImageBackendSwitchableError(error),
-    };
-    const metadata = nextSchedulerMetadataAfterResult(
-      adobe?.metadata,
-      input,
-      now
-    );
-    // 与 api 同款：always_active 常驻后端遇任何失败都不自动下线（含终态 502/HTML），
-    // 详见 resolveAlwaysActiveFailure。
-    const adobeFailure = resolveAlwaysActiveFailure(
-      alwaysActive,
-      effectiveFailure
-    );
-    const stickyError = adobe?.status === "error" && !alwaysActive;
-    await db
-      .update(imageBackendAdobe)
-      .set(
-        input.success
-          ? stickyError
-            ? {
-                successCount: sql`${imageBackendAdobe.successCount} + 1`,
-                metadata,
-                updatedAt: now,
-              }
-            : {
-                successCount: sql`${imageBackendAdobe.successCount} + 1`,
-                metadata,
-                status: "active",
-                lastError: null,
-                lastErrorAt: null,
-                cooldownUntil: null,
-                updatedAt: now,
-              }
-          : {
-              failCount: sql`${imageBackendAdobe.failCount} + 1`,
-              metadata,
-              ...(adobeFailure.status ? { status: adobeFailure.status } : {}),
-              ...(adobeFailure.cooldownUntil !== undefined
-                ? { cooldownUntil: adobeFailure.cooldownUntil }
-                : {}),
-              lastError: error,
-              lastErrorAt: now,
-              updatedAt: now,
-            }
-      )
-      .where(eq(imageBackendAdobe.id, input.memberId));
-    if (!input.success) {
-      logWarn("生图 Adobe 后端失败，已更新调度状态", {
         memberType: input.memberType,
         memberId: input.memberId,
         status: effectiveFailure.status || "unchanged",
@@ -7569,9 +7171,6 @@ type UpsertApiInput = {
   failureCooldownEnabled: boolean;
   priority: number;
   concurrency: number;
-  // Adobe 来源标记 + 成员计费倍率（仅 adobeSourced 时生效）。
-  adobeSourced?: boolean;
-  billingMultiplier?: number;
   status?: string;
 };
 
@@ -7648,9 +7247,6 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     failureCooldownEnabled: input.failureCooldownEnabled,
     priority: input.priority,
     concurrency: Math.max(1, Math.min(10000, input.concurrency)),
-    adobeSourced: input.adobeSourced ?? false,
-    // numeric 列以字符串写入（与 image_backend_adobe.billing_multiplier 一致）。
-    billingMultiplier: String(input.billingMultiplier ?? 1),
     status: input.status || "active",
     updatedAt: new Date(),
     // 尺寸方言并入 metadata（保留其他键；显式传 wxh 时也落库，便于后台回显）。
@@ -7713,173 +7309,6 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     replace: true,
   });
   return id;
-}
-
-// Adobe 后端与分组关系写入（镜像 setImageBackendApiGroups）。
-async function setImageBackendAdobeGroups(input: {
-  adobeId: string;
-  groupIds: string[];
-  replace: boolean;
-}) {
-  const groupIds = normalizeAccountGroupIds(input.groupIds);
-  if (input.replace) {
-    await db
-      .delete(imageBackendAdobeGroup)
-      .where(eq(imageBackendAdobeGroup.adobeId, input.adobeId));
-  }
-  if (!groupIds.length) return;
-  await db
-    .insert(imageBackendAdobeGroup)
-    .values(
-      groupIds.map((groupId) => ({
-        id: `${input.adobeId}:${groupId}`,
-        adobeId: input.adobeId,
-        groupId,
-      }))
-    )
-    .onConflictDoNothing();
-}
-
-export type UpsertAdobeInput = {
-  id?: string;
-  groupId?: string | null;
-  groupIds?: string[];
-  mergeGroupIds?: boolean;
-  name: string;
-  mode?: "gateway" | "direct";
-  baseUrl: string;
-  apiKey?: string;
-  enabledModels?: string[] | null;
-  defaultRatio: string;
-  defaultResolution: string;
-  gptImageQuality: string;
-  billingMultiplier: number;
-  supportsVideo: boolean;
-  contentSafetyEnabled: boolean;
-  isEnabled: boolean;
-  alwaysActive: boolean;
-  failureCooldownEnabled: boolean;
-  priority: number;
-  concurrency: number;
-  status?: string;
-};
-
-/**
- * 新建/更新一个 Adobe（adobe2api）后端。镜像 upsertImageBackendApi：groupIds 为多分组
- * 真相，primaryGroupId（首个）保留为主分组；编辑时仅在传入 apiKey 时才覆写密钥。
- */
-export async function upsertImageBackendAdobe(input: UpsertAdobeInput) {
-  const groupIds = accountGroupIdsFromInput(input);
-  const primaryGroupId = groupIds[0] || null;
-  let existingPrimaryGroupId: string | null | undefined;
-
-  if (input.id) {
-    const [existing] = await db
-      .select({ groupId: imageBackendAdobe.groupId })
-      .from(imageBackendAdobe)
-      .where(eq(imageBackendAdobe.id, input.id))
-      .limit(1);
-    existingPrimaryGroupId = existing?.groupId ?? null;
-  }
-
-  const mode = input.mode === "direct" ? "direct" : "gateway";
-  const updateBase = {
-    name: input.name,
-    mode,
-    baseUrl: stripTrailingSlash(input.baseUrl),
-    enabledModels: input.enabledModels ?? null,
-    defaultRatio: input.defaultRatio,
-    defaultResolution: input.defaultResolution,
-    gptImageQuality: input.gptImageQuality,
-    // numeric 列要求字符串。
-    billingMultiplier: String(input.billingMultiplier),
-    supportsVideo: input.supportsVideo,
-    contentSafetyEnabled: input.contentSafetyEnabled,
-    isEnabled: input.isEnabled,
-    alwaysActive: input.alwaysActive,
-    failureCooldownEnabled: input.failureCooldownEnabled,
-    priority: input.priority,
-    concurrency: Math.max(1, Math.min(10000, input.concurrency)),
-    status: input.status || "active",
-    updatedAt: new Date(),
-  };
-
-  if (input.id) {
-    const update = {
-      ...updateBase,
-      groupId: input.mergeGroupIds
-        ? existingPrimaryGroupId || primaryGroupId
-        : primaryGroupId,
-    };
-    await db
-      .update(imageBackendAdobe)
-      .set(input.apiKey ? { ...update, apiKey: input.apiKey } : update)
-      .where(eq(imageBackendAdobe.id, input.id));
-    await setImageBackendAdobeGroups({
-      adobeId: input.id,
-      groupIds,
-      replace: !input.mergeGroupIds,
-    });
-    return input.id;
-  }
-
-  // direct 模式凭据为 Adobe 账号/cookie（另表），不需要网关 apiKey；gateway 模式必填。
-  if (mode === "gateway" && !input.apiKey) {
-    throw new Error("apiKey is required");
-  }
-  const id = nanoid();
-  await db.insert(imageBackendAdobe).values({
-    id,
-    ...updateBase,
-    groupId: primaryGroupId,
-    apiKey: input.apiKey ?? "",
-  });
-  await setImageBackendAdobeGroups({ adobeId: id, groupIds, replace: true });
-  return id;
-}
-
-/** 启用/停用一个 Adobe 后端（镜像 setImageBackendApiEnabled）。 */
-export async function setImageBackendAdobeEnabled(input: {
-  id: string;
-  isEnabled: boolean;
-}): Promise<void> {
-  await db
-    .update(imageBackendAdobe)
-    .set({
-      isEnabled: input.isEnabled,
-      ...(input.isEnabled
-        ? {
-            status: "active",
-            cooldownUntil: null,
-            lastError: null,
-            lastErrorAt: null,
-          }
-        : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(imageBackendAdobe.id, input.id));
-}
-
-/** 设置一个 Adobe 后端的 always_active 开关（镜像 api 版）。 */
-export async function setImageBackendAdobeAlwaysActive(input: {
-  id: string;
-  alwaysActive: boolean;
-}): Promise<void> {
-  await db
-    .update(imageBackendAdobe)
-    .set({
-      alwaysActive: input.alwaysActive,
-      ...(input.alwaysActive
-        ? {
-            status: "active",
-            cooldownUntil: null,
-            lastError: null,
-            lastErrorAt: null,
-          }
-        : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(imageBackendAdobe.id, input.id));
 }
 
 /**
@@ -8061,11 +7490,9 @@ export async function probeImageBackendApi(id: string): Promise<{
 export async function deleteImageBackendMembers(input: {
   accountIds?: string[];
   apiIds?: string[];
-  adobeIds?: string[];
 }) {
   let deletedAccountCount = 0;
   let deletedApiCount = 0;
-  let deletedAdobeCount = 0;
   if (input.accountIds?.length) {
     const accountIds = Array.from(new Set(input.accountIds.filter(Boolean)));
     for (let index = 0; index < accountIds.length; index += 500) {
@@ -8088,18 +7515,7 @@ export async function deleteImageBackendMembers(input: {
       deletedApiCount += chunk.length;
     }
   }
-  if (input.adobeIds?.length) {
-    const adobeIds = Array.from(new Set(input.adobeIds.filter(Boolean)));
-    for (let index = 0; index < adobeIds.length; index += 500) {
-      const chunk = adobeIds.slice(index, index + 500);
-      if (!chunk.length) continue;
-      await db
-        .delete(imageBackendAdobe)
-        .where(inArray(imageBackendAdobe.id, chunk));
-      deletedAdobeCount += chunk.length;
-    }
-  }
-  return { deletedAccountCount, deletedApiCount, deletedAdobeCount };
+  return { deletedAccountCount, deletedApiCount };
 }
 
 function adminAccountStatusCondition(
@@ -8432,8 +7848,6 @@ export async function listAdminImageBackendPool() {
       failureCooldownEnabled: imageBackendApi.failureCooldownEnabled,
       priority: imageBackendApi.priority,
       concurrency: imageBackendApi.concurrency,
-      adobeSourced: imageBackendApi.adobeSourced,
-      billingMultiplier: imageBackendApi.billingMultiplier,
       status: imageBackendApi.status,
       successCount: imageBackendApi.successCount,
       failCount: imageBackendApi.failCount,
@@ -8466,66 +7880,10 @@ export async function listAdminImageBackendPool() {
     apiGroupIdMap.set(row.apiId, current);
   }
 
-  const adobes = await db
-    .select({
-      id: imageBackendAdobe.id,
-      groupId: imageBackendAdobe.groupId,
-      name: imageBackendAdobe.name,
-      mode: imageBackendAdobe.mode,
-      baseUrl: imageBackendAdobe.baseUrl,
-      enabledModels: imageBackendAdobe.enabledModels,
-      defaultRatio: imageBackendAdobe.defaultRatio,
-      defaultResolution: imageBackendAdobe.defaultResolution,
-      gptImageQuality: imageBackendAdobe.gptImageQuality,
-      billingMultiplier: imageBackendAdobe.billingMultiplier,
-      supportsVideo: imageBackendAdobe.supportsVideo,
-      contentSafetyEnabled: imageBackendAdobe.contentSafetyEnabled,
-      isEnabled: imageBackendAdobe.isEnabled,
-      alwaysActive: imageBackendAdobe.alwaysActive,
-      failureCooldownEnabled: imageBackendAdobe.failureCooldownEnabled,
-      priority: imageBackendAdobe.priority,
-      concurrency: imageBackendAdobe.concurrency,
-      status: imageBackendAdobe.status,
-      successCount: imageBackendAdobe.successCount,
-      failCount: imageBackendAdobe.failCount,
-      lastUsedAt: imageBackendAdobe.lastUsedAt,
-      cooldownUntil: imageBackendAdobe.cooldownUntil,
-      lastError: imageBackendAdobe.lastError,
-      lastErrorAt: imageBackendAdobe.lastErrorAt,
-      createdAt: imageBackendAdobe.createdAt,
-    })
-    .from(imageBackendAdobe)
-    .orderBy(
-      asc(imageBackendAdobe.priority),
-      desc(imageBackendAdobe.createdAt)
-    );
-  const adobeGroupRows = adobes.length
-    ? await db
-        .select({
-          adobeId: imageBackendAdobeGroup.adobeId,
-          groupId: imageBackendAdobeGroup.groupId,
-        })
-        .from(imageBackendAdobeGroup)
-        .where(
-          inArray(
-            imageBackendAdobeGroup.adobeId,
-            adobes.map((adobe) => adobe.id)
-          )
-        )
-    : [];
-  const adobeGroupIdMap = new Map<string, string[]>();
-  for (const row of adobeGroupRows) {
-    const current = adobeGroupIdMap.get(row.adobeId) || [];
-    current.push(row.groupId);
-    adobeGroupIdMap.set(row.adobeId, current);
-  }
-
   return {
     groups: summaries,
     apis: apis.map((api) => ({
       ...api,
-      // numeric 列回库为字符串，转成数值供前端展示/编辑。
-      billingMultiplier: Number(api.billingMultiplier) || 1,
       // 尺寸方言从 metadata 解析（缺省 wxh），供后台表单回显。
       sizeDialect: normalizeApiSizeDialect(api.metadata),
       // 按模型计价表从 metadata 解析，供后台表单回显。
@@ -8535,12 +7893,6 @@ export async function listAdminImageBackendPool() {
       groupIds:
         apiGroupIdMap.get(api.id) ||
         normalizeAccountGroupIds(api.groupId ? [api.groupId] : []),
-    })),
-    adobes: adobes.map((adobe) => ({
-      ...adobe,
-      groupIds:
-        adobeGroupIdMap.get(adobe.id) ||
-        normalizeAccountGroupIds(adobe.groupId ? [adobe.groupId] : []),
     })),
   };
 }

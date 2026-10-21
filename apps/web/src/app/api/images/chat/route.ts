@@ -898,12 +898,11 @@ export const POST = withApiLogging(async (request: NextRequest) => {
     getText(formData, "imageModel") ||
     getText(formData, "image_model") ||
     undefined;
-  // 对话生图/Agent 走 Codex/Responses 语义,与 Adobe 直连不兼容;firefly 图像模型在此
-  // 不被支持(否则 firefly 意图不进 fireflyOnly,会落到非 Adobe 后端)。UI 已不暴露,此处
-  // 服务端兜底拒收,作为防御边界。
+  // 对话生图/Agent 走 Codex/Responses 语义;firefly 图像模型已随 Adobe 通道下线,UI 不再
+  // 暴露,此处服务端兜底拒收,作为防御边界。
   if (isFireflyModel(imageModel)) {
     return errorResponse(
-      "Firefly image models are not supported in chat/agent mode. Use /api/images/generate or /api/images/edit (or the external API) for Firefly.",
+      "Firefly image models are no longer supported. Use a gpt-image-* model.",
       400
     );
   }

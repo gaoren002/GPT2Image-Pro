@@ -111,8 +111,6 @@ const JSON_SCALAR_FIELDS = [
   "forceWeb",
   "web_first",
   "webFirst",
-  "force_firefly",
-  "forceFirefly",
   "stream",
   "async",
   "callback_url",
@@ -693,12 +691,6 @@ export const postExternalImageEdits = withApiLogging(
       "force_web",
       "forceWeb"
     );
-    // force_firefly：强制把本次编辑请求路由到 adobe（firefly）后端，对任意模型生效。
-    const forceFirefly = getOptionalBoolean(
-      formData,
-      "force_firefly",
-      "forceFirefly"
-    );
     if (imageReferences.length === 0) {
       return openAIImageError("At least one source image is required.");
     }
@@ -805,7 +797,6 @@ export const postExternalImageEdits = withApiLogging(
             hdRepair,
             n: 1,
             forceWebBackend,
-            forceFirefly,
             images: await buildImages(),
             mask: await buildMask(),
           },

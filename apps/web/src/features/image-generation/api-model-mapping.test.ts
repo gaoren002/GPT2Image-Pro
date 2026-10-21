@@ -12,17 +12,10 @@ import {
 } from "./api-model-mapping";
 
 describe("collectApiModelMappingKeys", () => {
-  it("展开 2.5 变体与 firefly 家族", () => {
+  it("展开 2.5 变体与 firefly 前缀", () => {
     expect(collectApiModelMappingKeys("gpt-image-2.5-sunburst")).toEqual([
       "gpt-image-2.5-sunburst",
       "gpt-image-2.5",
-    ]);
-    expect(
-      collectApiModelMappingKeys("firefly-nano-banana-pro-2k-1x1")
-    ).toEqual([
-      "firefly-nano-banana-pro-2k-1x1",
-      "nano-banana-pro",
-      "nano-banana-pro-2k-1x1",
     ]);
     expect(collectApiModelMappingKeys("firefly-gpt-image-2")).toEqual([
       "firefly-gpt-image-2",
@@ -65,7 +58,7 @@ describe("applyApiModelMapping", () => {
     ).toEqual({ model: "gpt-image-2.5-sunburst", quality: "high" });
   });
 
-  it("Adobe GPT Image 预设：普通档与高清档分流", () => {
+  it("GPT Image -ad 预设：普通档与高清档分流", () => {
     expect(
       applyApiModelMapping({
         resolvedModel: "gpt-image-2.5-sunburst",
@@ -93,11 +86,10 @@ describe("applyApiModelMapping", () => {
     ).toEqual({ model: "gpt-image-2-high", quality: "high" });
   });
 
-  it("Gemini 预设：firefly nano-banana 家族改写", () => {
+  it("Gemini 预设：nano-banana 家族改写", () => {
     expect(
       applyApiModelMapping({
         resolvedModel: "nano-banana-pro",
-        requestedModel: "firefly-nano-banana-pro-2k-16x9",
         mapping: PRESET_GEMINI_IMAGE_MAPPING,
       })
     ).toEqual({
@@ -107,7 +99,7 @@ describe("applyApiModelMapping", () => {
 
     expect(
       applyApiModelMapping({
-        resolvedModel: "firefly-nano-banana2-1k-1x1",
+        resolvedModel: "nano-banana2",
         mapping: PRESET_GEMINI_IMAGE_MAPPING,
       })
     ).toEqual({

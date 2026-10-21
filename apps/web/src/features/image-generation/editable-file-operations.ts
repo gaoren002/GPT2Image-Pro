@@ -49,10 +49,9 @@ export type EditableFileOutput = {
   creditsCharged: number;
 };
 
-/** pool-account/api/adobe → 租约/上报用的 memberType。web 账号为 pool-account → "account"。 */
-function poolMemberType(type?: string): "api" | "account" | "adobe" {
+/** pool-account/api → 租约/上报用的 memberType。web 账号为 pool-account → "account"。 */
+function poolMemberType(type?: string): "api" | "account" {
   if (type === "pool-api") return "api";
-  if (type === "pool-adobe") return "adobe";
   return "account";
 }
 

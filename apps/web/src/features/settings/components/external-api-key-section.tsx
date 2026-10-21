@@ -385,7 +385,6 @@ export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
             <p>POST /v1/agents/images</p>
             <p>POST /v1/images/generations</p>
             <p>POST /v1/images/edits</p>
-            <p>POST /v1/videos/generations</p>
             <p>GET /v1/images/{"{task_id}"}</p>
             <p>GET /v1/credits</p>
           </div>

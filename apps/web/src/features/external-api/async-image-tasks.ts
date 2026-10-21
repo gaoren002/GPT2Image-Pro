@@ -200,58 +200,6 @@ export function toGenerationImageTaskResponse(
   };
 }
 
-/** 一条 video_generation 记录(DB 回退查询用的最小字段集)。 */
-export type VideoTaskRow = {
-  id: string;
-  model: string;
-  // video_generation.status 是 text 列(pending/running/completed/failed),按字符串判定。
-  status: string;
-  durationSeconds: number;
-  creditsConsumed: string | number | null;
-  error: string | null;
-  createdAt: Date;
-  updatedAt: Date | null;
-};
-
-/**
- * 把一条 video_generation 记录转成 /v1/videos/{id} 的响应（DB 持久查询路径,纯函数）。
- * 与图像版同构,但产物是视频 URL,且带 duration_seconds。归属校验由调用方完成。
- * video_generation 无 completedAt 列,completed 时以 updatedAt 作为完成时间。
- */
-export function toVideoGenerationTaskResponse(
-  row: VideoTaskRow,
-  videoUrl: string | null
-) {
-  const status: AsyncImageTaskStatus =
-    row.status === "completed"
-      ? "completed"
-      : row.status === "failed"
-        ? "failed"
-        : "processing";
-  const credits = Number(row.creditsConsumed ?? 0);
-  return {
-    id: row.id,
-    object: status === "completed" ? "video" : "video.generation",
-    model: row.model,
-    status,
-    duration_seconds: row.durationSeconds,
-    created: Math.floor(row.createdAt.getTime() / 1000),
-    created_at: row.createdAt.toISOString(),
-    ...(status === "completed" && row.updatedAt
-      ? { completed_at: row.updatedAt.toISOString() }
-      : {}),
-    generation_id: row.id,
-    generationId: row.id,
-    ...(status === "completed" && videoUrl
-      ? { video_url: videoUrl, data: [{ url: videoUrl }] }
-      : {}),
-    ...(status === "failed" && row.error
-      ? { error: { message: row.error } }
-      : {}),
-    ...(Number.isFinite(credits) ? { credits_consumed: credits } : {}),
-  };
-}
-
 export function completeAsyncImageTask(
   id: string,
   params: CompleteAsyncImageTaskParams

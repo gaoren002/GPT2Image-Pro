@@ -158,8 +158,6 @@ export type SettingKey =
   | "EDITABLE_FILE_PPT_CREDITS"
   | "EDITABLE_FILE_PSD_CREDITS"
   | "ADMIN_SELF_CREDITS_GRANT_ENABLED"
-  | "VIDEO_BASE_CREDITS_PER_SECOND"
-  | "VIDEO_MODEL_MULTIPLIERS"
   | "NEXT_PUBLIC_GA_ID"
   | "NEXT_PUBLIC_SENTRY_DSN"
   | "SENTRY_AUTH_TOKEN"
@@ -1457,27 +1455,6 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     category: "credits",
     valueType: "json",
     exampleValue: '{"gpt-image-2": 1, "nano-banana-pro": 1.5}',
-  },
-  {
-    key: "VIDEO_BASE_CREDITS_PER_SECOND",
-    label: "视频每秒基础积分",
-    description:
-      "Adobe Firefly 视频生成的统一基础价格（每秒积分）。一次视频成本 = 每秒基价 × 时长(秒) × 模型族倍率。",
-    category: "credits",
-    valueType: "number",
-    // WHY: 视频计费基价须为正；上限拦截误填的异常巨大值，避免单次扣费失控。
-    min: 0.01,
-    max: 100_000,
-    defaultValue: 30,
-  },
-  {
-    key: "VIDEO_MODEL_MULTIPLIERS",
-    label: "视频模型族倍率",
-    description:
-      '按视频模型族设置计费倍率的 JSON（family → 倍率，缺省/非正回退 1）。例：{"sora2-pro":2,"veo31-fast":0.5}。',
-    category: "credits",
-    valueType: "json",
-    exampleValue: '{"sora2": 1, "sora2-pro": 2, "veo31": 1.5}',
   },
   {
     key: "CREDIT_PACKAGE_MATRIX",

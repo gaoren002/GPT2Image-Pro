@@ -113,9 +113,7 @@ import {
   type ImageBillingPixelRange,
   type PredictedImageBillingRoute,
 } from "../billing-preview";
-import type { VideoPricingInfo } from "../video-operations";
 import { ImageLightbox, type LightboxGeneration } from "./image-lightbox";
-import { VideoCreatePanel } from "./video-create-panel";
 
 type RecentGeneration = {
   id: string;
@@ -591,8 +589,7 @@ type ActiveMode =
   | "chat"
   | "chat-web"
   | "agent"
-  | "waterfall"
-  | "video";
+  | "waterfall";
 type ReferenceTargetMode = Extract<ActiveMode, ReferenceHandoffMode>;
 type VisualOutputMode = "text-single" | "text-lines" | "image";
 
@@ -1241,8 +1238,7 @@ function readStoredCreateActiveMode(): ActiveMode {
       value === "chat" ||
       value === "chat-web" ||
       value === "agent" ||
-      value === "waterfall" ||
-      value === "video"
+      value === "waterfall"
       ? value
       : "text";
   } catch {
@@ -1266,7 +1262,6 @@ interface CreatePageClientProps {
   imageBasePricing: ImageBaseCreditPricing;
   forceWebPixelRange: ForceWebPixelRange;
   timeZone: string;
-  videoPricing: VideoPricingInfo;
 }
 
 function isImageFile(file: File) {
@@ -2013,7 +2008,6 @@ export function CreatePageClient({
   imageBasePricing,
   forceWebPixelRange,
   timeZone,
-  videoPricing,
 }: CreatePageClientProps) {
   const locale = useLocale();
   const router = useRouter();
@@ -8416,10 +8410,6 @@ export function CreatePageClient({
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="video" className="gap-1.5 px-4">
-            <Wand2 className="h-4 w-4" />
-            {copy("Video", "视频")}
-          </TabsTrigger>
         </TabsList>
 
         <div role="tabpanel" hidden={activeMode !== "text"} className="mt-0">
@@ -10326,10 +10316,6 @@ export function CreatePageClient({
               </div>
             )}
           </div>
-        </div>
-
-        <div role="tabpanel" hidden={activeMode !== "video"} className="mt-0">
-          <VideoCreatePanel recent={recent} pricing={videoPricing} />
         </div>
       </Tabs>
 

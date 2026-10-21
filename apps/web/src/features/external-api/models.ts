@@ -3,10 +3,6 @@
  * 图像目录与图像管线共用，文本目录与站内订阅能力共用。
  */
 import {
-  FIREFLY_IMAGE_FAMILY_MODEL_IDS,
-  FIREFLY_VIDEO_MODEL_CATALOG,
-} from "@repo/shared/adobe/firefly-direct";
-import {
   GPT55_CHAT_MODEL,
   PREMIUM_CHAT_MODELS,
   isPlanAtLeast,
@@ -75,21 +71,6 @@ export async function isExternalResponsesImageModelAllowed(
   }).includes(model.trim());
 }
 
-/**
- * Adobe Firefly 模型 id 列表:图像族级 id（分辨率/宽高比走 size 参数）+ 视频全量 id
- * （参数编码在 id 内）。图像与视频生成均由 externalApi.images.generate 门控,关闭时返回
- * 空,避免在 /v1/models 列出无法调用的 model。
- */
-export function getExternalFireflyModels(options?: {
-  imageGenerateAllowed?: boolean;
-}): string[] {
-  if (!options?.imageGenerateAllowed) return [];
-  return [
-    ...FIREFLY_IMAGE_FAMILY_MODEL_IDS,
-    ...Object.keys(FIREFLY_VIDEO_MODEL_CATALOG),
-  ];
-}
-
 /** 将站内模型 ID 编码为 OpenAI 模型目录条目，不虚构上游创建时间。 */
 function toOpenAIModel(id: string): OpenAIModel {
   return {
@@ -100,16 +81,13 @@ function toOpenAIModel(id: string): OpenAIModel {
   };
 }
 
-/** 根据用户套餐合并图像、Firefly 和文本目录；共享模型只返回一次。 */
+/** 根据用户套餐合并图像和文本目录；共享模型只返回一次。 */
 export async function getExternalModelsForUser(
   userId: string
 ): Promise<OpenAIModelList> {
   const plan = await getUserPlan(userId);
   const capabilities = await getPlanCapabilitySnapshot(plan.plan);
   const imageModels = [...IMAGE_MODEL_IDS];
-  const fireflyModels = getExternalFireflyModels({
-    imageGenerateAllowed: capabilities.features["externalApi.images.generate"],
-  });
   const chatModels = getExternalChatCompletionModels(plan.plan, {
     chatCompletionsAllowed:
       capabilities.features["externalApi.chat.completions"],
@@ -122,7 +100,6 @@ export async function getExternalModelsForUser(
   const modelIds = Array.from(
     new Set([
       ...imageModels,
-      ...fireflyModels,
       ...chatModels,
       ...responsesModels,
     ])

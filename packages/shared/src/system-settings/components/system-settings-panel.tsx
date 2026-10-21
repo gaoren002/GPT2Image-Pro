@@ -1689,10 +1689,7 @@ export function SystemSettingsPanel() {
     for (const setting of settings) {
       // 模型计费倍率由 Adobe 后端 tab 的「模型计费倍率」表格编辑,系统设置面板里隐藏,
       // 避免同一份数据出现两个入口造成"重复倍率"的误解。
-      if (
-        setting.key === "IMAGE_MODEL_MULTIPLIERS" ||
-        setting.key === "VIDEO_MODEL_MULTIPLIERS"
-      ) {
+      if (setting.key === "IMAGE_MODEL_MULTIPLIERS") {
         continue;
       }
       map.get(setting.category)?.push(setting);
@@ -1707,10 +1704,7 @@ export function SystemSettingsPanel() {
     try {
       for (const setting of settings) {
         // 见上:模型计费倍率不在本面板编辑,跳过,避免覆盖 Adobe tab 的改动。
-        if (
-          setting.key === "IMAGE_MODEL_MULTIPLIERS" ||
-          setting.key === "VIDEO_MODEL_MULTIPLIERS"
-        ) {
+        if (setting.key === "IMAGE_MODEL_MULTIPLIERS") {
           continue;
         }
         if (clearKeys[setting.key]) {

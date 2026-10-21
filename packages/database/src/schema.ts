@@ -1150,60 +1150,6 @@ export const adobeToken = pgTable(
   ]
 );
 
-// Adobe Firefly 视频生成（异步）：与图像 generation 解耦——视频是新产物类型，有自己的
-// 状态机、轮询恢复、按时长×倍率计费。提交后置 running 并保存 pollUrl，定时/请求侧轮询到
-// 完成再 re-host 到对象存储。financially 真相仍在 credits_transaction，本表仅记录产物与状态。
-export const videoGeneration = pgTable(
-  "video_generation",
-  {
-    id: text("id").primaryKey(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    // 外部 API key（站内创作页为空）。
-    apiKeyId: text("api_key_id"),
-    // 命中的 adobe 后端（删后端不删历史）。
-    adobeId: text("adobe_id").references(() => imageBackendAdobe.id, {
-      onDelete: "set null",
-    }),
-    // 完整 Firefly 视频 model id（firefly-<family>-<dur>s-<ratio>[-<res>]）。
-    model: text("model").notNull(),
-    family: text("family").notNull(),
-    prompt: text("prompt").notNull(),
-    durationSeconds: integer("duration_seconds").notNull(),
-    aspectRatio: text("aspect_ratio").notNull(),
-    resolution: text("resolution").notNull(),
-    // pending / running / completed / failed。
-    status: text("status").notNull().default("pending"),
-    // 图生视频输入：引用历史生成（@ 历史图）或上传图的 storageKey / generationId。
-    inputImageRefs: json("input_image_refs").$type<
-      Array<{ generationId?: string; storageKey?: string; role?: string }>
-    >(),
-    // 完成后 re-host 到对象存储的 key；videoUrl 为上游 presigned（短期）。
-    storageKey: text("storage_key"),
-    videoUrl: text("video_url"),
-    creditsConsumed: numeric("credits_consumed", {
-      precision: 18,
-      scale: 2,
-      mode: "number",
-    })
-      .notNull()
-      .default(0),
-    // 异步轮询恢复用。
-    pollUrl: text("poll_url"),
-    upstreamJobId: text("upstream_job_id"),
-    error: text("error"),
-    metadata: json("metadata").$type<Record<string, unknown>>(),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at").notNull().defaultNow(),
-    completedAt: timestamp("completed_at"),
-  },
-  (table) => [
-    index("video_generation_user_idx").on(table.userId, table.createdAt),
-    index("video_generation_status_idx").on(table.status, table.createdAt),
-  ]
-);
-
 export const imageBackendInflightLease = pgTable(
   "image_backend_inflight_lease",
   {

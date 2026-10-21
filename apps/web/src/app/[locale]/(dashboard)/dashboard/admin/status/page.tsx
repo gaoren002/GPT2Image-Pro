@@ -7,7 +7,6 @@ import {
   Coins,
   ImageIcon,
   Server,
-  Video,
 } from "lucide-react";
 import {
   and,
@@ -33,7 +32,6 @@ import {
   imageBackendSchedulerMetric,
   ticket,
   user,
-  videoGeneration,
 } from "@repo/database/schema";
 import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { canViewImageBackendPool } from "@repo/shared/auth/roles";
@@ -158,54 +156,6 @@ type SchedulerMetricStats = {
   avgCandidateCount: number | null;
   avgLatencyMs: number | null;
   byLayer: Array<{ layer: string; count: number }>;
-};
-
-// 视频生成(Adobe Firefly)是独立管线,记录落在 video_generation 表(非 generation),
-// 监控其他区块全部读 generation,因此视频在原有面板里完全不可见。此处单独聚合并展示。
-// 模型族顺序固定,与创作页/后端配置一致(sora2 / sora2-pro / veo31 系列 / kling 系列)。
-const VIDEO_FAMILIES = [
-  "sora2",
-  "sora2-pro",
-  "veo31",
-  "veo31-ref",
-  "veo31-fast",
-  "kling-o3",
-  "kling3",
-] as const;
-
-type VideoFamilyStats = {
-  family: string;
-  total: number;
-  completed: number;
-  failed: number;
-};
-
-type VideoGenerationStats = {
-  total: number;
-  completed: number;
-  failed: number;
-  running: number;
-  pending: number;
-  // 成功率 = 完成 / (完成 + 失败);仅在有终态样本时有意义。
-  successRate: number;
-  // 已完成视频累计消耗积分。
-  creditsConsumed: number;
-  // 已完成视频累计时长(秒)。
-  totalVideoSeconds: number;
-  // 已完成视频平均生成耗时(completedAt - createdAt,秒);无样本为 null。
-  avgLatencySeconds: number | null;
-  byFamily: VideoFamilyStats[];
-};
-
-// video_generation 按 (family, status) 分组的原始聚合行。
-type VideoAggregateRow = {
-  family: string;
-  status: string;
-  total: number;
-  creditsConsumed: number;
-  videoSeconds: number;
-  latencySecondsTotal: number;
-  latencyCount: number;
 };
 
 type HistoricalErrorFilters = {
@@ -798,80 +748,6 @@ function summarizeSchedulerMetrics(
     .map(([layer, count]) => ({ layer, count }))
     .sort((left, right) => right.count - left.count);
   return stats;
-}
-
-// 把 video_generation 的 (family, status) 聚合行折叠为面板所需统计:
-// 总数/各状态计数、成功率、完成视频积分与时长、平均生成耗时,以及按模型族明细。
-// 未在 VIDEO_FAMILIES 中登记的 family(如新增/历史脏数据)归入 byFamily 末尾,
-// 但仍计入顶部总数,避免漏算。
-function summarizeVideoGenerationRows(
-  rows: VideoAggregateRow[]
-): VideoGenerationStats {
-  let total = 0;
-  let completed = 0;
-  let failed = 0;
-  let running = 0;
-  let pending = 0;
-  let creditsConsumed = 0;
-  let totalVideoSeconds = 0;
-  let latencySecondsTotal = 0;
-  let latencyCount = 0;
-
-  const familyMap = new Map<string, VideoFamilyStats>();
-  for (const family of VIDEO_FAMILIES) {
-    familyMap.set(family, { family, total: 0, completed: 0, failed: 0 });
-  }
-
-  for (const row of rows) {
-    const rowTotal = Number(row.total) || 0;
-    total += rowTotal;
-
-    const bucket =
-      familyMap.get(row.family) ??
-      familyMap
-        .set(row.family, {
-          family: row.family,
-          total: 0,
-          completed: 0,
-          failed: 0,
-        })
-        .get(row.family);
-    if (bucket) bucket.total += rowTotal;
-
-    if (row.status === "completed") {
-      completed += rowTotal;
-      creditsConsumed += Number(row.creditsConsumed) || 0;
-      totalVideoSeconds += Number(row.videoSeconds) || 0;
-      latencySecondsTotal += Number(row.latencySecondsTotal) || 0;
-      latencyCount += Number(row.latencyCount) || 0;
-      if (bucket) bucket.completed += rowTotal;
-    } else if (row.status === "failed") {
-      failed += rowTotal;
-      if (bucket) bucket.failed += rowTotal;
-    } else if (row.status === "running") {
-      running += rowTotal;
-    } else {
-      pending += rowTotal;
-    }
-  }
-
-  const finished = completed + failed;
-  // VIDEO_FAMILIES 顺序在前,运行时新出现的 family 追加在后(保留插入顺序)。
-  const byFamily = Array.from(familyMap.values());
-
-  return {
-    total,
-    completed,
-    failed,
-    running,
-    pending,
-    successRate: finished > 0 ? completed / finished : 1,
-    creditsConsumed,
-    totalVideoSeconds,
-    avgLatencySeconds:
-      latencyCount > 0 ? latencySecondsTotal / latencyCount : null,
-    byFamily,
-  };
 }
 
 function formatDuration(seconds: number | null, locale: string) {
@@ -1512,7 +1388,6 @@ async function loadStatusData() {
     adobeRows,
     schedulerRows24h,
     schedulerRows7d,
-    videoRows7d,
   ] = await Promise.all([
     db
       .select({
@@ -1780,34 +1655,6 @@ async function loadStatusData() {
       .from(imageBackendSchedulerMetric)
       .where(gte(imageBackendSchedulerMetric.bucketStartedAt, last7d))
       .groupBy(imageBackendSchedulerMetric.selectedLayer),
-    // 视频生成(Adobe Firefly)独立管线,与 generation 无关。按 (family, status) 分组,
-    // 与近期 SLA 一致取最近 7 天窗口(createdAt >= last7d)。
-    // 积分/时长/耗时仅对完成记录(completed)累加;latencyCount 用于计算平均生成耗时。
-    db
-      .select({
-        family: videoGeneration.family,
-        status: videoGeneration.status,
-        total: count(),
-        creditsConsumed:
-          sql<number>`coalesce(sum(case when ${videoGeneration.status} = 'completed' then ${videoGeneration.creditsConsumed} else 0 end), 0)`.mapWith(
-            Number
-          ),
-        videoSeconds:
-          sql<number>`coalesce(sum(case when ${videoGeneration.status} = 'completed' then ${videoGeneration.durationSeconds} else 0 end), 0)`.mapWith(
-            Number
-          ),
-        latencySecondsTotal:
-          sql<number>`coalesce(sum(case when ${videoGeneration.status} = 'completed' and ${videoGeneration.completedAt} is not null then extract(epoch from (${videoGeneration.completedAt} - ${videoGeneration.createdAt})) else 0 end), 0)`.mapWith(
-            Number
-          ),
-        latencyCount:
-          sql<number>`coalesce(sum(case when ${videoGeneration.status} = 'completed' and ${videoGeneration.completedAt} is not null then 1 else 0 end), 0)`.mapWith(
-            Number
-          ),
-      })
-      .from(videoGeneration)
-      .where(gte(videoGeneration.createdAt, last7d))
-      .groupBy(videoGeneration.family, videoGeneration.status),
   ]);
 
   // recentGenerationRows(带帽 10000 行)现仅用于 topErrors 列表与 rowsTruncated 旗标;
@@ -1883,7 +1730,6 @@ async function loadStatusData() {
     adobe: summarizeBackendRows(adobeRows),
     scheduler24h: summarizeSchedulerMetrics(schedulerRows24h),
     scheduler7d: summarizeSchedulerMetrics(schedulerRows7d),
-    video7d: summarizeVideoGenerationRows(videoRows7d),
   };
 }
 
@@ -2260,8 +2106,6 @@ export default async function GlobalStatusPage({
         </Card>
       </div>
 
-      <VideoGenerationCard stats={data.video7d} locale={locale} />
-
       <Card className="rounded-lg">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -2316,130 +2160,6 @@ export default async function GlobalStatusPage({
         timeZone={timeZone}
       />
     </div>
-  );
-}
-
-// 视频生成(Adobe Firefly)独立统计区块。读 video_generation 表近 7 天聚合,
-// 展示总数/完成/失败/进行中、成功率(Progress)、累计积分与时长,以及按模型族明细。
-// 无任何样本时优雅降级为"暂无视频生成样本"。
-function VideoGenerationCard({
-  stats,
-  locale,
-}: {
-  stats: VideoGenerationStats;
-  locale: string;
-}) {
-  // 仅展示有过样本的模型族(总数 > 0),避免空表全是 0 行;无样本时整体走空态。
-  const familyRows = stats.byFamily.filter((item) => item.total > 0);
-
-  return (
-    <Card className="rounded-lg">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Video className="h-4 w-4 text-muted-foreground" />
-          {copy(locale, "Video Generation (Adobe Firefly)", "视频生成 (Adobe Firefly)")}
-        </CardTitle>
-        <CardDescription>
-          {copy(
-            locale,
-            "Independent pipeline from video_generation, last 7 days. Not folded into image stats.",
-            "独立于生图管线,读 video_generation 表,最近 7 天;不计入生图统计。"
-          )}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {stats.total === 0 ? (
-          <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-            {copy(locale, "No video generation samples.", "暂无视频生成样本")}
-          </div>
-        ) : (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <MiniStat
-                label={copy(locale, "Total", "总数")}
-                value={formatNumber(stats.total, locale)}
-              />
-              <MiniStat
-                label={copy(locale, "Completed", "完成")}
-                value={formatNumber(stats.completed, locale)}
-              />
-              <MiniStat
-                label={copy(locale, "Failed", "失败")}
-                value={formatNumber(stats.failed, locale)}
-              />
-              <MiniStat
-                label={copy(locale, "Running", "进行中")}
-                value={formatNumber(stats.running + stats.pending, locale)}
-              />
-            </div>
-            <div>
-              <div className="mb-2 flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">
-                  {copy(locale, "Success rate", "成功率")}
-                </span>
-                <span className="font-medium">
-                  {formatPercent(stats.successRate, locale)}
-                </span>
-              </div>
-              <Progress value={Math.round(stats.successRate * 100)} />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <MiniStat
-                label={copy(locale, "Credits consumed", "消耗积分")}
-                value={formatCredits(stats.creditsConsumed)}
-              />
-              <MiniStat
-                label={copy(locale, "Video seconds", "累计时长")}
-                value={`${formatNumber(stats.totalVideoSeconds, locale)}s`}
-              />
-              <MiniStat
-                label={copy(locale, "Avg generation time", "平均生成耗时")}
-                value={formatDuration(stats.avgLatencySeconds, locale)}
-              />
-            </div>
-            <div className="overflow-x-auto rounded-lg border">
-              <table className="w-full min-w-[360px] text-left text-xs">
-                <thead className="border-b border-border/60 text-[11px] uppercase tracking-widest text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">
-                      {copy(locale, "Family", "模型族")}
-                    </th>
-                    <th className="px-3 py-2 font-medium">
-                      {copy(locale, "Total", "总数")}
-                    </th>
-                    <th className="px-3 py-2 font-medium">
-                      {copy(locale, "Completed", "完成")}
-                    </th>
-                    <th className="px-3 py-2 font-medium">
-                      {copy(locale, "Failed", "失败")}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {familyRows.map((item) => (
-                    <tr
-                      key={item.family}
-                      className="transition-colors duration-150 hover:bg-muted/50"
-                    >
-                      <td className="px-3 py-2 font-medium">{item.family}</td>
-                      <td className="px-3 py-2">
-                        {formatNumber(item.total, locale)}
-                      </td>
-                      <td className="px-3 py-2">
-                        {formatNumber(item.completed, locale)}
-                      </td>
-                      <td className="px-3 py-2">
-                        {formatNumber(item.failed, locale)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
   );
 }
 

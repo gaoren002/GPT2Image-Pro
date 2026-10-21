@@ -38,11 +38,6 @@ const CONTENT_TYPES: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
-  // 视频产物(Adobe Firefly 视频 re-host 为 .mp4):缺这条会被当 octet-stream,
-  // 浏览器 <video> 拒播(图库视频 tab、创作页视频面板都经 /api/storage 取)。
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-  ".mov": "video/quicktime",
 };
 
 const GENERATION_CACHE_CONTROL =

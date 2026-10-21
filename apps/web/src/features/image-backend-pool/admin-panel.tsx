@@ -347,7 +347,7 @@ type SyncProgressState = {
 const MANUAL_TOKEN_IMPORT_LIMIT = 10_000;
 const MANUAL_RT_IMPORT_BATCH_SIZE = 50;
 
-// Adobe per-model 计费倍率：图像/视频两套模型族行（与后端 family 枚举一一对应）。
+// Adobe per-model 计费倍率：图像模型族行（与后端 family 枚举一一对应）。
 const ADOBE_IMAGE_MULTIPLIER_FAMILIES = [
   "gpt-image-2.5",
   "gpt-image-2",
@@ -355,15 +355,6 @@ const ADOBE_IMAGE_MULTIPLIER_FAMILIES = [
   "nano-banana",
   "nano-banana2",
   "nano-banana-pro",
-] as const;
-const ADOBE_VIDEO_MULTIPLIER_FAMILIES = [
-  "sora2",
-  "sora2-pro",
-  "veo31",
-  "veo31-ref",
-  "veo31-fast",
-  "kling-o3",
-  "kling3",
 ] as const;
 
 /** 把 family→倍率 的 map 转成"输入框字符串"草稿；缺省/非正显示为空（即默认 1）。 */
@@ -1711,14 +1702,11 @@ export function ImageBackendPoolAdminPanel({
   const [adobeAccounts, setAdobeAccounts] = useState<AdobeAccountRow[]>([]);
   const [adobeCookieInput, setAdobeCookieInput] = useState("");
 
-  // ===== Adobe 模型计费倍率（图像/视频 per-model）=====
+  // ===== Adobe 模型计费倍率（图像 per-model）=====
   // 草稿态用字符串保存输入框原始值（含空白），保存时再收窄成 family→正数 的 map。
   const [imageMultiplierDraft, setImageMultiplierDraft] = useState<
     Record<string, string>
   >(() => multipliersToDraft(ADOBE_IMAGE_MULTIPLIER_FAMILIES, {}));
-  const [videoMultiplierDraft, setVideoMultiplierDraft] = useState<
-    Record<string, string>
-  >(() => multipliersToDraft(ADOBE_VIDEO_MULTIPLIER_FAMILIES, {}));
 
   const { execute: loadModelMultipliers } = useAction(
     getAdobeModelMultipliersAction,
@@ -1728,12 +1716,6 @@ export function ImageBackendPoolAdminPanel({
           multipliersToDraft(
             ADOBE_IMAGE_MULTIPLIER_FAMILIES,
             data?.image ?? {}
-          )
-        );
-        setVideoMultiplierDraft(
-          multipliersToDraft(
-            ADOBE_VIDEO_MULTIPLIER_FAMILIES,
-            data?.video ?? {}
           )
         );
       },
@@ -5059,7 +5041,7 @@ export function ImageBackendPoolAdminPanel({
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <p className="text-xs text-muted-foreground">
-                    最终积分 = 基础(图像按尺寸/视频按秒) × 模型倍率 × 整个 Adobe
+                    最终积分 = 基础(按尺寸) × 模型倍率 × 整个 Adobe
                     倍率 × 分组倍率。留空表示该模型不加倍率（默认 1）。
                   </p>
 
@@ -5093,43 +5075,12 @@ export function ImageBackendPoolAdminPanel({
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <Label className="text-xs text-muted-foreground">
-                      视频模型倍率
-                    </Label>
-                    <div className="space-y-2">
-                      {ADOBE_VIDEO_MULTIPLIER_FAMILIES.map((family) => (
-                        <div
-                          key={family}
-                          className="grid grid-cols-[1fr_120px] items-center gap-2"
-                        >
-                          <span className="truncate text-sm">{family}</span>
-                          <Input
-                            type="number"
-                            inputMode="decimal"
-                            min="0"
-                            step="0.01"
-                            placeholder="1"
-                            value={videoMultiplierDraft[family] ?? ""}
-                            onChange={(event) =>
-                              setVideoMultiplierDraft((current) => ({
-                                ...current,
-                                [family]: event.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
                   <Button
                     size="sm"
                     disabled={isSavingMultipliers}
                     onClick={() =>
                       saveModelMultipliers({
                         image: draftToMultipliers(imageMultiplierDraft),
-                        video: draftToMultipliers(videoMultiplierDraft),
                       })
                     }
                   >

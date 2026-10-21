@@ -85,10 +85,6 @@ export type ImageStreamEvent =
         index?: number;
         outputRole?: "final" | "agent_draft" | "choice";
       }>;
-      // Adobe Firefly 视频产物（视频生成路径专用，图像路径不设）。
-      videoGenerationId?: string;
-      videoUrl?: string;
-      videoDurationSeconds?: number;
       creditsConsumed?: number;
     }
   | {

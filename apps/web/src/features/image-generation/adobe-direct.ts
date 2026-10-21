@@ -27,22 +27,18 @@ import {
   type FireflyTransport,
   fetchAccountInfo,
   fetchCreditsBalance,
-  fireflyVideoMaxInputImages,
-  fireflyVideoSize,
   isAdobeRotatableError,
   isTokenExpired,
   ProxyFireflyTransport,
   QuotaExhaustedError,
   refreshAccessTokenFromCookie,
   resolveFireflyImageModel,
-  resolveFireflyVideoModel,
 } from "@repo/shared/adobe/firefly-direct";
 import { logError, logWarn } from "@repo/shared/logger";
 import { getRuntimeSettingString } from "@repo/shared/system-settings";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { parseAdobeCookieEntries } from "./adobe-cookie-parser";
-import { prepareAdobeVideoSourceImage } from "./adobe-video-source";
 import type { ApiConfig, GenerateImageResult } from "./types";
 
 // IMS access_token 距过期多久内视为需要刷新（秒）。
@@ -541,100 +537,6 @@ export async function runAdobeDirectImageRequest(
   );
   if (!result.ok) return { error: result.error };
   return { imageBase64: result.value };
-}
-
-export type AdobeVideoResult =
-  | { bytes: Buffer; contentType: string; raw: Record<string, unknown> }
-  | { error: string };
-
-/**
- * mode=direct 的 adobe 视频派发：解析视频模型 → 选 token → 图生视频先上传输入图 →
- * generateVideo（submit→轮询→下载）→ 返回视频字节。产物持久化（video_generation 落库、
- * re-host、扣费）由调用方完成。出错返回 { error }，token 级错误标记 token 状态便于轮换。
- */
-export async function runAdobeDirectVideoRequest(
-  config: ApiConfig,
-  params: {
-    prompt: string;
-    model: string;
-    inputImages?: Array<{ data: Buffer; type?: string | null }>;
-    negativePrompt?: string | null;
-    signal?: AbortSignal;
-  }
-): Promise<AdobeVideoResult> {
-  const adobeId = config.backend?.id;
-  if (!adobeId) return { error: "Adobe 直连后端缺少 id" };
-
-  const conf = resolveFireflyVideoModel(params.model);
-  if (!conf) {
-    return { error: `Adobe 直连不支持的视频模型: ${params.model}` };
-  }
-  const size = fireflyVideoSize(conf.outputResolution, conf.aspectRatio);
-  if (!size) {
-    return {
-      error: `视频尺寸映射失败: ${conf.outputResolution}/${conf.aspectRatio}`,
-    };
-  }
-
-  const sessionKey = `adobe-${adobeId}`;
-  const { apiTransport, downloadTransport } =
-    await buildAdobeTransports(sessionKey);
-  const client = new AdobeFireflyClient({
-    transport: apiTransport,
-    downloadTransport,
-  });
-
-  // 伪账号内换号重试：撞 429/配额/鉴权就换本后端下一个账号，轮完才上抛（交外层切后端）。
-  const result = await runWithAdobeTokenRotation(
-    adobeId,
-    apiTransport,
-    params.signal,
-    async (token) => {
-      // 图生视频：先上传输入图拿 id（与 token 绑定，故放轮换内、每次换号重传）。
-      let sourceImageIds: string[] | undefined;
-      if (params.inputImages && params.inputImages.length > 0) {
-        sourceImageIds = [];
-        const maxInputs = fireflyVideoMaxInputImages(conf);
-        for (const image of params.inputImages.slice(0, maxInputs)) {
-          const prepared = await prepareAdobeVideoSourceImage(image.data, size);
-          sourceImageIds.push(
-            await client.uploadImage(
-              token,
-              prepared.data,
-              prepared.type,
-              params.signal
-            )
-          );
-        }
-      }
-
-      const output = await client.generateVideo({
-        token,
-        prompt: params.prompt,
-        upstreamModel: conf.upstreamModel,
-        upstreamModelId: conf.upstreamModelId,
-        upstreamModelVersion: conf.upstreamModelVersion,
-        engine: conf.engine,
-        duration: conf.duration,
-        aspectRatio: conf.aspectRatio,
-        size,
-        generateAudio: conf.generateAudio,
-        ...(conf.referenceMode ? { referenceMode: conf.referenceMode } : {}),
-        ...(params.negativePrompt != null
-          ? { negativePrompt: params.negativePrompt }
-          : {}),
-        ...(sourceImageIds ? { sourceImageIds } : {}),
-        signal: params.signal,
-      });
-      return {
-        bytes: output.bytes,
-        contentType: "video/mp4",
-        raw: output.raw,
-      };
-    }
-  );
-  if (!result.ok) return { error: result.error };
-  return result.value;
 }
 
 /**

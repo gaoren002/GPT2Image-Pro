@@ -99,29 +99,6 @@ describe("getExternalModelsForUser image model exposure", () => {
   });
 });
 
-describe("getExternalFireflyModels", () => {
-  it("returns an empty list when image generation is disabled", async () => {
-    const { getExternalFireflyModels } = await loadModels();
-    expect(getExternalFireflyModels({ imageGenerateAllowed: false })).toEqual(
-      []
-    );
-    expect(getExternalFireflyModels()).toEqual([]);
-  });
-
-  it("includes firefly image family ids and full video ids when allowed", async () => {
-    const { getExternalFireflyModels } = await loadModels();
-    const models = getExternalFireflyModels({ imageGenerateAllowed: true });
-    // 图像族级 id。
-    expect(models).toContain("firefly-gpt-image-2");
-    expect(models).toContain("firefly-nano-banana-pro");
-    // 视频全量 id(参数编码在 id 内)。
-    expect(models).toContain("firefly-sora2-8s-16x9");
-    // 不应混入分辨率/宽高比展开的图像全组合(图像只列族级)。
-    expect(models).not.toContain("firefly-gpt-image-2-2k-1x1");
-    expect(models.length).toBeGreaterThan(10);
-  });
-});
-
 describe("getExternalChatCompletionModels", () => {
   it("returns an empty list when chat completions are disabled", async () => {
     const { getExternalChatCompletionModels } = await loadModels();

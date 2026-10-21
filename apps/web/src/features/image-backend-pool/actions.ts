@@ -780,24 +780,20 @@ const modelMultiplierMapSchema = z.record(
 );
 
 /**
- * 读取图像/视频两套 per-model 倍率系统设置（管理员可见）。
- * 复用系统设置存储（IMAGE_MODEL_MULTIPLIERS / VIDEO_MODEL_MULTIPLIERS），不新建 infra。
+ * 读取图像 per-model 倍率系统设置（管理员可见）。
+ * 复用系统设置存储（IMAGE_MODEL_MULTIPLIERS），不新建 infra。
  */
 export const getAdobeModelMultipliersAction = withImageBackendPoolAdminAction(
   "getModelMultipliers"
 ).action(async () => {
-  const [imageRaw, videoRaw] = await Promise.all([
-    getRuntimeSettingJson("IMAGE_MODEL_MULTIPLIERS"),
-    getRuntimeSettingJson("VIDEO_MODEL_MULTIPLIERS"),
-  ]);
+  const imageRaw = await getRuntimeSettingJson("IMAGE_MODEL_MULTIPLIERS");
   const image = modelMultiplierMapSchema.catch({}).parse(imageRaw ?? {});
-  const video = modelMultiplierMapSchema.catch({}).parse(videoRaw ?? {});
-  return { success: true, image, video };
+  return { success: true, image };
 });
 
 /**
- * 写回图像/视频两套 per-model 倍率系统设置（管理员）。空 map 即清空(回退默认倍率 1)。
- * 复用 setSystemSettings 的 json 校验与缓存失效;两个 JSON 键非 env 变量,无需同步 env。
+ * 写回图像 per-model 倍率系统设置（管理员）。空 map 即清空(回退默认倍率 1)。
+ * 复用 setSystemSettings 的 json 校验与缓存失效;该 JSON 键非 env 变量,无需同步 env。
  */
 export const setAdobeModelMultipliersAction = withImageBackendPoolAdminAction(
   "setModelMultipliers"
@@ -805,15 +801,11 @@ export const setAdobeModelMultipliersAction = withImageBackendPoolAdminAction(
   .schema(
     z.object({
       image: modelMultiplierMapSchema,
-      video: modelMultiplierMapSchema,
     })
   )
   .action(async ({ parsedInput, ctx }) => {
     await setSystemSettings(
-      [
-        { key: "IMAGE_MODEL_MULTIPLIERS", value: parsedInput.image },
-        { key: "VIDEO_MODEL_MULTIPLIERS", value: parsedInput.video },
-      ],
+      [{ key: "IMAGE_MODEL_MULTIPLIERS", value: parsedInput.image }],
       ctx.userId
     );
     return { success: true };

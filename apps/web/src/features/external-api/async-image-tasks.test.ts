@@ -19,8 +19,6 @@ import {
   postAsyncImageCallback,
   toAsyncImageTaskResponse,
   toGenerationImageTaskResponse,
-  type VideoTaskRow,
-  toVideoGenerationTaskResponse,
   validateCallbackUrl,
 } from "./async-image-tasks";
 
@@ -163,54 +161,6 @@ describe("external async image tasks", () => {
     );
     expect(failed).toMatchObject({ status: "failed", error: { message: "boom" } });
     expect(failed).not.toHaveProperty("data");
-  });
-
-  it("maps a completed video generation to a task response with video_url + duration", () => {
-    const row: VideoTaskRow = {
-      id: "vid_1",
-      model: "firefly-sora2-8s-16x9",
-      status: "completed",
-      durationSeconds: 8,
-      creditsConsumed: "240",
-      error: null,
-      createdAt: new Date("2026-06-22T00:00:00Z"),
-      updatedAt: new Date("2026-06-22T00:03:00Z"),
-    };
-    const res = toVideoGenerationTaskResponse(row, "/api/storage/generations/v?sig=x");
-    expect(res).toMatchObject({
-      id: "vid_1",
-      object: "video",
-      status: "completed",
-      duration_seconds: 8,
-      generation_id: "vid_1",
-      video_url: "/api/storage/generations/v?sig=x",
-      data: [{ url: "/api/storage/generations/v?sig=x" }],
-      credits_consumed: 240,
-      completed_at: "2026-06-22T00:03:00.000Z",
-    });
-  });
-
-  it("maps running/failed video generations without leaking a url", () => {
-    const base: VideoTaskRow = {
-      id: "vid_r",
-      model: "firefly-sora2-8s-16x9",
-      status: "running",
-      durationSeconds: 8,
-      creditsConsumed: "240",
-      error: null,
-      createdAt: new Date("2026-06-22T00:00:00Z"),
-      updatedAt: null,
-    };
-    const running = toVideoGenerationTaskResponse(base, null);
-    expect(running).toMatchObject({ status: "processing", object: "video.generation" });
-    expect(running).not.toHaveProperty("video_url");
-    expect(running).not.toHaveProperty("data");
-
-    const failed = toVideoGenerationTaskResponse(
-      { ...base, id: "vid_f", status: "failed", error: "upstream 500" },
-      null
-    );
-    expect(failed).toMatchObject({ status: "failed", error: { message: "upstream 500" } });
   });
 
   it("rejects private callback URLs", async () => {

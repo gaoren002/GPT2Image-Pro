@@ -1,5 +1,5 @@
 import { db } from "@repo/database";
-import { generation, videoGeneration } from "@repo/database/schema";
+import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
@@ -17,8 +17,8 @@ interface GalleryPageProps {
   searchParams: Promise<{ page?: string; tab?: string }>;
 }
 
-type GalleryOutputRole = "final" | "agent_draft" | "upload" | "video";
-type GalleryTab = "final" | "agent-drafts" | "uploads" | "videos";
+type GalleryOutputRole = "final" | "agent_draft" | "upload";
+type GalleryTab = "final" | "agent-drafts" | "uploads";
 
 function extractAgentDraftGenerations(
   rows: Array<typeof generation.$inferSelect>
@@ -131,9 +131,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
       ? "agent-drafts"
       : params.tab === "uploads"
         ? "uploads"
-        : params.tab === "videos"
-          ? "videos"
-          : "final";
+        : "final";
   const pageParam = Number(params.page);
   const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
   const limit = page * PAGE_SIZE;
@@ -180,14 +178,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   // drafts/uploads 标签页的展示来自下面无 LIMIT 的 draft/upload 查询(走 GIN)，故此处不重复
   // 执行——否则会在这两个标签页跑一条结果用不到、且对稀疏谓词极慢(~1.3s)的 LIMIT 查询。
   // 同时移除原 totalResult:它只在 final 标签页用到，且与 finalCountResult 完全等价(重复计数)。
-  // 视频(video_generation):已完成且有产物的视频,作为图库「视频」tab。
-  const videoCondition = and(
-    eq(videoGeneration.userId, user.id),
-    eq(videoGeneration.status, "completed"),
-    isNotNull(videoGeneration.storageKey)
-  );
   const isFinalTab = activeTab === "final";
-  const isVideosTab = activeTab === "videos";
   const [
     finalRows,
     completedStorageCountResult,
@@ -196,8 +187,6 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     uploadParentRows,
     draftCountResult,
     uploadCountResult,
-    videoRows,
-    videoCountResult,
     timeZone,
   ] = await Promise.all([
     isFinalTab
@@ -230,15 +219,6 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     // extractAgentDraftGenerations 展开为多个子项，但作为徽章计数足够
     db.select({ count: count() }).from(generation).where(draftCondition),
     db.select({ count: count() }).from(generation).where(uploadCondition),
-    isVideosTab
-      ? db
-          .select()
-          .from(videoGeneration)
-          .where(videoCondition)
-          .orderBy(desc(videoGeneration.createdAt))
-          .limit(limit)
-      : Promise.resolve([] as Array<typeof videoGeneration.$inferSelect>),
-    db.select({ count: count() }).from(videoGeneration).where(videoCondition),
     getAppTimeZone(),
   ]);
 
@@ -247,33 +227,12 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     uploadParentRows,
     copy
   );
-  const videoItems = videoRows.map((v) => ({
-    id: v.id,
-    parentId: v.id,
-    prompt: v.prompt,
-    revisedPrompt: null,
-    promptRepairNotice: null,
-    model: v.model,
-    size: `${v.durationSeconds}s · ${v.aspectRatio} · ${v.resolution}`,
-    status: v.status as "pending" | "completed" | "failed",
-    creditsConsumed: Number(v.creditsConsumed) || 0,
-    storageKey: v.storageKey,
-    storageBucket: null,
-    imageUrl: null,
-    // video_generation 无 storageBucket 列,buildSignedStorageImageUrl 默认 generations 桶。
-    videoUrl: buildSignedStorageImageUrl(v.storageKey, null),
-    createdAt: v.createdAt.toISOString(),
-    outputRole: "video" as GalleryOutputRole,
-    referenceImages: [],
-  }));
   const displayedItems =
-    activeTab === "videos"
-      ? videoItems
-      : activeTab === "agent-drafts"
-        ? allDraftItems.slice(0, limit)
-        : activeTab === "uploads"
-          ? allUploadItems.slice(0, limit)
-          : finalRows.map((g) => ({
+    activeTab === "agent-drafts"
+      ? allDraftItems.slice(0, limit)
+      : activeTab === "uploads"
+        ? allUploadItems.slice(0, limit)
+        : finalRows.map((g) => ({
             id: g.id,
             parentId: g.id,
             prompt: g.prompt,
@@ -297,15 +256,12 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     (draftPrimaryCountResult[0]?.count ?? 0);
   const draftCount = draftCountResult[0]?.count ?? 0;
   const uploadCount = uploadCountResult[0]?.count ?? 0;
-  const videoCount = videoCountResult[0]?.count ?? 0;
   const totalCount =
-    activeTab === "videos"
-      ? videoCount
-      : activeTab === "agent-drafts"
-        ? draftCount
-        : activeTab === "uploads"
-          ? uploadCount
-          : finalCount;
+    activeTab === "agent-drafts"
+      ? draftCount
+      : activeTab === "uploads"
+        ? uploadCount
+        : finalCount;
 
   return (
     <div className="container mx-auto space-y-8 px-4 py-6 md:px-6">
@@ -324,7 +280,6 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         finalCount={finalCount}
         draftCount={draftCount}
         uploadCount={uploadCount}
-        videoCount={videoCount}
         activeTab={activeTab}
         page={page}
         timeZone={timeZone}

@@ -4369,6 +4369,10 @@ export function CreatePageClient({
         updateChatStream(state);
         syncAssistantStreamVariant(state);
         // 瀑布流卡片流式文本同帧合并提交:此前每个 delta 都全量 map 一次卡片数组。
+        // 状态切换语义与 92996a2 之前的逐 delta 版本一致:只有正文(text)出现才把
+        // 卡片从 loading 切到 text——partial_image 的卡片 imageUrl 写入与"流式
+        // 生成中"角标都要求 state==="loading",纯 thinking/agent 阶段提前切走会
+        // 让部分图预览不再上卡片。非 text 增量只更新对应字段,不改状态。
         if (streamCardId && (text || thinking || agent)) {
           setBatchCards((prev) =>
             prev.map((card) =>
@@ -4376,7 +4380,7 @@ export function CreatePageClient({
               (card.state === "loading" || card.state === "text")
                 ? {
                     ...card,
-                    state: "text",
+                    state: text ? "text" : card.state,
                     ...(text ? { streamText: text } : {}),
                     ...(thinking ? { streamThinking: thinking } : {}),
                     ...(agent ? { streamAgent: agent } : {}),
@@ -4396,6 +4400,15 @@ export function CreatePageClient({
           streamCommitHandle = null;
         }
         commitStreamState();
+      };
+      // 读循环异常路径(网络断开/AbortError)兜底:取消已排队未触发的 rAF,
+      // 防止调用方 catch/finally 清理(setChatStream(null)、消息置失败)之后,
+      // 残留的 commitStreamState 再把 chatStream 复活或把消息变体改回 pending。
+      const cancelPendingStreamCommit = () => {
+        if (streamCommitHandle !== null) {
+          window.cancelAnimationFrame(streamCommitHandle);
+          streamCommitHandle = null;
+        }
       };
       const publishStreamState = () => {
         scheduleStreamCommit();
@@ -4525,21 +4538,29 @@ export function CreatePageClient({
         }
       };
 
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-        const blocks = buffer.split(/\r?\n\r?\n/);
-        buffer = blocks.pop() || "";
-        for (const block of blocks) {
-          await processBlock(block);
+      // 读循环的任何退出路径都要么已 flush、要么已 cancel:正常结束刷出末帧;
+      // reader.read()/processBlock 抛错(AbortError、网络断开)由 finally 取消
+      // 排队帧,保证不会有迟到的 commitStreamState 在上层清理后再次提交。
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          const blocks = buffer.split(/\r?\n\r?\n/);
+          buffer = blocks.pop() || "";
+          for (const block of blocks) {
+            await processBlock(block);
+          }
+          if (done) break;
         }
-        if (done) break;
-      }
 
-      if (buffer.trim()) await processBlock(buffer);
-      // 流结束:把攒批中的最后一帧同步刷出,避免结束时丢帧(随后上层会用最终
-      // completed 结果覆盖 stream 状态,此帧只保证过程展示完整)。
-      flushStreamCommit();
+        if (buffer.trim()) await processBlock(buffer);
+        // 流结束:把攒批中的最后一帧同步刷出,避免结束时丢帧(随后上层会用最终
+        // completed 结果覆盖 stream 状态,此帧只保证过程展示完整)。
+        flushStreamCommit();
+      } catch (error) {
+        cancelPendingStreamCommit();
+        throw error;
+      }
 
       const failedResult = failed as ImageApiResult | null;
       if (!response.ok || failedResult) {

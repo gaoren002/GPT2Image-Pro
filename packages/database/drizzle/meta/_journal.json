@@ -351,6 +351,13 @@
       "when": 1789911600000,
       "tag": "0049_drop_adobe_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1789998000000,
+      "tag": "0050_credits_batch_user_active_idx",
+      "breakpoints": true
     }
   ]
 }

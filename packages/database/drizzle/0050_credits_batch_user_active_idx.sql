@@ -1,0 +1,14 @@
+-- credits_batch 用户活跃批次部分索引
+-- consumeCredits()/getCreditsBalance() 热路径按 user_id 过滤 active 且有余额的
+-- 批次(读路径见 credits/core.ts consumeCredits 的 LIMIT 1 轮询与
+-- listActiveCreditBatches 的全量列举)。此前表上只有主键与 (source_type,
+-- source_ref) 唯一索引,无 user_id 索引:单查是并行顺序扫描(~9ms/5900 buffers),
+-- 生产累计 seq_scan 835 万次、读行 4978 亿,是 pg_stat 里最重的表。
+-- 历史上批次规模小无感;退款批次按 generation 逐条发放(单用户可积累 4 万+条
+-- active 退款批次)后,顺序扫描成本随行数线性放大。
+-- 部分索引只覆盖 status='active' AND remaining>0 的行(生产 22.3 万行 / 全表),
+-- 扣费与余额列举的过滤条件与之一致,可整体走索引;写路径(批次转 consumed/
+-- expired)仅小幅更新可见性,维护成本低。
+-- 同 0035/0036/0039:线上先以 CREATE INDEX CONCURRENTLY 非阻塞建好,此处普通
+-- IF NOT EXISTS 保证事务内迁移合法且幂等。
+CREATE INDEX IF NOT EXISTS "credits_batch_user_active_idx" ON "credits_batch" ("user_id","expires_at") WHERE "status" = 'active' AND "remaining" > 0;

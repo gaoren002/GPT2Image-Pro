@@ -539,6 +539,10 @@ export async function grantCredits(params: GrantCreditsParams) {
       debitAccount,
       creditAccount,
       description,
+      // source_ref 列写入:退款的幂等查重按本列判断(见
+      // refundGenerationCredits)。历史上仅写 metadata,导致列全 NULL、
+      // 查重对存量永远 miss;两处都写,列为主、metadata 兼顾审计展示。
+      sourceRef: sourceRef ?? null,
       metadata: {
         ...metadata,
         batchId,

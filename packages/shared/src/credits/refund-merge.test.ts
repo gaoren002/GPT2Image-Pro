@@ -227,6 +227,10 @@ describe("refundGenerationCredits 幂等查重改走交易表", () => {
     // 记账必须落交易表(credits_transaction,双重记账真相)
     const txInsert = calls.inserts.find((i) => i.table === "transaction");
     expect(txInsert).toBeTruthy();
+    // 幂等键必须写进 source_ref 列(查重按列判断;历史上只写 metadata
+    // 导致列全 NULL、查重对存量 miss —— 2026-10 已回填并双写)
+    const txValues = txInsert?.values as Array<Record<string, unknown>>;
+    expect(txValues[0]?.sourceRef).toBe("g2:timeout-refund");
     // 退款池已存在时:批次走 update(amount/remaining 累加),不再插新批次行
     const batchInsert = calls.inserts.find((i) => i.table === "batch");
     expect(batchInsert).toBeUndefined();

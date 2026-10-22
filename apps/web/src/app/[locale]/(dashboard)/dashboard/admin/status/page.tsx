@@ -690,9 +690,15 @@ function topErrors(
     });
   }
 
+  // 次数相同时按文本排序:失败行查询不带 ORDER BY,并列项若沿用行序,每次重算
+  // 第 8 名附近会来回跳动。
   return [...errorCounts.entries()]
     .map(([message, item]) => ({ message, ...item }))
-    .sort((a, b) => b.count - a.count)
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        (a.message < b.message ? -1 : a.message > b.message ? 1 : 0)
+    )
     .slice(0, 8);
 }
 

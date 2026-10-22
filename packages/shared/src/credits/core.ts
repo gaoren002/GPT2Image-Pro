@@ -4,20 +4,6 @@
  * 实现企业级双重记账和 FIFO 过期机制
  */
 
-import {
-  and,
-  asc,
-  eq,
-  gte,
-  gt,
-  inArray,
-  isNotNull,
-  isNull,
-  lt,
-  or,
-  sql,
-} from "drizzle-orm";
-
 import { db } from "@repo/database";
 import {
   type CreditsBatchSource,
@@ -26,6 +12,19 @@ import {
   creditsBatch,
   creditsTransaction,
 } from "@repo/database/schema";
+import {
+  and,
+  asc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 import { logEvent } from "../logger/index";
 import { getRuntimeSettingNumber } from "../system-settings";
 import { CREDIT_CONFIG_DEFAULTS } from "./config";
@@ -446,37 +445,87 @@ export async function grantCredits(params: GrantCreditsParams) {
           ? await getFreeCreditsExpiryDate(issuedAt)
           : await getDefaultCreditsExpiryDate(issuedAt)
         : expiresAt;
-    const batchId = crypto.randomUUID();
-    const insertedBatch = await tx
-      .insert(creditsBatch)
-      .values({
-        id: batchId,
-        userId,
-        amount,
-        remaining: amount,
-        issuedAt,
-        expiresAt: effectiveExpiresAt,
-        status: "active",
-        sourceType,
-        sourceRef,
-      })
-      .onConflictDoNothing({
-        target: [creditsBatch.sourceType, creditsBatch.sourceRef],
-        where: sql`${creditsBatch.sourceRef} is not null`,
-      })
-      .returning({ id: creditsBatch.id });
+    // refund 批次合并:退款按 generation 逐笔发放,若每笔一条批次行,单用户
+    // 可积累数万条 active 批次(2026-10 生产实测 42615 条/用户),扣费挑选
+    // 与余额列举成本随批次数线性放大。退款改为并入该用户唯一的"退款池批次"
+    // (source_ref 为 NULL 的 active refund 批次;不存在则首笔创建)。
+    // 幂等不受影响:退款查重在调用方按 credits_transaction(source_ref)
+    // 判断(见 refundGenerationCredits),不依赖批次行;amount 记 pool 累加
+    // 前的原始值,remaining 每次加 amount。其他 sourceType 行为不变。
+    let batchId: string;
+    if (sourceType === "refund") {
+      const [pool] = await tx
+        .select({ id: creditsBatch.id })
+        .from(creditsBatch)
+        .where(
+          and(
+            eq(creditsBatch.userId, userId),
+            eq(creditsBatch.sourceType, "refund"),
+            eq(creditsBatch.status, "active"),
+            isNull(creditsBatch.sourceRef)
+          )
+        )
+        .orderBy(asc(creditsBatch.issuedAt))
+        .limit(1);
 
-    // 幂等性保障：(sourceType, sourceRef) 唯一索引使重复发放的插入为空。
-    // 此时跳过记账与余额累加，避免支付 webhook 重放 / 并发回调 / 注册奖励
-    // 重复领取导致的积分双重发放（薅羊毛）。
-    if (insertedBatch.length === 0) {
-      return {
-        batchId: null,
-        transactionId: null,
-        amount: 0,
-        newBalance: currentBalance.balance,
-        alreadyGranted: true,
-      };
+      if (pool) {
+        batchId = pool.id;
+        await tx
+          .update(creditsBatch)
+          .set({
+            amount: sql`${creditsBatch.amount} + ${amount}`,
+            remaining: sql`${creditsBatch.remaining} + ${amount}`,
+            updatedAt: new Date(),
+          })
+          .where(eq(creditsBatch.id, pool.id));
+      } else {
+        batchId = crypto.randomUUID();
+        await tx.insert(creditsBatch).values({
+          id: batchId,
+          userId,
+          amount,
+          remaining: amount,
+          issuedAt,
+          expiresAt: effectiveExpiresAt,
+          status: "active",
+          sourceType,
+          sourceRef: null,
+        });
+      }
+    } else {
+      const candidateId = crypto.randomUUID();
+      const insertedBatch = await tx
+        .insert(creditsBatch)
+        .values({
+          id: candidateId,
+          userId,
+          amount,
+          remaining: amount,
+          issuedAt,
+          expiresAt: effectiveExpiresAt,
+          status: "active",
+          sourceType,
+          sourceRef,
+        })
+        .onConflictDoNothing({
+          target: [creditsBatch.sourceType, creditsBatch.sourceRef],
+          where: sql`${creditsBatch.sourceRef} is not null`,
+        })
+        .returning({ id: creditsBatch.id });
+
+      // 幂等性保障：(source_type, source_ref) 唯一索引使重复发放的插入为空。
+      // 此时跳过记账与余额累加，避免支付 webhook 重放 / 并发回调 / 注册奖励
+      // 重复领取导致的积分双重发放（薅羊毛）。
+      if (insertedBatch.length === 0) {
+        return {
+          batchId: null,
+          transactionId: null,
+          amount: 0,
+          newBalance: currentBalance.balance,
+          alreadyGranted: true,
+        };
+      }
+      batchId = insertedBatch[0]?.id || candidateId;
     }
 
     const transactionId = crypto.randomUUID();
@@ -616,7 +665,10 @@ export async function consumeCredits(
               eq(creditsBatch.userId, userId),
               eq(creditsBatch.status, "active"),
               gt(creditsBatch.remaining, 0),
-              or(isNull(creditsBatch.expiresAt), gt(creditsBatch.expiresAt, now))
+              or(
+                isNull(creditsBatch.expiresAt),
+                gt(creditsBatch.expiresAt, now)
+              )
             )
           )
           // 扣减顺序:最快到期的批次先扣(在过期作废前尽量用掉),无到期(永久)批次最后扣;
@@ -652,7 +704,10 @@ export async function consumeCredits(
               eq(creditsBatch.id, batch.id),
               eq(creditsBatch.status, "active"),
               gte(creditsBatch.remaining, consumeFromThisBatch),
-              or(isNull(creditsBatch.expiresAt), gt(creditsBatch.expiresAt, now))
+              or(
+                isNull(creditsBatch.expiresAt),
+                gt(creditsBatch.expiresAt, now)
+              )
             )
           )
           .returning({ id: creditsBatch.id });
@@ -801,9 +856,7 @@ export async function voidActiveSubscriptionCreditsForUpgrade(
           eq(creditsBatch.sourceType, "subscription"),
           eq(creditsBatch.status, "active"),
           gt(creditsBatch.remaining, 0),
-          issuedBefore
-            ? lt(creditsBatch.issuedAt, issuedBefore)
-            : sql`true`,
+          issuedBefore ? lt(creditsBatch.issuedAt, issuedBefore) : sql`true`,
           newBatchSourceRef
             ? sql`${creditsBatch.sourceRef} IS DISTINCT FROM ${newBatchSourceRef}`
             : sql`true`

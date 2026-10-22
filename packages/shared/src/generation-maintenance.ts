@@ -1,5 +1,5 @@
 import { db } from "@repo/database";
-import { creditsBatch, generation } from "@repo/database/schema";
+import { creditsTransaction, generation } from "@repo/database/schema";
 import { and, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { grantCredits } from "./credits/core";
 import { getFailedGenerationTargetCreditsFromMetadata } from "./generation-settlement";
@@ -261,15 +261,23 @@ export function stripDestroyedGenerationImageReferences(
   return nextMetadata;
 }
 
+/**
+ * 退款幂等查重:按 credits_transaction(type='refund', source_ref) 判断。
+ *
+ * WHY 交易表而非批次表:财务真相在双重记账的 credits_transaction;且退款
+ * 批次已改为按用户合并入单条"退款池批次"(source_ref 为 NULL,见
+ * grantCredits 的 refund 分支),新退款不再有自己的批次行,按批次查重会
+ * 永远 miss 导致重复退款。交易行每笔退款一条,幂等语义不受合并影响。
+ */
 async function refundAlreadyGranted(userId: string, sourceRef: string) {
   const [existing] = await db
-    .select({ id: creditsBatch.id })
-    .from(creditsBatch)
+    .select({ id: creditsTransaction.id })
+    .from(creditsTransaction)
     .where(
       and(
-        eq(creditsBatch.userId, userId),
-        eq(creditsBatch.sourceType, "refund"),
-        eq(creditsBatch.sourceRef, sourceRef)
+        eq(creditsTransaction.userId, userId),
+        eq(creditsTransaction.type, "refund"),
+        eq(creditsTransaction.sourceRef, sourceRef)
       )
     )
     .limit(1);

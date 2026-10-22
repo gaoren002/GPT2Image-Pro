@@ -11,8 +11,8 @@ import { getServerSession } from "@repo/shared/auth/server";
 import { getAdminSystemSettingsSnapshot } from "@repo/shared/system-settings";
 import { SystemSettingsPanel } from "@repo/shared/system-settings/components";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
-import { ImageBackendPoolAdminPanel } from "@/features/image-backend-pool";
 import { AdminSettingsTabs } from "./admin-settings-tabs";
+import { LazyImageBackendPoolAdminPanel } from "./lazy-pool-panel";
 
 export default async function DashboardAdminSettingsPage() {
   const session = await getServerSession();
@@ -28,7 +28,7 @@ export default async function DashboardAdminSettingsPage() {
 
   if (!canAccessAdminArea(role)) {
     const timeZone = await getAppTimeZone();
-    return <ImageBackendPoolAdminPanel readOnly timeZone={timeZone} />;
+    return <LazyImageBackendPoolAdminPanel readOnly timeZone={timeZone} />;
   }
 
   // 系统设置面板可写入 BETTER_AUTH_SECRET 等密钥，必须限制为超管，
@@ -41,8 +41,8 @@ export default async function DashboardAdminSettingsPage() {
     canManageSystemSettings ? getAdminSystemSettingsSnapshot() : null,
   ]);
 
-  // 面板元素按角色在服务端构造:只有被构造的面板会进入 RSC 负载,其 chunk 与导航
-  // 同一波下载;未构造的面板代码不会下发(超管的后端池面板由 tab 外壳按需懒加载)。
+  // 系统设置面板元素只在超管分支构造;后端池面板由 tab 外壳经 lazy-pool-panel
+  // 按需加载(不进本页首屏入口,见该文件说明)。
   return (
     <AdminSettingsTabs
       timeZone={timeZone}
@@ -51,11 +51,6 @@ export default async function DashboardAdminSettingsPage() {
         systemSettings ? (
           <SystemSettingsPanel initialSettings={systemSettings} />
         ) : null
-      }
-      poolPanel={
-        canManageSystemSettings ? null : (
-          <ImageBackendPoolAdminPanel timeZone={timeZone} />
-        )
       }
     />
   );

@@ -40,6 +40,7 @@ import type {
   SettingKey,
 } from "../definitions";
 
+/** getAdminSystemSettingsSnapshot 的单项结构(服务端预取与 getSystemSettingsAction 同形)。 */
 type SettingSnapshotItem = SettingDefinition & {
   value: string;
   configured: boolean;
@@ -725,6 +726,15 @@ function normalizeDraftValue(setting: SettingSnapshotItem): DraftValue {
     return "";
   }
   return setting.value || "";
+}
+
+/** 由配置快照生成各项的编辑草稿(首屏预取与重新加载共用)。 */
+function buildDrafts(
+  settings: SettingSnapshotItem[]
+): Record<string, DraftValue> {
+  return Object.fromEntries(
+    settings.map((setting) => [setting.key, normalizeDraftValue(setting)])
+  );
 }
 
 function toSubmitValue(setting: SettingSnapshotItem, value: DraftValue) {
@@ -1618,10 +1628,29 @@ function CreditPackageMatrixInput({
   );
 }
 
-export function SystemSettingsPanel() {
-  const [settings, setSettings] = useState<SettingSnapshotItem[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, DraftValue>>({});
+/**
+ * 系统设置面板(仅超管可见,入口见 admin/settings)。
+ *
+ * @param initialSettings - 服务端预取的配置快照(页面在超管鉴权后调用
+ *   getAdminSystemSettingsSnapshot)。提供时首屏直接渲染,省掉"挂载后再发 action
+ *   取数"这一次串行往返;缺省时退回挂载即拉取。保存 / 导入 / 初始化后仍经 action 重新加载。
+ */
+export function SystemSettingsPanel({
+  initialSettings,
+}: {
+  initialSettings?: SettingSnapshotItem[];
+} = {}) {
+  const [settings, setSettings] = useState<SettingSnapshotItem[]>(
+    () => initialSettings ?? []
+  );
+  const [drafts, setDrafts] = useState<Record<string, DraftValue>>(() =>
+    buildDrafts(initialSettings ?? [])
+  );
   const [clearKeys, setClearKeys] = useState<Record<string, boolean>>({});
+  // 只看首次挂载时是否带了预取数据;之后父组件重渲染不应触发或抑制重新拉取。
+  const [hasPrefetchedSettings] = useState(
+    () => (initialSettings?.length ?? 0) > 0
+  );
 
   const {
     execute: loadSettings,
@@ -1666,18 +1695,15 @@ export function SystemSettingsPanel() {
   );
 
   useEffect(() => {
+    if (hasPrefetchedSettings) return;
     loadSettings();
-  }, [loadSettings]);
+  }, [hasPrefetchedSettings, loadSettings]);
 
   useEffect(() => {
     const loaded = (settingsResult.data?.settings ?? []) as SettingSnapshotItem[];
     if (!loaded.length) return;
     setSettings(loaded);
-    setDrafts(
-      Object.fromEntries(
-        loaded.map((setting) => [setting.key, normalizeDraftValue(setting)])
-      )
-    );
+    setDrafts(buildDrafts(loaded));
     setClearKeys({});
   }, [settingsResult.data?.settings]);
 

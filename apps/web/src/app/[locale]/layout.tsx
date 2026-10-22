@@ -1,15 +1,19 @@
+import { Providers } from "@repo/shared/components";
+import { siteConfig } from "@repo/shared/config";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { NextIntlClientProvider } from "next-intl";
 import { getMessages } from "next-intl/server";
 import { Toaster } from "sonner";
-import { siteConfig } from "@repo/shared/config";
 import { Analytics } from "@/features/analytics";
 // 深路径直引(不经 marketing barrel):barrel 同时 re-export Header/PricingSection,
 // 它们 import framer-motion(~62KB gzip)。经 barrel 引入会把 framer 引擎拖进每个
 // 非营销路由(dashboard/auth 共 21 个)的首屏。直引 cookie-consent 即可避免。
 import { CookieConsent } from "@/features/marketing/components/cookie-consent";
-import { Providers } from "@repo/shared/components";
+import {
+  APP_INTL_NAMESPACES,
+  pickIntlNamespaces,
+} from "@/i18n/client-namespaces";
 import { routing } from "@/i18n/routing";
 
 import "@repo/ui/globals.css";
@@ -123,8 +127,13 @@ export default async function LocaleLayout({
     notFound();
   }
 
-  // 获取翻译消息
-  const messages = await getMessages();
+  // 获取翻译消息并按命名空间裁剪:营销专属命名空间(FAQ/Testimonials/
+  // Features/UseCases/HowItWorks/Cinema/Hero/CTA 等)只被 (marketing) 路由
+  // 消费,在营销布局内经 MarketingIntlMessages 二次供给;根布局下发全量
+  // 会让 dashboard/auth/docs 等每个路由的 RSC payload 都携带约 8KB 无用
+  // 翻译(gzip 前)。HomePage 命名空间已无消费者,直接不保留。
+  const allMessages = await getMessages();
+  const messages = pickIntlNamespaces(allMessages, APP_INTL_NAMESPACES);
 
   return (
     <html lang={locale} suppressHydrationWarning>

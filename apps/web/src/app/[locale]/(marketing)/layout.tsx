@@ -4,11 +4,18 @@
 // 宽度被永久 display:none。fumadocs CSS 只有 legal/[slug] 的 .prose 需要,
 // 故下沉到该页面引入,避免污染首页等无关页面。
 import { getServerSession } from "@repo/shared/auth/server";
+import { NextIntlClientProvider } from "next-intl";
+import { getMessages } from "next-intl/server";
+import {
+  type CurrentSession,
+  CurrentSessionProvider,
+} from "@/features/auth/hooks/use-current-session";
 import { Footer, Header } from "@/features/marketing/components";
 import {
-  CurrentSessionProvider,
-  type CurrentSession,
-} from "@/features/auth/hooks/use-current-session";
+  APP_INTL_NAMESPACES,
+  MARKETING_INTL_NAMESPACES,
+  pickIntlNamespaces,
+} from "@/i18n/client-namespaces";
 
 export default async function MarketingLayout({
   children,
@@ -16,6 +23,13 @@ export default async function MarketingLayout({
   children: React.ReactNode;
 }) {
   const session = await getServerSession();
+  // 营销区翻译:应用区命名空间(Header/Navigation/Common 等营销页也用)
+  // + 营销专属命名空间。根布局只下发了应用区部分,这里补全。
+  const allMessages = await getMessages();
+  const marketingMessages = pickIntlNamespaces(allMessages, [
+    ...APP_INTL_NAMESPACES,
+    ...MARKETING_INTL_NAMESPACES,
+  ]);
   const initialSession: CurrentSession = session?.user?.id
     ? {
         user: {
@@ -29,11 +43,13 @@ export default async function MarketingLayout({
 
   return (
     <CurrentSessionProvider initialData={initialSession}>
-      <div className="flex min-h-screen flex-col">
-        <Header />
-        <main className="flex-1">{children}</main>
-        <Footer />
-      </div>
+      <NextIntlClientProvider messages={marketingMessages}>
+        <div className="flex min-h-screen flex-col">
+          <Header />
+          <main className="flex-1">{children}</main>
+          <Footer />
+        </div>
+      </NextIntlClientProvider>
     </CurrentSessionProvider>
   );
 }

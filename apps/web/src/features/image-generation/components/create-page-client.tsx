@@ -4243,108 +4243,143 @@ export function CreatePageClient({
 
   useEffect(() => {
     if (didLoadChatRef.current) return;
-    const chatMessages = getChatMessages();
-    try {
-      if (chatMessages.length > 0 || chatConversations.length > 0) {
-        chatConversationsRef.current = chatConversations;
-        chatMessagesConversationIdRef.current = chatConversationId;
-        chatMessagesModeRef.current = chatMessages.length
-          ? inferChatConversationMode(chatMessages)
-          : null;
-        return;
-      }
-
-      const conversationRaw = window.localStorage.getItem(
-        CHAT_CONVERSATIONS_STORAGE_KEY
-      );
-      const conversations = compactChatConversations(
-        sanitizeChatConversations(
-          conversationRaw ? JSON.parse(conversationRaw) : []
-        )
-      );
-
-      const legacyRaw = window.localStorage.getItem(CHAT_STORAGE_KEY);
-      const legacyMessages = sanitizeChatMessages(
-        legacyRaw ? JSON.parse(legacyRaw) : []
-      );
-      const hasLegacyConversation =
-        legacyMessages.length > 0 &&
-        !conversations.some(
-          (conversation) =>
-            JSON.stringify(conversation.messages) ===
-            JSON.stringify(legacyMessages)
-        );
-      const nextConversations = compactChatConversations(
-        hasLegacyConversation
-          ? [
-              createChatConversation(
-                legacyMessages,
-                getChatConversationTitle(
-                  legacyMessages,
-                  isZh ? "历史对话" : "Previous chat"
-                )
-              ),
-              ...conversations,
-            ]
-          : conversations
-      );
-
-      if (nextConversations.length > 0) {
-        const sortedConversations = nextConversations
-          .sort(
-            (a, b) =>
-              new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-          )
-          .slice(0, CHAT_CONVERSATION_LIMIT);
-        const storedConversationMode = activeModeToConversationMode(
-          readStoredCreateActiveMode()
-        );
-        const activeConversationId = window.localStorage.getItem(
-          chatActiveConversationStorageKey(storedConversationMode)
-        );
-        const activeConversation =
-          sortedConversations.find(
-            (conversation) =>
-              conversation.mode === storedConversationMode &&
-              conversation.id === activeConversationId
-          ) ||
-          sortedConversations.find(
-            (conversation) => conversation.mode === storedConversationMode
-          ) ||
-          sortedConversations[0];
-        chatConversationsRef.current = sortedConversations;
-        setChatConversations(sortedConversations);
-        chatMessagesConversationIdRef.current = activeConversation?.id || null;
-        chatMessagesModeRef.current = activeConversation?.mode || null;
-        setChatConversationId(activeConversation?.id || createLocalId());
-        setChatMessages(activeConversation?.messages || []);
-        if (activeConversation) {
-          window.localStorage.setItem(
-            chatActiveConversationStorageKey(activeConversation.mode),
-            activeConversation.id
-          );
-        }
-      }
-      window.localStorage.setItem(
-        CHAT_CONVERSATIONS_STORAGE_KEY,
-        JSON.stringify(
-          compactChatConversations(nextConversations).slice(
-            0,
-            CHAT_CONVERSATION_LIMIT
-          )
-        )
-      );
-      window.localStorage.removeItem(CHAT_STORAGE_KEY);
-    } catch {
-      window.localStorage.removeItem(CHAT_STORAGE_KEY);
-      window.localStorage.removeItem(CHAT_CONVERSATIONS_STORAGE_KEY);
-      window.localStorage.removeItem(CHAT_ACTIVE_CONVERSATION_STORAGE_KEY);
-      window.localStorage.removeItem(
-        CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY
-      );
-    } finally {
+    // 会话恢复(JSON.parse 30 会话×80 消息 + 逐会话三次 filter + 落盘
+    // 重写)是入口主线程上最重的一步;推迟到浏览器空闲帧执行,让首帧
+    // DOM 渲染与交互先就绪。不支持 requestIdleCallback 的环境同步回退。
+    // 幂等:didLoadChatRef 在执行前置位,StrictMode 双调用与快速卸载都安全;
+    // 卸载时取消排队,避免卸载后 setState。
+    let cancelled = false;
+    const restore = () => {
+      if (cancelled || didLoadChatRef.current) return;
       didLoadChatRef.current = true;
+      const chatMessages = getChatMessages();
+      try {
+        if (chatMessages.length > 0 || chatConversations.length > 0) {
+          chatConversationsRef.current = chatConversations;
+          chatMessagesConversationIdRef.current = chatConversationId;
+          chatMessagesModeRef.current = chatMessages.length
+            ? inferChatConversationMode(chatMessages)
+            : null;
+          return;
+        }
+
+        const conversationRaw = window.localStorage.getItem(
+          CHAT_CONVERSATIONS_STORAGE_KEY
+        );
+        const conversations = compactChatConversations(
+          sanitizeChatConversations(
+            conversationRaw ? JSON.parse(conversationRaw) : []
+          )
+        );
+
+        const legacyRaw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+        const legacyMessages = sanitizeChatMessages(
+          legacyRaw ? JSON.parse(legacyRaw) : []
+        );
+        // legacy 去重:用 O(1) 签名(条数+末条 id/正文)代替整会话
+        // JSON.stringify 全序列化比较(30 会话 × 80 消息时省数十次全量序列化)。
+        // 语义足够:该判断只为"legacy 消息是否已被某会话收编"。
+        const legacySignature = `${legacyMessages.length}:${
+          legacyMessages[legacyMessages.length - 1]?.id ?? ""
+        }:${legacyMessages[legacyMessages.length - 1]?.text ?? ""}`;
+        const hasLegacyConversation =
+          legacyMessages.length > 0 &&
+          !conversations.some(
+            (conversation) =>
+              conversation.messages.length === legacyMessages.length &&
+              `${conversation.messages.length}:${
+                conversation.messages[conversation.messages.length - 1]?.id ??
+                ""
+              }:${
+                conversation.messages[conversation.messages.length - 1]?.text ??
+                ""
+              }` === legacySignature
+          );
+        const nextConversations = compactChatConversations(
+          hasLegacyConversation
+            ? [
+                createChatConversation(
+                  legacyMessages,
+                  getChatConversationTitle(
+                    legacyMessages,
+                    isZh ? "历史对话" : "Previous chat"
+                  )
+                ),
+                ...conversations,
+              ]
+            : conversations
+        );
+
+        if (nextConversations.length > 0) {
+          const sortedConversations = nextConversations
+            .sort(
+              (a, b) =>
+                new Date(b.updatedAt).getTime() -
+                new Date(a.updatedAt).getTime()
+            )
+            .slice(0, CHAT_CONVERSATION_LIMIT);
+          const storedConversationMode = activeModeToConversationMode(
+            readStoredCreateActiveMode()
+          );
+          const activeConversationId = window.localStorage.getItem(
+            chatActiveConversationStorageKey(storedConversationMode)
+          );
+          const activeConversation =
+            sortedConversations.find(
+              (conversation) =>
+                conversation.mode === storedConversationMode &&
+                conversation.id === activeConversationId
+            ) ||
+            sortedConversations.find(
+              (conversation) => conversation.mode === storedConversationMode
+            ) ||
+            sortedConversations[0];
+          chatConversationsRef.current = sortedConversations;
+          setChatConversations(sortedConversations);
+          chatMessagesConversationIdRef.current =
+            activeConversation?.id || null;
+          chatMessagesModeRef.current = activeConversation?.mode || null;
+          setChatConversationId(activeConversation?.id || createLocalId());
+          setChatMessages(activeConversation?.messages || []);
+          if (activeConversation) {
+            window.localStorage.setItem(
+              chatActiveConversationStorageKey(activeConversation.mode),
+              activeConversation.id
+            );
+          }
+        }
+        window.localStorage.setItem(
+          CHAT_CONVERSATIONS_STORAGE_KEY,
+          JSON.stringify(
+            compactChatConversations(nextConversations).slice(
+              0,
+              CHAT_CONVERSATION_LIMIT
+            )
+          )
+        );
+        window.localStorage.removeItem(CHAT_STORAGE_KEY);
+      } catch {
+        window.localStorage.removeItem(CHAT_STORAGE_KEY);
+        window.localStorage.removeItem(CHAT_CONVERSATIONS_STORAGE_KEY);
+        window.localStorage.removeItem(CHAT_ACTIVE_CONVERSATION_STORAGE_KEY);
+        window.localStorage.removeItem(
+          CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY
+        );
+      } finally {
+        didLoadChatRef.current = true;
+      }
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(restore, { timeout: 500 });
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback(handle);
+      };
     }
+    restore();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // chatMessages 的订阅消费方(去抖持久化 + 卸载冲刷)已下沉为叶子组件

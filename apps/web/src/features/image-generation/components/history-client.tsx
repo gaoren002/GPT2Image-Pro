@@ -405,12 +405,12 @@ export function HistoryClient({
             />
           </div>
           <h3 className="mt-5 font-serif text-lg font-medium text-foreground">
-            {searchQuery || searchStatus
+            {hasActiveFilters
               ? copy("No matching records", "没有匹配的记录")
               : copy("No history yet", "还没有历史记录")}
           </h3>
           <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            {searchQuery || searchStatus
+            {hasActiveFilters
               ? copy(
                   "Try different keywords or clear the filters.",
                   "换个关键词或清除筛选条件试试。"

@@ -479,6 +479,9 @@ export function GalleryClient({
   );
 
   if (items.length === 0) {
+    // 空态文案区分"库本来就空"与"筛选无结果":任一筛选生效即视为后者。
+    const hasGalleryFilters =
+      searchQuery || searchModel || searchFrom || searchTo;
     return (
       <div className="space-y-5">
         {tabs}
@@ -490,27 +493,34 @@ export function GalleryClient({
             />
           </div>
           <h3 className="mt-5 font-serif text-lg font-medium text-foreground">
-            {activeTab === "agent-drafts"
-              ? copy("No Agent drafts yet", "还没有 Agent 中间图")
-              : activeTab === "uploads"
-                ? copy("No user uploads yet", "还没有用户上传图")
-                : copy("No images yet", "还没有图片")}
+            {hasGalleryFilters
+              ? copy("No matching images", "没有匹配的图片")
+              : activeTab === "agent-drafts"
+                ? copy("No Agent drafts yet", "还没有 Agent 中间图")
+                : activeTab === "uploads"
+                  ? copy("No user uploads yet", "还没有用户上传图")
+                  : copy("No images yet", "还没有图片")}
           </h3>
           <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            {activeTab === "agent-drafts"
+            {hasGalleryFilters
               ? copy(
-                  "Intermediate images from Agent iterations will appear here.",
-                  "Agent 自动迭代产生的中间图会显示在这里。"
+                  "Try different keywords or clear the filters.",
+                  "换个关键词或清除筛选条件试试。"
                 )
-              : activeTab === "uploads"
+              : activeTab === "agent-drafts"
                 ? copy(
-                    "Reference images uploaded for image edits and chats will appear here.",
-                    "图生图和 Chat 上传的参考图会显示在这里。"
+                    "Intermediate images from Agent iterations will appear here.",
+                    "Agent 自动迭代产生的中间图会显示在这里。"
                   )
-                : copy(
-                    "Your generated images will appear here. Start by creating your first one.",
-                    "你生成的图片会显示在这里。先创建第一张图片吧。"
-                  )}
+                : activeTab === "uploads"
+                  ? copy(
+                      "Reference images uploaded for image edits and chats will appear here.",
+                      "图生图和 Chat 上传的参考图会显示在这里。"
+                    )
+                  : copy(
+                      "Your generated images will appear here. Start by creating your first one.",
+                      "你生成的图片会显示在这里。先创建第一张图片吧。"
+                    )}
           </p>
           <Button asChild variant="outline" className="mt-8">
             <Link href={createHref}>{copy("Create an image", "创建图片")}</Link>

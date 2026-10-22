@@ -1,17 +1,18 @@
 "use client";
 
 import {
-  GPT55_CHAT_MODEL,
   GPT6_ASTRA_CHAT_MODEL,
+  GPT55_CHAT_MODEL,
+  GPT56_LUNA_CHAT_MODEL,
   GPT56_SOL_CHAT_MODEL,
   GPT56_TERRA_CHAT_MODEL,
-  GPT56_LUNA_CHAT_MODEL,
   isPremiumChatModel,
   isResponsesImageModel,
   type RESPONSES_IMAGE_MODELS,
   type SubscriptionPlan,
 } from "@repo/shared/config/subscription-plan";
 import { formatCredits } from "@repo/shared/credits/format";
+import { buildStorageThumbnailUrl } from "@repo/shared/storage/image-url";
 import type { PlanCapabilitySnapshot } from "@repo/shared/subscription/services/plan-capabilities";
 import { Button } from "@repo/ui/components/button";
 import { Checkbox } from "@repo/ui/components/checkbox";
@@ -25,37 +26,30 @@ import {
   SelectValue,
 } from "@repo/ui/components/select";
 import { Tabs, TabsList, TabsTrigger } from "@repo/ui/components/tabs";
-import { Textarea } from "@repo/ui/components/textarea";
 import {
   Check,
   CircleHelp,
   Coins,
-  Info,
-  ChevronDown,
   Download,
   Eye,
-  ChevronLeft,
-  ChevronRight,
-  ImagePlus,
   FileText,
+  ImagePlus,
+  Info,
   Loader2,
   Maximize2,
   MessageSquare,
-  Plus,
   RefreshCcw,
   Save,
   Search,
   Send,
-  Trash2,
   Upload,
   Wand2,
   X,
 } from "lucide-react";
-import { buildStorageThumbnailUrl } from "@repo/shared/storage/image-url";
+import { nanoid } from "nanoid";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useLocale } from "next-intl";
-import { nanoid } from "nanoid";
 import {
   useCallback,
   useEffect,
@@ -65,7 +59,12 @@ import {
   useTransition,
 } from "react";
 import { toast } from "sonner";
-
+import type { ImageBackendGroupBackendType } from "@/features/image-backend-pool/types";
+import {
+  hasSeenWaterfallFirstTimeWarning,
+  WaterfallWarningPopup,
+  type WaterfallWarningType,
+} from "@/features/image-generation/components/waterfall-warning-popup";
 import {
   useCreateRuntimeAccessor,
   useCreateRuntimeRef,
@@ -73,37 +72,30 @@ import {
   useResetCreateRuntimeKeys,
 } from "@/features/image-generation/create-runtime-store";
 import {
-  hasSeenWaterfallFirstTimeWarning,
-  WaterfallWarningPopup,
-  type WaterfallWarningType,
-} from "@/features/image-generation/components/waterfall-warning-popup";
-import {
   consumePendingReferenceHandoff,
   normalizeReferenceFetchUrl,
   type ReferenceHandoffMode,
 } from "@/features/image-generation/reference-handoff";
-import type { ImageBackendGroupBackendType } from "@/features/image-backend-pool/types";
+import { ChatPanel } from "./chat-panel";
 // 聊天叶子组件(高频状态订阅下沉):chatStream 流式气泡、chatMessages 去抖持久化。
 import { ChatStreamBubble } from "./chat-stream-bubble";
-import {
-  ChatMessageList,
-  ChatPanelStreamGate,
-  ChatPersistenceAgent,
-} from "./chat-subscriptions";
-import { WaterfallCardList } from "./waterfall-card-list";
-import { TextPanel } from "./text-panel";
+import { ChatPersistenceAgent } from "./chat-subscriptions";
 import { ImagePanel } from "./image-panel";
 import {
   ConcurrencyNumberInput,
+  formatMegabytes,
+  getMentionTrigger,
   IMAGE_ACCEPT,
   MODERATION_OPTIONS,
   OUTPUT_FORMAT_OPTIONS,
   QUALITY_OPTIONS,
-  formatMegabytes,
-  getMentionTrigger,
 } from "./panel-shared";
 import { PromptTextareaField } from "./prompt-textarea-field";
+import { TextPanel } from "./text-panel";
+import { WaterfallPanel } from "./waterfall-panel";
+
 export { PromptTextareaField };
+
 // 聊天模型与持久化纯函数抽到共享模块,本文件 re-export 保持内部引用不变。
 import type {
   ChatConversation as ChatConversationShared,
@@ -114,11 +106,12 @@ import type {
   ResponsesPreviousResponseState as ResponsesPreviousResponseStateShared,
   StickyBackendMemberState as StickyBackendMemberStateShared,
 } from "./chat-message-types";
+
 export {
   CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY,
   CHAT_ACTIVE_CONVERSATION_STORAGE_KEY,
-  CHAT_CONVERSATIONS_STORAGE_KEY,
   CHAT_CONVERSATION_LIMIT,
+  CHAT_CONVERSATIONS_STORAGE_KEY,
   CHAT_PERSIST_DEBOUNCE_MS,
   CHAT_STORAGE_KEY,
   chatActiveConversationStorageKey,
@@ -129,11 +122,13 @@ export {
   persistChatConversationSnapshot,
   sanitizePersistedChatMessages,
 } from "./chat-persistence";
+
+import type { BatchCard as BatchCardShared } from "./chat-message-types";
 import {
   CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY,
   CHAT_ACTIVE_CONVERSATION_STORAGE_KEY,
-  CHAT_CONVERSATIONS_STORAGE_KEY,
   CHAT_CONVERSATION_LIMIT,
+  CHAT_CONVERSATIONS_STORAGE_KEY,
   CHAT_STORAGE_KEY,
   chatActiveConversationStorageKey,
   compactChatConversations,
@@ -143,43 +138,44 @@ import {
   persistChatConversationSnapshot,
 } from "./chat-persistence";
 import type { ChatStreamState as ChatStreamStateShared } from "./chat-stream-state";
-import type { BatchCard as BatchCardShared } from "./chat-message-types";
 import type { TextGenerationMode as TextGenerationModeShared } from "./text-panel";
+
 export type { TextGenerationMode } from "./text-panel";
+
 import {
+  type AgentTaskCard,
   agentEventToImageUrl,
   appendAgentRunEvent,
   buildAgentRoundCards,
   createOptimisticAgentRoundEvents,
   normalizeAgentEvent,
-  type AgentTaskCard,
 } from "../agent-round-cards";
+import {
+  applyBillingPreviewMultiplier,
+  type ImageBillingPixelRange,
+  type PredictedImageBillingRoute,
+  predictImageBillingRoute,
+  shouldPreferWebImageRoute,
+} from "../billing-preview";
 import {
   AUTO_IMAGE_SIZE,
   DEFAULT_IMAGE_MODEL,
+  DEFAULT_IMAGE_SIZE,
+  getExactRatioImageSize,
+  getImageCreditCostBreakdown,
   getImageModel,
   getUpstreamImageModel,
-  DEFAULT_IMAGE_SIZE,
-  getImageCreditCostBreakdown,
+  IMAGE_1K_BASE_EDGE,
+  IMAGE_DIMENSION_STEP,
   type ImageBaseCreditPricing,
   type ImageQualityLevel,
   type ImageThinkingLevel,
-  IMAGE_1K_BASE_EDGE,
-  IMAGE_DIMENSION_STEP,
-  getExactRatioImageSize,
   MAX_IMAGE_DIMENSION,
   normalizeImageSize,
   normalizeValidImageSize,
   parseImageSize,
   validateImageSize,
 } from "../resolution";
-import {
-  applyBillingPreviewMultiplier,
-  predictImageBillingRoute,
-  shouldPreferWebImageRoute,
-  type ImageBillingPixelRange,
-  type PredictedImageBillingRoute,
-} from "../billing-preview";
 import { ImageLightbox, type LightboxGeneration } from "./image-lightbox";
 
 type RecentGeneration = {
@@ -425,7 +421,11 @@ function getNearestSupportedSizeForRatio(
     IMAGE_SIZE_BASES[0]!;
   // 优先取"数学上精确"的预设（双边 16 步进且整除出精确比例），部分上游
   // （suduma）会拒绝约等于比例的尺寸；无精确解时回退旧的取整路径。
-  const exact = getExactRatioImageSize(ratio.width, ratio.height, baseSpec.edge);
+  const exact = getExactRatioImageSize(
+    ratio.width,
+    ratio.height,
+    baseSpec.edge
+  );
   if (exact) return normalizeImageSize(exact.width, exact.height);
   const longEdge = baseSpec.edge;
   const landscape = ratio.width >= ratio.height;
@@ -931,10 +931,7 @@ function ImageSizeDialog({
               />
               <span>
                 <span className="block text-sm font-medium text-foreground">
-                  {copy(
-                    "Mixed group Web-first routing",
-                    "混合分组优先走 Web"
-                  )}
+                  {copy("Mixed group Web-first routing", "混合分组优先走 Web")}
                 </span>
                 <span className="mt-1 block">
                   {copy(
@@ -985,10 +982,8 @@ const shouldBypassImageOptimization = (imageUrl: string | undefined) =>
 // WHY:这些位置常以很小尺寸展示(最近面板 80px、变体 40px),但原本直接加载全分辨率原图
 // (单张可达 1.3MB),一屏多图严重拖卡前端;next/image 优化器对带签名 query 的本地图会 400,
 // 故沿用全站既有方案——直连 /w/ 路径段缩略图(CF/磁盘可缓存),非存储图原样返回。
-const thumbSrc = (
-  imageUrl: string | null | undefined,
-  width: number
-): string => buildStorageThumbnailUrl(imageUrl, width) || imageUrl || "";
+const thumbSrc = (imageUrl: string | null | undefined, width: number): string =>
+  buildStorageThumbnailUrl(imageUrl, width) || imageUrl || "";
 
 const DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const DEFAULT_MAX_EDIT_REQUEST_BYTES = 75 * 1024 * 1024;
@@ -1153,13 +1148,11 @@ function revokePreview(url: string) {
   }
 }
 
-
 function imageStreamEventToPreviewUrl(event: ImageStreamEvent) {
   if (event.type !== "partial_image") return null;
   if (event.b64_json) return `data:image/png;base64,${event.b64_json}`;
   return event.url || null;
 }
-
 
 function createLocalId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1172,8 +1165,6 @@ function cloneFile(file: File) {
 function hasPromptImageReference(text: string) {
   return PROMPT_IMAGE_REFERENCE_PATTERN.test(text);
 }
-
-
 
 function filterMentionOptions(
   options: ImageReferenceMentionOption[],
@@ -1397,9 +1388,7 @@ function sanitizeChatMessages(value: unknown): ChatMessage[] {
         role: item.role,
         text: messageText,
         mode:
-          item.mode === "agent" ||
-          item.mode === "chat" ||
-          item.mode === "web"
+          item.mode === "agent" || item.mode === "chat" || item.mode === "web"
             ? item.mode
             : undefined,
         attachments: item.attachments,
@@ -1414,7 +1403,6 @@ function sanitizeChatMessages(value: unknown): ChatMessage[] {
     ];
   });
 }
-
 
 function createChatConversation(
   messages: ChatMessage[],
@@ -1432,8 +1420,6 @@ function createChatConversation(
     updatedAt: now,
   };
 }
-
-
 
 function activeModeToConversationMode(mode: ActiveMode): ConversationMode {
   return mode === "agent" ? "agent" : mode === "chat-web" ? "web" : "chat";
@@ -1506,11 +1492,6 @@ function sanitizeChatConversations(value: unknown): ChatConversation[] {
     }));
   });
 }
-
-
-
-
-
 
 function getChatVariants(message: ChatMessage) {
   return message.variants || [];
@@ -1646,7 +1627,6 @@ async function readKeepAliveJson(response: Response): Promise<{
   return JSON.parse(text.slice(start));
 }
 
-
 export function CreatePageClient({
   balance: initialBalance,
   recentGenerations: initialRecent,
@@ -1681,10 +1661,10 @@ export function CreatePageClient({
     getImageCreditCostBreakdown(requestedSize, {
       ...options,
       basePricing: imageBasePricing,
-      quality: (options.quality ??
-        quality) as ImageQualityLevel | undefined,
-      thinking: (options.thinking ??
-        chatThinking) as ImageThinkingLevel | undefined,
+      quality: (options.quality ?? quality) as ImageQualityLevel | undefined,
+      thinking: (options.thinking ?? chatThinking) as
+        | ImageThinkingLevel
+        | undefined,
     });
   const getPricedImageCreditCost = (
     requestedSize?: string | null,
@@ -1935,7 +1915,6 @@ export function CreatePageClient({
   // 依赖的"非空/含 @ 引用"改订阅派生布尔(仅翻转时重渲本组件)。
   const [getPrompt] = useCreateRuntimeAccessor("prompt", "");
 
-
   // linePrompts 的渲染订阅在 TextPanel;父级仅派生行数(逐行批量报价/总数展示)。
   const [getLinePrompts] = useCreateRuntimeAccessor("linePrompts", "");
   const [getEditPrompt, setEditPrompt] = useCreateRuntimeAccessor(
@@ -1954,9 +1933,8 @@ export function CreatePageClient({
     "chatPrompt",
     ""
   );
-  const [chatPromptHasText] = useCreateRuntimeState(
-    "chatPromptHasText",
-    () => Boolean(getChatPrompt().trim())
+  const [chatPromptHasText] = useCreateRuntimeState("chatPromptHasText", () =>
+    Boolean(getChatPrompt().trim())
   );
   const [chatHasImageReference] = useCreateRuntimeState(
     "chatPromptHasRef",
@@ -1990,11 +1968,14 @@ export function CreatePageClient({
   // chatStream 同理:流式期间每帧变化,渲染订阅已下沉到 ChatStreamBubble /
   // ChatPanelStreamGate,父组件只在请求边界(setChatStream(初始/null))写它,
   // 少数 effect 守卫经 getChatStream() 读即时值。
-  const [getChatStream, setChatStream] = useCreateRuntimeAccessor<
-    ChatStreamState | null
-  >("chatStream", null);
-  const [retryingChatMessageId, setRetryingChatMessageId] =
-    useCreateRuntimeState<string | null>("retryingChatMessageId", null);
+  const [getChatStream, setChatStream] =
+    useCreateRuntimeAccessor<ChatStreamState | null>("chatStream", null);
+  // retryingChatMessageId 的订阅已随 ChatPanel/ChatPanelStreamGate 下沉;
+  // 父级仅写入(重试开始/结束翻转)。
+  const [, setRetryingChatMessageId] = useCreateRuntimeAccessor<string | null>(
+    "retryingChatMessageId",
+    null
+  );
   // WHY 非订阅访问器:batchCards 流式期间逐帧变化(卡片 imageUrl/streamText 更新),
   // 订阅会让父组件每帧全量重渲。写入点(setBatchCards)全在事件/流回调里经函数式
   // 更新读写最新值,渲染订阅下沉到 WaterfallCardList。
@@ -2010,14 +1991,11 @@ export function CreatePageClient({
     "isBatchActive",
     false
   );
-  const [isBatchLoadingMore, setIsBatchLoadingMore] = useCreateRuntimeState(
+  const [, setIsBatchLoadingMore] = useCreateRuntimeState(
     "isBatchLoadingMore",
     false
   );
-  const [isBatchStopped, setIsBatchStopped] = useCreateRuntimeState(
-    "isBatchStopped",
-    false
-  );
+  const [, setIsBatchStopped] = useCreateRuntimeState("isBatchStopped", false);
   const [waterfallCreditsConsumed, setWaterfallCreditsConsumed] =
     useCreateRuntimeState("waterfallCreditsConsumed", 0);
   const [waterfallStats, setWaterfallStats] =
@@ -2189,7 +2167,9 @@ export function CreatePageClient({
     setLineBatchRepeatCount((value) => Math.min(value, batchCountMax));
     setEditBatchCount((value) => Math.min(value, batchCountMax));
     // 瀑布流 tier 也钳制到当前套餐允许上限(套餐切换/管理员调整并发时收紧)
-    setWaterfallTier((value) => Math.max(1, Math.min(value, waterfallTierLimit)));
+    setWaterfallTier((value) =>
+      Math.max(1, Math.min(value, waterfallTierLimit))
+    );
   }, [batchCountMax, waterfallTierLimit]);
 
   useEffect(() => {
@@ -2511,7 +2491,10 @@ export function CreatePageClient({
     Map<string, AbortController>
   >("batchAbortControllersRef", () => new Map());
   // 里程碑警告期间阻塞自动续批；用户确认后解除并恢复生成
-  const warningBlockRef = useCreateRuntimeRef("waterfallWarningBlockRef", false);
+  const warningBlockRef = useCreateRuntimeRef(
+    "waterfallWarningBlockRef",
+    false
+  );
   // 本会话累计“已发起”的瀑布流张数，用于跨越里程碑阈值判断
   const sessionCountRef = useCreateRuntimeRef("waterfallSessionCountRef", 0);
   // 已展示过的里程碑阈值集合，避免同一阈值重复弹窗
@@ -2795,7 +2778,9 @@ export function CreatePageClient({
   // 当前质量档的预估倍率：按当前模型解析出的质量表取所选档的值（无表/无档
   // 为 1），直接折入预估价与公式——创作页模型与质量档都已确定，不再用
   // 「未计入质量倍率」的含糊口径。实际扣费仍以服务端命中成员的解析为准。
-  const qualityPreviewMultiplier = (table: Partial<Record<string, number>> | null) => {
+  const qualityPreviewMultiplier = (
+    table: Partial<Record<string, number>> | null
+  ) => {
     const value = table?.[quality];
     return typeof value === "number" && Number.isFinite(value) ? value : 1;
   };
@@ -2995,7 +2980,7 @@ export function CreatePageClient({
   // chatReferenceOptions 的 useMemo 一并击穿,形成"每次击键全量遍历会话"。
   // 消息列表渲染(含 visibleChatMessages 派生)已下沉到 ChatMessageList 叶子
   // 组件订阅 chatMessages,父组件不再随流式帧重渲。见 chat-subscriptions.tsx。
-  
+
   const canUseEditReferenceMentions =
     activeBackendType === "responses" || activeBackendType === "mixed";
   const canUseChatReferenceMentions =
@@ -3197,203 +3182,211 @@ export function CreatePageClient({
     </label>
   );
 
-  const renderGptModelSelect = useCallback((params: {
-    id: string;
-    value: ChatModel | "default";
-    onChange: (value: ChatModel | "default") => void;
-    disabled?: boolean;
-    compact?: boolean;
-    allowDefault?: boolean;
-  }) => {
-    const control = (
+  const renderGptModelSelect = useCallback(
+    (params: {
+      id: string;
+      value: ChatModel | "default";
+      onChange: (value: ChatModel | "default") => void;
+      disabled?: boolean;
+      compact?: boolean;
+      allowDefault?: boolean;
+    }) => {
+      const control = (
+        <Select
+          value={params.value}
+          onValueChange={(value) =>
+            params.onChange(value as ChatModel | "default")
+          }
+          disabled={params.disabled}
+        >
+          <SelectTrigger
+            id={params.id}
+            className={params.compact ? "h-8 w-[136px]" : "w-full"}
+            title={gptModelHelpText}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {params.allowDefault && (
+              <SelectItem value="default">
+                {copy("Backend default", "后端默认")}
+              </SelectItem>
+            )}
+            {CHAT_MODEL_OPTIONS.map((option) => (
+              <SelectItem
+                key={option.value}
+                value={option.value}
+                disabled={option.ultraOnly && !premiumChatAllowed}
+              >
+                {option.label}
+                {option.ultraOnly && !premiumChatAllowed
+                  ? ` · ${copy("Ultra", "Ultra")}`
+                  : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      );
+
+      return control;
+    },
+    [copy, gptModelHelpText, premiumChatAllowed]
+  );
+
+  const renderImageModelSelect = useCallback(
+    (params: {
+      id: string;
+      value: string;
+      onChange: (value: string) => void;
+      disabled?: boolean;
+      compact?: boolean;
+    }) => (
       <Select
         value={params.value}
-        onValueChange={(value) =>
-          params.onChange(value as ChatModel | "default")
-        }
+        onValueChange={params.onChange}
         disabled={params.disabled}
       >
         <SelectTrigger
           id={params.id}
-          className={params.compact ? "h-8 w-[136px]" : "w-full"}
-          title={gptModelHelpText}
+          className={params.compact ? "h-8 w-[146px]" : "w-full"}
+          title={imageModelHelpText}
         >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {params.allowDefault && (
-            <SelectItem value="default">
-              {copy("Backend default", "后端默认")}
-            </SelectItem>
-          )}
-          {CHAT_MODEL_OPTIONS.map((option) => (
-            <SelectItem
-              key={option.value}
-              value={option.value}
-              disabled={option.ultraOnly && !premiumChatAllowed}
-            >
-              {option.label}
-              {option.ultraOnly && !premiumChatAllowed
-                ? ` · ${copy("Ultra", "Ultra")}`
-                : ""}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    );
-
-    return control;
-  }, [copy, gptModelHelpText, premiumChatAllowed]);
-
-  const renderImageModelSelect = useCallback((params: {
-    id: string;
-    value: string;
-    onChange: (value: string) => void;
-    disabled?: boolean;
-    compact?: boolean;
-  }) => (
-    <Select
-      value={params.value}
-      onValueChange={params.onChange}
-      disabled={params.disabled}
-    >
-      <SelectTrigger
-        id={params.id}
-        className={params.compact ? "h-8 w-[146px]" : "w-full"}
-        title={imageModelHelpText}
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {CHAT_IMAGE_MODEL_OPTIONS.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            {chatImageModelLabel(option.label)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  ), [imageModelHelpText, chatImageModelLabel]);
-
-  const renderThinkingSelect = useCallback((params: {
-    id: string;
-    value: ChatThinkingLevel;
-    onChange: (value: ChatThinkingLevel) => void;
-    disabled?: boolean;
-    compact?: boolean;
-  }) => {
-    const control = (
-      <Select
-        value={params.value}
-        onValueChange={(value) => params.onChange(value as ChatThinkingLevel)}
-        disabled={params.disabled}
-      >
-        <SelectTrigger
-          id={params.id}
-          className={params.compact ? "h-8 w-[138px]" : "w-full"}
-          title={thinkingHelpText}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {CHAT_THINKING_OPTIONS.map((option) => (
+          {CHAT_IMAGE_MODEL_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
-              {copy("Thinking", "思考")} {thinkingLabel(option.value)}
+              {chatImageModelLabel(option.label)}
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
-    );
+    ),
+    [imageModelHelpText, chatImageModelLabel]
+  );
 
-    return control;
-  }, [copy, thinkingHelpText, thinkingLabel]);
+  const renderThinkingSelect = useCallback(
+    (params: {
+      id: string;
+      value: ChatThinkingLevel;
+      onChange: (value: ChatThinkingLevel) => void;
+      disabled?: boolean;
+      compact?: boolean;
+    }) => {
+      const control = (
+        <Select
+          value={params.value}
+          onValueChange={(value) => params.onChange(value as ChatThinkingLevel)}
+          disabled={params.disabled}
+        >
+          <SelectTrigger
+            id={params.id}
+            className={params.compact ? "h-8 w-[138px]" : "w-full"}
+            title={thinkingHelpText}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {CHAT_THINKING_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {copy("Thinking", "思考")} {thinkingLabel(option.value)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      );
 
-  const renderBackgroundSelect = useCallback((params: {
-    id: string;
-    disabled?: boolean;
-    compact?: boolean;
-  }) => (
-    <Select
-      value={background}
-      onValueChange={(value) => setBackground(value as ImageBackground)}
-      disabled={params.disabled}
-    >
-      <SelectTrigger
-        id={params.id}
-        className={params.compact ? "h-8 w-[126px]" : "w-full"}
-        title={backgroundHelpText}
+      return control;
+    },
+    [copy, thinkingHelpText, thinkingLabel]
+  );
+
+  const renderBackgroundSelect = useCallback(
+    (params: { id: string; disabled?: boolean; compact?: boolean }) => (
+      <Select
+        value={background}
+        onValueChange={(value) => setBackground(value as ImageBackground)}
+        disabled={params.disabled}
       >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {BACKGROUND_OPTIONS.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            {params.compact
-              ? `${copy("BG", "背景")} ${backgroundLabel(option.value)}`
-              : backgroundLabel(option.value)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  ), [background, setBackground, backgroundHelpText, backgroundLabel, copy]);
+        <SelectTrigger
+          id={params.id}
+          className={params.compact ? "h-8 w-[126px]" : "w-full"}
+          title={backgroundHelpText}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {BACKGROUND_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {params.compact
+                ? `${copy("BG", "背景")} ${backgroundLabel(option.value)}`
+                : backgroundLabel(option.value)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    ),
+    [background, setBackground, backgroundHelpText, backgroundLabel, copy]
+  );
 
   // 透明抠图回退开关:仅当背景选为 transparent 时出现。开启后会经服务端 ISNet 抠图链路
   // (issue #27)。agent 模式不调用此处(不渲染)。
-  const renderTransparentMatteToggle = useCallback((params: {
-    id: string;
-    disabled?: boolean;
-  }) => {
-    if (background !== "transparent") return null;
-    return (
+  const renderTransparentMatteToggle = useCallback(
+    (params: { id: string; disabled?: boolean }) => {
+      if (background !== "transparent") return null;
+      return (
+        <label
+          htmlFor={params.id}
+          className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+            transparentMatte
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-primary/40 bg-primary/5 text-foreground"
+          }`}
+          title={copy(
+            "Transparent matte fallback: if the backend does not support transparent output, regenerate opaque then matte it server-side (ISNet) to deliver a transparent PNG. When off, transparent is passed through and an unsupported backend returns a real error.",
+            "透明抠图回退:若后端不支持透明输出,则不透明重生成后用服务端 ISNet 抠图得到透明 PNG。关闭时透明直接透传,后端不支持即返回真实错误。"
+          )}
+        >
+          <Checkbox
+            id={params.id}
+            checked={transparentMatte}
+            onCheckedChange={(checked) => setTransparentMatte(checked === true)}
+            disabled={params.disabled}
+          />
+          {copy("Matte fallback", "透明抠图回退")}
+        </label>
+      );
+    },
+    [background, copy, transparentMatte, setTransparentMatte]
+  );
+
+  // 高清修复开关:总是可见。开启用 SwinIR 复原(文字/结构最佳,较慢),关闭用 general-x4v3(快)。
+  // 仅在管理端超分主开关开、且上游图较长边不足目标 2/3 触发超分时才实际生效。
+  const renderHdRepairToggle = useCallback(
+    (params: { id: string; disabled?: boolean }) => (
       <label
         htmlFor={params.id}
         className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
-          transparentMatte
+          hdRepair
             ? "border-primary bg-primary/10 text-primary"
             : "border-primary/40 bg-primary/5 text-foreground"
         }`}
         title={copy(
-          "Transparent matte fallback: if the backend does not support transparent output, regenerate opaque then matte it server-side (ISNet) to deliver a transparent PNG. When off, transparent is passed through and an unsupported backend returns a real error.",
-          "透明抠图回退:若后端不支持透明输出,则不透明重生成后用服务端 ISNet 抠图得到透明 PNG。关闭时透明直接透传,后端不支持即返回真实错误。"
+          "HD repair (SCUNet): off by default. When on, the final image is restored with SCUNet (denoise / de-blocking / detail enhancement, no size change) — independent of upscaling. It is CPU-heavy (about 11s at 512, 35s at 1024) and runs one-at-a-time server-side, so results take longer. Enable only when you want a cleaner, restored result. Requires the server-side restoration switch to be on.",
+          "高清修复(SCUNet):默认关闭。勾选后,最终图会用 SCUNet 做盲复原(去噪/去压缩块/增强质感,不改分辨率),与放大(超分)相互独立。CPU 推理较重(512 约 11 秒、1024 约 35 秒)、服务端串行排队,出图会更慢。想要更干净、修复过的结果时再开。需管理端开启「高清修复」主开关。"
         )}
       >
         <Checkbox
           id={params.id}
-          checked={transparentMatte}
-          onCheckedChange={(checked) => setTransparentMatte(checked === true)}
+          checked={hdRepair}
+          onCheckedChange={(checked) => setHdRepair(checked === true)}
           disabled={params.disabled}
         />
-        {copy("Matte fallback", "透明抠图回退")}
+        {copy("HD repair", "高清修复")}
       </label>
-    );
-  }, [background, copy, transparentMatte, setTransparentMatte]);
-
-  // 高清修复开关:总是可见。开启用 SwinIR 复原(文字/结构最佳,较慢),关闭用 general-x4v3(快)。
-  // 仅在管理端超分主开关开、且上游图较长边不足目标 2/3 触发超分时才实际生效。
-  const renderHdRepairToggle = useCallback((params: {
-    id: string;
-    disabled?: boolean;
-  }) => (
-    <label
-      htmlFor={params.id}
-      className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
-        hdRepair
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-primary/40 bg-primary/5 text-foreground"
-      }`}
-      title={copy(
-        "HD repair (SCUNet): off by default. When on, the final image is restored with SCUNet (denoise / de-blocking / detail enhancement, no size change) — independent of upscaling. It is CPU-heavy (about 11s at 512, 35s at 1024) and runs one-at-a-time server-side, so results take longer. Enable only when you want a cleaner, restored result. Requires the server-side restoration switch to be on.",
-        "高清修复(SCUNet):默认关闭。勾选后,最终图会用 SCUNet 做盲复原(去噪/去压缩块/增强质感,不改分辨率),与放大(超分)相互独立。CPU 推理较重(512 约 11 秒、1024 约 35 秒)、服务端串行排队,出图会更慢。想要更干净、修复过的结果时再开。需管理端开启「高清修复」主开关。"
-      )}
-    >
-      <Checkbox
-        id={params.id}
-        checked={hdRepair}
-        onCheckedChange={(checked) => setHdRepair(checked === true)}
-        disabled={params.disabled}
-      />
-      {copy("HD repair", "高清修复")}
-    </label>
-  ), [copy, hdRepair, setHdRepair]);
+    ),
+    [copy, hdRepair, setHdRepair]
+  );
 
   const renderReferenceMentionMenu = (params: {
     open: boolean;
@@ -5454,255 +5447,257 @@ export function CreatePageClient({
 
         {!chatWebFileMode && (
           <>
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          {renderGptModelSelect({
-            id: "chat-gpt-model",
-            value: chatModel,
-            onChange: (value) => {
-              if (value !== "default") setChatModel(value);
-            },
-            disabled: isChatGenerating,
-            compact: true,
-          })}
-          {showImageModelControls && (
-            <div
-              className={chatMixWebFirstActive ? "opacity-55" : ""}
-              title={
-                chatMixWebFirstActive ? responsesOnlyDisabledReason : undefined
-              }
-            >
-              {renderImageModelSelect({
-                id: "chat-image-model",
-                value: chatImageModel,
-                onChange: setChatImageModel,
-                disabled: isChatGenerating || chatMixWebFirstActive,
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              {renderGptModelSelect({
+                id: "chat-gpt-model",
+                value: chatModel,
+                onChange: (value) => {
+                  if (value !== "default") setChatModel(value);
+                },
+                disabled: isChatGenerating,
                 compact: true,
               })}
-            </div>
-          )}
-          {showThinkingControls &&
-            renderThinkingSelect({
-              id: "chat-thinking",
-              value: chatThinking,
-              onChange: setChatThinking,
-              disabled: isChatGenerating,
-              compact: true,
-            })}
-          {!isWebOnlyBackend && (
-            <div
-              className={chatMixWebFirstActive ? "opacity-55" : ""}
-              title={
-                chatMixWebFirstActive
-                  ? responsesOnlyDisabledReason
-                  : backgroundHelpText
-              }
-            >
-              {renderBackgroundSelect({
-                id: "chat-background",
-                disabled: isChatGenerating || chatMixWebFirstActive,
-                compact: true,
-              })}
-            </div>
-          )}
-          {!isWebOnlyBackend &&
-            activeMode !== "agent" &&
-            renderTransparentMatteToggle({
-              id: "chat-transparent-matte",
-              disabled: isChatGenerating || chatMixWebFirstActive,
-            })}
-          {/* 质量：codex 对话生图此前未暴露质量参数，补齐（与瀑布流同款、
+              {showImageModelControls && (
+                <div
+                  className={chatMixWebFirstActive ? "opacity-55" : ""}
+                  title={
+                    chatMixWebFirstActive
+                      ? responsesOnlyDisabledReason
+                      : undefined
+                  }
+                >
+                  {renderImageModelSelect({
+                    id: "chat-image-model",
+                    value: chatImageModel,
+                    onChange: setChatImageModel,
+                    disabled: isChatGenerating || chatMixWebFirstActive,
+                    compact: true,
+                  })}
+                </div>
+              )}
+              {showThinkingControls &&
+                renderThinkingSelect({
+                  id: "chat-thinking",
+                  value: chatThinking,
+                  onChange: setChatThinking,
+                  disabled: isChatGenerating,
+                  compact: true,
+                })}
+              {!isWebOnlyBackend && (
+                <div
+                  className={chatMixWebFirstActive ? "opacity-55" : ""}
+                  title={
+                    chatMixWebFirstActive
+                      ? responsesOnlyDisabledReason
+                      : backgroundHelpText
+                  }
+                >
+                  {renderBackgroundSelect({
+                    id: "chat-background",
+                    disabled: isChatGenerating || chatMixWebFirstActive,
+                    compact: true,
+                  })}
+                </div>
+              )}
+              {!isWebOnlyBackend &&
+                activeMode !== "agent" &&
+                renderTransparentMatteToggle({
+                  id: "chat-transparent-matte",
+                  disabled: isChatGenerating || chatMixWebFirstActive,
+                })}
+              {/* 质量：codex 对话生图此前未暴露质量参数，补齐（与瀑布流同款、
               标注按本面板图像模型解析的倍率）；Web-only 车道不支持故隐藏。 */}
-          {!isWebOnlyBackend && (
-            <div
-              className={chatMixWebFirstActive ? "opacity-55" : ""}
-              title={
-                chatMixWebFirstActive
-                  ? responsesOnlyDisabledReason
-                  : undefined
-              }
-            >
-              <Select
-                value={quality}
-                onValueChange={(value) => setQuality(value as ImageQuality)}
-                disabled={isChatGenerating || chatMixWebFirstActive}
-              >
-                <SelectTrigger
-                  id="chat-quality"
-                  className="h-8 w-auto gap-1"
-                  title={copy("Image quality", "图像质量")}
+              {!isWebOnlyBackend && (
+                <div
+                  className={chatMixWebFirstActive ? "opacity-55" : ""}
+                  title={
+                    chatMixWebFirstActive
+                      ? responsesOnlyDisabledReason
+                      : undefined
+                  }
                 >
-                  <span className="text-xs text-muted-foreground">
-                    {copy("Quality", "质量")}
-                  </span>
-                  <SelectValue>
-                    {qualityLabelWithBilling(
-                      quality,
-                      chatQualityMultipliers
-                    )}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {QUALITY_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {qualityLabelWithBilling(
-                        option.value,
-                        chatQualityMultipliers
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {/* 输出格式：请求已带 output_format（共享状态），此前仅生图/编辑
+                  <Select
+                    value={quality}
+                    onValueChange={(value) => setQuality(value as ImageQuality)}
+                    disabled={isChatGenerating || chatMixWebFirstActive}
+                  >
+                    <SelectTrigger
+                      id="chat-quality"
+                      className="h-8 w-auto gap-1"
+                      title={copy("Image quality", "图像质量")}
+                    >
+                      <span className="text-xs text-muted-foreground">
+                        {copy("Quality", "质量")}
+                      </span>
+                      <SelectValue>
+                        {qualityLabelWithBilling(
+                          quality,
+                          chatQualityMultipliers
+                        )}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {QUALITY_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {qualityLabelWithBilling(
+                            option.value,
+                            chatQualityMultipliers
+                          )}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {/* 输出格式：请求已带 output_format（共享状态），此前仅生图/编辑
               面板可改，补齐入口；Web-only 车道不支持故隐藏。 */}
-          {!isWebOnlyBackend && (
-            <div
-              className={chatMixWebFirstActive ? "opacity-55" : ""}
-              title={
-                chatMixWebFirstActive
-                  ? responsesOnlyDisabledReason
-                  : outputFormatHelpText
-              }
-            >
-              <Select
-                value={outputFormat}
-                onValueChange={(value) =>
-                  setOutputFormat(value as ImageOutputFormat)
-                }
-                disabled={isChatGenerating || chatMixWebFirstActive}
-              >
-                <SelectTrigger
-                  id="chat-output-format"
-                  className="h-8 w-auto gap-1"
-                  title={outputFormatHelpText}
+              {!isWebOnlyBackend && (
+                <div
+                  className={chatMixWebFirstActive ? "opacity-55" : ""}
+                  title={
+                    chatMixWebFirstActive
+                      ? responsesOnlyDisabledReason
+                      : outputFormatHelpText
+                  }
                 >
-                  <span className="text-xs text-muted-foreground">
-                    {copy("Format", "格式")}
-                  </span>
-                  <SelectValue>
-                    {outputFormatLabel(outputFormat)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {OUTPUT_FORMAT_OPTIONS.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {outputFormatLabel(option.value)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {renderHdRepairToggle({
-            id: "chat-hd-repair",
-            disabled: isChatGenerating,
-          })}
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setChatSizeDialogOpen(true)}
-            disabled={isChatGenerating}
-            className="h-8 rounded-full px-3 text-xs"
-            title={resolutionHelpText}
-          >
-            {copy("Size", "尺寸")} ·{" "}
-            {activeChatSize === AUTO_IMAGE_SIZE
-              ? autoSizeLabel
-              : activeChatSize}
-          </Button>
-          {activeMode === "agent" && (
-            <div className="flex items-center gap-2 rounded-full border border-border bg-background px-2 py-1">
-              <label
-                htmlFor="agent-force-rounds"
-                className="flex items-center gap-1.5 text-xs text-foreground"
-                title={copy(
-                  "When enabled, Agent runs all selected rounds instead of stopping when the model does not request continue_generation.",
-                  "开启后，Agent 会跑满所选轮数，而不是在模型未请求 continue_generation 时提前停止。"
-                )}
-              >
-                <Checkbox
-                  id="agent-force-rounds"
-                  checked={agentForceRounds}
-                  onCheckedChange={(checked) =>
-                    setAgentForceRounds(checked === true)
-                  }
-                  disabled={isChatGenerating}
-                />
-                {copy("Force", "强制")}
-              </label>
-              <label
-                htmlFor="layered-generation"
-                className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
-                  layeredGeneration
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-primary/40 bg-primary/5 text-foreground"
-                }`}
-                title={copy(
-                  "Split into PSD layers: the agent first creates the full image, then decomposes it into editable layers (background + each element) for PSD export.",
-                  "打散元素生成 PSD:先出整图,再把整图打散成可编辑图层(背景 + 每个元素各一层),完成后可导出分层 PSD。"
-                )}
-              >
-                <Checkbox
-                  id="layered-generation"
-                  checked={layeredGeneration}
-                  onCheckedChange={(checked) =>
-                    setLayeredGeneration(checked === true)
-                  }
-                  disabled={isChatGenerating}
-                />
-                {copy("Split into PSD layers", "打散元素生成 PSD")}
-              </label>
-              <Select
-                value={String(agentMaxRounds)}
-                onValueChange={(value) =>
-                  setAgentMaxRounds(Math.min(8, Math.max(1, Number(value))))
-                }
+                  <Select
+                    value={outputFormat}
+                    onValueChange={(value) =>
+                      setOutputFormat(value as ImageOutputFormat)
+                    }
+                    disabled={isChatGenerating || chatMixWebFirstActive}
+                  >
+                    <SelectTrigger
+                      id="chat-output-format"
+                      className="h-8 w-auto gap-1"
+                      title={outputFormatHelpText}
+                    >
+                      <span className="text-xs text-muted-foreground">
+                        {copy("Format", "格式")}
+                      </span>
+                      <SelectValue>
+                        {outputFormatLabel(outputFormat)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {outputFormatLabel(option.value)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {renderHdRepairToggle({
+                id: "chat-hd-repair",
+                disabled: isChatGenerating,
+              })}
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setChatSizeDialogOpen(true)}
                 disabled={isChatGenerating}
+                className="h-8 rounded-full px-3 text-xs"
+                title={resolutionHelpText}
               >
-                <SelectTrigger className="h-7 w-[86px] border-0 px-2 text-xs shadow-none">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {[1, 2, 3, 4, 5, 6, 7, 8].map((round) => (
-                    <SelectItem key={round} value={String(round)}>
-                      {copy(`${round} rounds`, `${round} 轮`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          {helpMarker(copy("Resolution", "分辨率"), resolutionHelpText)}
-          {isEditChat && chatFirstImageOriginalSize && (
-            <span className="text-xs text-muted-foreground">
-              {copy("Reference", "参考图")} {chatFirstImageOriginalSize}
-            </span>
-          )}
-          <span className="ml-auto text-xs text-muted-foreground">
-            {customApiActive && !chatHasImageReference ? (
-              <span className="font-medium text-foreground">
-                {customApiBillingLabel}
-              </span>
-            ) : (
-              <>
-                {copy("Cost", "费用")}{" "}
-                <span className="font-medium text-foreground">
-                  {formattedChatSingleCreditCost}
-                </span>{" "}
-                <span className="text-muted-foreground">
-                  {chatSingleCreditFormula}
+                {copy("Size", "尺寸")} ·{" "}
+                {activeChatSize === AUTO_IMAGE_SIZE
+                  ? autoSizeLabel
+                  : activeChatSize}
+              </Button>
+              {activeMode === "agent" && (
+                <div className="flex items-center gap-2 rounded-full border border-border bg-background px-2 py-1">
+                  <label
+                    htmlFor="agent-force-rounds"
+                    className="flex items-center gap-1.5 text-xs text-foreground"
+                    title={copy(
+                      "When enabled, Agent runs all selected rounds instead of stopping when the model does not request continue_generation.",
+                      "开启后，Agent 会跑满所选轮数，而不是在模型未请求 continue_generation 时提前停止。"
+                    )}
+                  >
+                    <Checkbox
+                      id="agent-force-rounds"
+                      checked={agentForceRounds}
+                      onCheckedChange={(checked) =>
+                        setAgentForceRounds(checked === true)
+                      }
+                      disabled={isChatGenerating}
+                    />
+                    {copy("Force", "强制")}
+                  </label>
+                  <label
+                    htmlFor="layered-generation"
+                    className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+                      layeredGeneration
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-primary/40 bg-primary/5 text-foreground"
+                    }`}
+                    title={copy(
+                      "Split into PSD layers: the agent first creates the full image, then decomposes it into editable layers (background + each element) for PSD export.",
+                      "打散元素生成 PSD:先出整图,再把整图打散成可编辑图层(背景 + 每个元素各一层),完成后可导出分层 PSD。"
+                    )}
+                  >
+                    <Checkbox
+                      id="layered-generation"
+                      checked={layeredGeneration}
+                      onCheckedChange={(checked) =>
+                        setLayeredGeneration(checked === true)
+                      }
+                      disabled={isChatGenerating}
+                    />
+                    {copy("Split into PSD layers", "打散元素生成 PSD")}
+                  </label>
+                  <Select
+                    value={String(agentMaxRounds)}
+                    onValueChange={(value) =>
+                      setAgentMaxRounds(Math.min(8, Math.max(1, Number(value))))
+                    }
+                    disabled={isChatGenerating}
+                  >
+                    <SelectTrigger className="h-7 w-[86px] border-0 px-2 text-xs shadow-none">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((round) => (
+                        <SelectItem key={round} value={String(round)}>
+                          {copy(`${round} rounds`, `${round} 轮`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              {helpMarker(copy("Resolution", "分辨率"), resolutionHelpText)}
+              {isEditChat && chatFirstImageOriginalSize && (
+                <span className="text-xs text-muted-foreground">
+                  {copy("Reference", "参考图")} {chatFirstImageOriginalSize}
                 </span>
-              </>
-            )}
-          </span>
-        </div>
-        <div className="mb-2">
-          {promptOptimizationField(
-            "chat-prompt-optimization",
-            isChatGenerating
-          )}
-        </div>
+              )}
+              <span className="ml-auto text-xs text-muted-foreground">
+                {customApiActive && !chatHasImageReference ? (
+                  <span className="font-medium text-foreground">
+                    {customApiBillingLabel}
+                  </span>
+                ) : (
+                  <>
+                    {copy("Cost", "费用")}{" "}
+                    <span className="font-medium text-foreground">
+                      {formattedChatSingleCreditCost}
+                    </span>{" "}
+                    <span className="text-muted-foreground">
+                      {chatSingleCreditFormula}
+                    </span>
+                  </>
+                )}
+              </span>
+            </div>
+            <div className="mb-2">
+              {promptOptimizationField(
+                "chat-prompt-optimization",
+                isChatGenerating
+              )}
+            </div>
           </>
         )}
 
@@ -6229,9 +6224,7 @@ export function CreatePageClient({
       params;
     const imageFiles = attachments.filter((item) => item.kind === "image");
     if (kind === "psd" && imageFiles.length === 0) {
-      toast.error(
-        copy("PSD needs a reference image", "生成 PSD 需要参考图")
-      );
+      toast.error(copy("PSD needs a reference image", "生成 PSD 需要参考图"));
       return;
     }
 
@@ -7402,89 +7395,86 @@ export function CreatePageClient({
   // isText*Generating/linePrompts,函数体只依赖稳定 props,useCallback([]) 固定引用。
   const textSettingsPanel = useCallback(
     (
-    mode: TextGenerationMode,
-    panel: {
-      modeBusy: boolean;
-      totalCount: number;
-      formattedLineCost: string;
-    } = {
-      modeBusy: false,
-      totalCount: 0,
-      formattedLineCost: "",
-    }
-  ) => {
-    const isLineMode = mode === "lines";
-    const modeBusy = panel.modeBusy;
-    // 报价由调用方传:父级的 lineBatchCreditCost 随逐行输入击键变化,
-    // 若在闭包内引用会让 useCallback 每击键重建(传给 TextPanel 后失去隔离)。
-    const countValue = isLineMode ? lineBatchRepeatCount : batchCount;
-    const setCountValue = (value: number) => {
-      const normalized = Math.min(Math.max(1, value), batchCountMax);
-      if (isLineMode) {
-        setLineBatchRepeatCount(normalized);
-      } else {
-        setBatchCount(normalized);
+      mode: TextGenerationMode,
+      panel: {
+        modeBusy: boolean;
+        totalCount: number;
+        formattedLineCost: string;
+      } = {
+        modeBusy: false,
+        totalCount: 0,
+        formattedLineCost: "",
       }
-    };
-    const formattedCost = isLineMode
-      ? panel.formattedLineCost
-      : formattedTextBatchCreditCost;
-    const costSuffix = isLineMode
-      ? copy(
-          ` for ${panel.totalCount} total`,
-          `，共 ${panel.totalCount} 张`
-        )
-      : batchCostSuffix(batchCount);
+    ) => {
+      const isLineMode = mode === "lines";
+      const modeBusy = panel.modeBusy;
+      // 报价由调用方传:父级的 lineBatchCreditCost 随逐行输入击键变化,
+      // 若在闭包内引用会让 useCallback 每击键重建(传给 TextPanel 后失去隔离)。
+      const countValue = isLineMode ? lineBatchRepeatCount : batchCount;
+      const setCountValue = (value: number) => {
+        const normalized = Math.min(Math.max(1, value), batchCountMax);
+        if (isLineMode) {
+          setLineBatchRepeatCount(normalized);
+        } else {
+          setBatchCount(normalized);
+        }
+      };
+      const formattedCost = isLineMode
+        ? panel.formattedLineCost
+        : formattedTextBatchCreditCost;
+      const costSuffix = isLineMode
+        ? copy(` for ${panel.totalCount} total`, `，共 ${panel.totalCount} 张`)
+        : batchCostSuffix(batchCount);
 
-    return (
-      <div className="space-y-4 rounded-lg border border-border bg-background p-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {showImageModelControls && (
-                <div
-                  className={`space-y-1.5 ${
-                    textMixWebFirstActive ? "opacity-55" : ""
-                  }`}
-                  title={
-                    textMixWebFirstActive
-                      ? responsesOnlyDisabledReason
-                      : undefined
-                  }
-                >
-                  <label
-                    htmlFor={`text-model-${mode}`}
-                    className="text-xs font-medium text-muted-foreground"
+      return (
+        <div className="space-y-4 rounded-lg border border-border bg-background p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {showImageModelControls && (
+                  <div
+                    className={`space-y-1.5 ${
+                      textMixWebFirstActive ? "opacity-55" : ""
+                    }`}
+                    title={
+                      textMixWebFirstActive
+                        ? responsesOnlyDisabledReason
+                        : undefined
+                    }
                   >
-                    {labelWithHelp(
-                      copy("Image model", "图片模型"),
-                      imageModelHelpText
-                    )}
-                  </label>
-                  <Select
-                    value={textModel}
-                    onValueChange={setTextModel}
-                    disabled={modeBusy || textMixWebFirstActive}
-                  >
-                    <SelectTrigger
-                      id={`text-model-${mode}`}
-                      className="w-full"
-                      title={imageModelHelpText}
+                    <label
+                      htmlFor={`text-model-${mode}`}
+                      className="text-xs font-medium text-muted-foreground"
                     >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {TEXT_MODEL_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {textModelLabel(option.label)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
+                      {labelWithHelp(
+                        copy("Image model", "图片模型"),
+                        imageModelHelpText
+                      )}
+                    </label>
+                    <Select
+                      value={textModel}
+                      onValueChange={setTextModel}
+                      disabled={modeBusy || textMixWebFirstActive}
+                    >
+                      <SelectTrigger
+                        id={`text-model-${mode}`}
+                        className="w-full"
+                        title={imageModelHelpText}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {TEXT_MODEL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {textModelLabel(option.label)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
 
-              <div className="space-y-1.5">
+                <div className="space-y-1.5">
                   <label
                     htmlFor={`text-gpt-model-${mode}`}
                     className="text-xs font-medium text-muted-foreground"
@@ -7507,271 +7497,326 @@ export function CreatePageClient({
                       "仅用于平台 Web/Codex 后端池；默认会沿用后端配置，外接 image API 仍按图片模型请求。"
                     )}
                   </p>
-              </div>
-
-              {showThinkingControls && (
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor={`text-thinking-${mode}`}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    {labelWithHelp(
-                      copy("Thinking", "思考强度"),
-                      thinkingHelpText
-                    )}
-                  </label>
-                  {renderThinkingSelect({
-                    id: `text-thinking-${mode}`,
-                    value: imageThinking,
-                    onChange: setImageThinking,
-                    disabled: modeBusy,
-                  })}
                 </div>
-              )}
 
-              <div className="space-y-1.5">
-                <label
-                  htmlFor={isLineMode ? "line-repeat-count" : "batch-count"}
-                  className="text-xs font-medium text-muted-foreground"
-                >
-                  {isLineMode
-                    ? copy("Repeat each line", "每行重复")
-                    : copy("Repeat prompt", "重复生成")}
-                </label>
-                <ConcurrencyNumberInput
-                  id={isLineMode ? "line-repeat-count" : "batch-count"}
-                  value={countValue}
-                  max={batchCountMax}
-                  disabled={modeBusy}
-                  onChange={setCountValue}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <span className="text-sm font-medium text-foreground">
-                    {labelWithHelp(
-                      copy("Resolution", "分辨率"),
-                      resolutionHelpText
-                    )}
-                  </span>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {copy("Current", "当前")}：
-                    {useAutoSize ? autoSizeLabel : size}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setTextSizeDialogOpen(true)}
-                  disabled={modeBusy}
-                  className="shrink-0"
-                >
-                  {copy("Set size", "设置尺寸")}
-                </Button>
-              </div>
-              {/* 高清修复放分辨率卡内:与后端类型无关(纯服务端超分后处理),须对 web 后端也可见。 */}
-              {renderHdRepairToggle({
-                id: `image-hd-repair-${mode}`,
-                disabled: modeBusy,
-              })}
-            </div>
-
-            {!isWebOnlyBackend && (
-              <div
-                className={`grid gap-3 sm:grid-cols-2 ${
-                  disableResponsesOnlyControls ? "opacity-55" : ""
-                }`}
-                title={responsesOnlyDisabledReason}
-              >
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor={`image-quality-${mode}`}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    {copy("Quality", "质量")}
-                  </label>
-                  <Select
-                    value={quality}
-                    onValueChange={(value) => setQuality(value as ImageQuality)}
-                    disabled={modeBusy || disableResponsesOnlyControls}
-                  >
-                    <SelectTrigger
-                      id={`image-quality-${mode}`}
-                      className="w-full"
-                    >
-                      <SelectValue>
-                        {qualityLabelWithBilling(quality, textQualityMultipliers)}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {QUALITY_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {qualityLabelWithBilling(
-                            option.value,
-                            textQualityMultipliers
-                          )}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor={`image-output-format-${mode}`}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    {labelWithHelp(
-                      copy("Output format", "输出格式"),
-                      outputFormatHelpText
-                    )}
-                  </label>
-                  <Select
-                    value={outputFormat}
-                    onValueChange={(value) =>
-                      setOutputFormat(value as ImageOutputFormat)
-                    }
-                    disabled={modeBusy || disableResponsesOnlyControls}
-                  >
-                    <SelectTrigger
-                      id={`image-output-format-${mode}`}
-                      className="w-full"
-                      title={outputFormatHelpText}
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {OUTPUT_FORMAT_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {outputFormatLabel(option.value)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {outputFormat !== "png" && (
+                {showThinkingControls && (
                   <div className="space-y-1.5">
                     <label
-                      htmlFor={`image-output-compression-${mode}`}
+                      htmlFor={`text-thinking-${mode}`}
                       className="text-xs font-medium text-muted-foreground"
                     >
                       {labelWithHelp(
-                        copy("Compression", "压缩率"),
-                        outputCompressionHelpText
+                        copy("Thinking", "思考强度"),
+                        thinkingHelpText
                       )}
                     </label>
-                    <Input
-                      id={`image-output-compression-${mode}`}
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={outputCompression}
-                      onChange={(event) =>
-                        setOutputCompression(
-                          Math.min(
-                            100,
-                            Math.max(0, Number(event.target.value) || 0)
-                          )
-                        )
-                      }
-                      disabled={modeBusy || disableResponsesOnlyControls}
-                      title={outputCompressionHelpText}
-                    />
+                    {renderThinkingSelect({
+                      id: `text-thinking-${mode}`,
+                      value: imageThinking,
+                      onChange: setImageThinking,
+                      disabled: modeBusy,
+                    })}
                   </div>
                 )}
+
                 <div className="space-y-1.5">
                   <label
-                    htmlFor={`image-background-${mode}`}
+                    htmlFor={isLineMode ? "line-repeat-count" : "batch-count"}
                     className="text-xs font-medium text-muted-foreground"
                   >
-                    {labelWithHelp(
-                      copy("Background", "背景"),
-                      backgroundHelpText
-                    )}
+                    {isLineMode
+                      ? copy("Repeat each line", "每行重复")
+                      : copy("Repeat prompt", "重复生成")}
                   </label>
-                  {renderBackgroundSelect({
-                    id: `image-background-${mode}`,
-                    disabled: modeBusy || disableResponsesOnlyControls,
-                  })}
-                  {renderTransparentMatteToggle({
-                    id: `image-transparent-matte-${mode}`,
-                    disabled: modeBusy || disableResponsesOnlyControls,
-                  })}
-                </div>
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor={`image-oai-moderation-${mode}`}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    {copy("OAI moderation strength", "OAI 自身审核强度")}
-                  </label>
-                  <Select
-                    value={moderation}
-                    onValueChange={(value) =>
-                      setModeration(value as ImageModeration)
-                    }
-                    disabled={modeBusy || disableResponsesOnlyControls}
-                  >
-                    <SelectTrigger
-                      id={`image-oai-moderation-${mode}`}
-                      className="w-full"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MODERATION_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {moderationLabel(option.value)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <ConcurrencyNumberInput
+                    id={isLineMode ? "line-repeat-count" : "batch-count"}
+                    value={countValue}
+                    max={batchCountMax}
+                    disabled={modeBusy}
+                    onChange={setCountValue}
+                  />
                 </div>
               </div>
-            )}
-            {responsesOnlyDisabledReason && !isWebOnlyBackend && (
-              <p className="text-xs text-muted-foreground">
-                {responsesOnlyDisabledReason}
-              </p>
-            )}
-          </div>
 
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground lg:justify-end">
-            <Coins className="h-3.5 w-3.5" />
-            {customApiActive ? (
-              <span className="font-medium text-foreground">
-                {customApiBillingLabel}
-              </span>
-            ) : (
-              <span>
-                {copy("Balance", "余额")}:{" "}
+              <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <span className="text-sm font-medium text-foreground">
+                      {labelWithHelp(
+                        copy("Resolution", "分辨率"),
+                        resolutionHelpText
+                      )}
+                    </span>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {copy("Current", "当前")}：
+                      {useAutoSize ? autoSizeLabel : size}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setTextSizeDialogOpen(true)}
+                    disabled={modeBusy}
+                    className="shrink-0"
+                  >
+                    {copy("Set size", "设置尺寸")}
+                  </Button>
+                </div>
+                {/* 高清修复放分辨率卡内:与后端类型无关(纯服务端超分后处理),须对 web 后端也可见。 */}
+                {renderHdRepairToggle({
+                  id: `image-hd-repair-${mode}`,
+                  disabled: modeBusy,
+                })}
+              </div>
+
+              {!isWebOnlyBackend && (
+                <div
+                  className={`grid gap-3 sm:grid-cols-2 ${
+                    disableResponsesOnlyControls ? "opacity-55" : ""
+                  }`}
+                  title={responsesOnlyDisabledReason}
+                >
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={`image-quality-${mode}`}
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      {copy("Quality", "质量")}
+                    </label>
+                    <Select
+                      value={quality}
+                      onValueChange={(value) =>
+                        setQuality(value as ImageQuality)
+                      }
+                      disabled={modeBusy || disableResponsesOnlyControls}
+                    >
+                      <SelectTrigger
+                        id={`image-quality-${mode}`}
+                        className="w-full"
+                      >
+                        <SelectValue>
+                          {qualityLabelWithBilling(
+                            quality,
+                            textQualityMultipliers
+                          )}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {QUALITY_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {qualityLabelWithBilling(
+                              option.value,
+                              textQualityMultipliers
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={`image-output-format-${mode}`}
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      {labelWithHelp(
+                        copy("Output format", "输出格式"),
+                        outputFormatHelpText
+                      )}
+                    </label>
+                    <Select
+                      value={outputFormat}
+                      onValueChange={(value) =>
+                        setOutputFormat(value as ImageOutputFormat)
+                      }
+                      disabled={modeBusy || disableResponsesOnlyControls}
+                    >
+                      <SelectTrigger
+                        id={`image-output-format-${mode}`}
+                        className="w-full"
+                        title={outputFormatHelpText}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {outputFormatLabel(option.value)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {outputFormat !== "png" && (
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor={`image-output-compression-${mode}`}
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        {labelWithHelp(
+                          copy("Compression", "压缩率"),
+                          outputCompressionHelpText
+                        )}
+                      </label>
+                      <Input
+                        id={`image-output-compression-${mode}`}
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={outputCompression}
+                        onChange={(event) =>
+                          setOutputCompression(
+                            Math.min(
+                              100,
+                              Math.max(0, Number(event.target.value) || 0)
+                            )
+                          )
+                        }
+                        disabled={modeBusy || disableResponsesOnlyControls}
+                        title={outputCompressionHelpText}
+                      />
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={`image-background-${mode}`}
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      {labelWithHelp(
+                        copy("Background", "背景"),
+                        backgroundHelpText
+                      )}
+                    </label>
+                    {renderBackgroundSelect({
+                      id: `image-background-${mode}`,
+                      disabled: modeBusy || disableResponsesOnlyControls,
+                    })}
+                    {renderTransparentMatteToggle({
+                      id: `image-transparent-matte-${mode}`,
+                      disabled: modeBusy || disableResponsesOnlyControls,
+                    })}
+                  </div>
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={`image-oai-moderation-${mode}`}
+                      className="text-xs font-medium text-muted-foreground"
+                    >
+                      {copy("OAI moderation strength", "OAI 自身审核强度")}
+                    </label>
+                    <Select
+                      value={moderation}
+                      onValueChange={(value) =>
+                        setModeration(value as ImageModeration)
+                      }
+                      disabled={modeBusy || disableResponsesOnlyControls}
+                    >
+                      <SelectTrigger
+                        id={`image-oai-moderation-${mode}`}
+                        className="w-full"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MODERATION_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {moderationLabel(option.value)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              )}
+              {responsesOnlyDisabledReason && !isWebOnlyBackend && (
+                <p className="text-xs text-muted-foreground">
+                  {responsesOnlyDisabledReason}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground lg:justify-end">
+              <Coins className="h-3.5 w-3.5" />
+              {customApiActive ? (
                 <span className="font-medium text-foreground">
-                  {formattedBalance}
-                </span>{" "}
-                · {copy("Cost", "费用")}:{" "}
-                <span className="font-medium text-foreground">
-                  {formattedCost}
+                  {customApiBillingLabel}
                 </span>
-                {costSuffix}{" "}
-                <span className="text-muted-foreground">
-                  {copy("per image", "单张")} {textCreditFormula}
+              ) : (
+                <span>
+                  {copy("Balance", "余额")}:{" "}
+                  <span className="font-medium text-foreground">
+                    {formattedBalance}
+                  </span>{" "}
+                  · {copy("Cost", "费用")}:{" "}
+                  <span className="font-medium text-foreground">
+                    {formattedCost}
+                  </span>
+                  {costSuffix}{" "}
+                  <span className="text-muted-foreground">
+                    {copy("per image", "单张")} {textCreditFormula}
+                  </span>
                 </span>
-              </span>
-            )}
+              )}
+            </div>
           </div>
+          {!sizeCheck.valid && (
+            <p className="text-xs text-destructive">
+              {validationMessage(sizeCheck.message)}
+            </p>
+          )}
         </div>
-        {!sizeCheck.valid && (
-          <p className="text-xs text-destructive">
-            {validationMessage(sizeCheck.message)}
-          </p>
-        )}
-      </div>
-    );
-  },
-    [background, backgroundHelpText, batchCostSuffix, batchCount, batchCountMax, copy, customApiActive, customApiBillingLabel, formattedTextBatchCreditCost, gptModelHelpText, imageModelHelpText, isWebOnlyBackend, labelWithHelp, moderation, moderationLabel, outputCompression, outputCompressionHelpText, outputFormat, outputFormatHelpText, outputFormatLabel, qualityLabelWithBilling, renderBackgroundSelect, renderGptModelSelect, renderHdRepairToggle, renderThinkingSelect, renderTransparentMatteToggle, resolutionHelpText, responsesOnlyDisabledReason, setBatchCount, setImageGptModel, setImageThinking, setLineBatchRepeatCount, setModeration, setOutputCompression, setOutputFormat, setQuality, setTextModel, setTextSizeDialogOpen, showImageModelControls, showThinkingControls, size, sizeCheck, textCreditFormula, textMixWebFirstActive, textModel, textModelLabel, textQualityMultipliers, thinkingHelpText, validationMessage]
+      );
+    },
+    [
+      background,
+      backgroundHelpText,
+      batchCostSuffix,
+      batchCount,
+      batchCountMax,
+      copy,
+      customApiActive,
+      customApiBillingLabel,
+      formattedTextBatchCreditCost,
+      gptModelHelpText,
+      imageModelHelpText,
+      isWebOnlyBackend,
+      labelWithHelp,
+      moderation,
+      moderationLabel,
+      outputCompression,
+      outputCompressionHelpText,
+      outputFormat,
+      outputFormatHelpText,
+      outputFormatLabel,
+      qualityLabelWithBilling,
+      renderBackgroundSelect,
+      renderGptModelSelect,
+      renderHdRepairToggle,
+      renderThinkingSelect,
+      renderTransparentMatteToggle,
+      resolutionHelpText,
+      responsesOnlyDisabledReason,
+      setBatchCount,
+      setImageGptModel,
+      setImageThinking,
+      setLineBatchRepeatCount,
+      setModeration,
+      setOutputCompression,
+      setOutputFormat,
+      setQuality,
+      setTextModel,
+      setTextSizeDialogOpen,
+      showImageModelControls,
+      showThinkingControls,
+      size,
+      sizeCheck,
+      textCreditFormula,
+      textMixWebFirstActive,
+      textModel,
+      textModelLabel,
+      textQualityMultipliers,
+      thinkingHelpText,
+      validationMessage,
+    ]
   );
   const renderVisualOutput = (mode: VisualOutputMode) => {
     const loading = isVisualModeLoading(mode);
@@ -7987,1074 +8032,214 @@ export function CreatePageClient({
   // 更新(其他面板的流式进度/生成状态翻转)都不应触发它重新 diff。deps 为面板
   // 引用的组件作用域值;未稳定的 handler 引用每次 render 会变,但其内容依赖
   // 的 state 变化时 deps 里必有对应项,缓存失效时机仍正确。
-  const chatPanelElement = useMemo(
-    () => (
-              <div
-                role="tabpanel"
-                hidden={
-                  activeMode !== "chat" &&
-                  activeMode !== "agent" &&
-                  activeMode !== "chat-web"
-                }
-                className="mt-0"
-              >
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                        {activeMode === "agent" ? (
-                          <Wand2 className="h-4 w-4" />
-                        ) : (
-                          <MessageSquare className="h-4 w-4" />
-                        )}
-                        {activeMode === "agent"
-                          ? copy("Agent mode", "Agent 模式")
-                          : activeMode === "chat-web"
-                            ? copy("Web chat", "网页对话")
-                            : copy("Chat mode", "对话模式")}
-                      </div>
-                      <p className="mt-1 max-w-xl text-xs text-muted-foreground">
-                        {activeMode === "agent"
-                          ? copy(
-                              "Codex-style agent mode can search, read attached files, use tools, and show the run process.",
-                              "Codex 风格 Agent 模式可联网、读取附件、调用工具，并展示运行过程。"
-                            )
-                          : activeMode === "chat-web"
-                            ? copy(
-                                "Web conversation over ChatGPT web accounts — keeps context for text/image creation, and can generate editable PPT/PSD in the same chat.",
-                                "网页对话(基于 ChatGPT 网页账号):保留上下文进行文字/图片创作,并可在同一对话里生成可编辑 PPT/PSD。"
-                              )
-                            : copy(
-                                "Original chat mode keeps conversation context for text/image creation without forcing agent tools.",
-                                "原对话模式保留上下文进行文字/图片创作,不强制注入 Agent 工具。"
-                              )}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      <Select
-                        value={
-                          activeConversationExists
-                            ? chatConversationId
-                            : currentModeConversations[0]?.id || chatConversationId
-                        }
-                        onValueChange={(value) => {
-                          const conversation = currentModeConversations.find(
-                            (item) => item.id === value
-                          );
-                          if (conversation) {
-                            handleOpenChatConversation(conversation);
-                          }
-                        }}
-                        disabled={
-                          isChatGenerating || currentModeConversations.length === 0
-                        }
-                      >
-                        <SelectTrigger className="h-9 w-[180px] sm:w-[220px]">
-                          <SelectValue
-                            placeholder={copy("Chat history", "历史对话")}
-                          />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {currentModeConversations.map((conversation) => (
-                            <SelectItem key={conversation.id} value={conversation.id}>
-                              {conversation.title}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={handleNewChat}
-                        disabled={isChatGenerating}
-                      >
-                        <Plus className="h-4 w-4" />
-                        {copy("New chat", "新对话")}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={handleClearChatHistory}
-                        disabled={
-                          isChatGenerating || getChatMessages().length === 0
-                        }
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        {copy("Clear history", "清理记录")}
-                      </Button>
-                      {chatAttachments.length > 0 && (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={clearChatAttachments}
-                          disabled={isChatGenerating}
-                        >
-                          <X className="h-4 w-4" />
-                          {copy("Clear attachments", "清除附件")}
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex min-h-[680px] flex-col overflow-hidden rounded-lg border border-border bg-background">
-                    <div
-                      ref={chatMessagesRef}
-                      className="flex-1 space-y-5 overflow-y-auto px-4 py-4"
-                    >
-                      <ChatMessageList
-                        activeConversationMode={activeConversationMode}
-                        isConversationModeMatch={isMessageInConversationMode}
-                        renderList={(visibleChatMessages, chatStreamMessageId) => (
-                          <>
-                      {visibleChatMessages.length === 0 ? (
-                        <div className="flex min-h-[420px] flex-col items-center justify-center text-center text-muted-foreground">
-                          {activeMode === "agent" ? (
-                            <Wand2 className="mb-3 h-8 w-8" />
-                          ) : (
-                            <MessageSquare className="mb-3 h-8 w-8" />
-                          )}
-                          <p className="text-sm font-medium text-foreground">
-                            {activeMode === "agent"
-                              ? copy("Start an agent run", "开始 Agent 任务")
-                              : copy("Start a visual conversation", "开始视觉对话")}
-                          </p>
-                          <p className="mt-1 max-w-md text-xs">
-                            {activeMode === "agent"
-                              ? copy(
-                                  "Agent mode can use tools, search, and iterate images in the same run.",
-                                  "Agent 模式可以调用工具、联网查询，并在同一轮中迭代图片。"
-                                )
-                              : copy(
-                                  "Auto mode generates from text, edits attached images, and keeps the conversation as context.",
-                                  "Auto 模式会根据文字生成图片、编辑附件图片，并保留对话上下文。"
-                                )}
-                          </p>
-                        </div>
-                      ) : (
-                        <>
-                          {visibleChatMessages.map((message) => {
-                            const variants = getChatVariants(message);
-                            const activeVariant = getActiveChatVariant(message);
-                            const activeIndex = message.activeVariant || 0;
-                            const webChoiceVariants = variants.filter(
-                              (variant) =>
-                                variant.outputRole === "choice" && variant.imageUrl
-                            );
-                            const isStreamingMessage =
-                              chatStreamMessageId === message.id;
-                            const activeVariantPending =
-                              activeVariant?.pending === true;
-
-                            return (
-                              <div
-                                key={message.id}
-                                className={`flex ${
-                                  message.role === "user"
-                                    ? "justify-end"
-                                    : "justify-start"
-                                }`}
-                              >
-                                <div
-                                  className={`max-w-[88%] ${
-                                    message.role === "user"
-                                      ? "text-right"
-                                      : "text-left"
-                                  }`}
-                                >
-                                  <div
-                                    className={`rounded-lg border px-3 py-3 text-sm ${
-                                      message.role === "user"
-                                        ? "rounded-br-[5px] border-transparent bg-secondary text-secondary-foreground"
-                                        : "rounded-bl-[5px] border-border bg-background text-foreground"
-                                    }`}
-                                  >
-                                    {message.role === "user" ? (
-                                      <div className="flex flex-col gap-3">
-                                        {message.attachments?.length ? (
-                                          <div className="flex flex-wrap justify-end gap-2">
-                                            {message.attachments.map((attachment) => (
-                                              <div
-                                                key={attachment.id}
-                                                className="relative h-12 w-12 overflow-hidden rounded-md border border-border bg-muted"
-                                              >
-                                                {attachment.kind === "file" ||
-                                                !attachment.previewUrl ? (
-                                                  <span className="flex h-full w-full items-center justify-center">
-                                                    <FileText className="h-5 w-5 text-muted-foreground" />
-                                                  </span>
-                                                ) : (
-                                                  <Image
-                                                    src={attachment.previewUrl}
-                                                    alt={attachment.name}
-                                                    fill
-                                                    sizes="48px"
-                                                    className="object-cover"
-                                                    unoptimized
-                                                  />
-                                                )}
-                                              </div>
-                                            ))}
-                                          </div>
-                                        ) : null}
-                                        <p className="whitespace-pre-wrap break-words">
-                                          {message.text}
-                                        </p>
-                                      </div>
-                                    ) : isStreamingMessage ? (
-                                      renderChatStreamBubble(message.id)
-                                    ) : message.error ? (
-                                      <p className="text-destructive">
-                                        {message.error}
-                                      </p>
-                                    ) : activeVariant ? (
-                                      <div>
-                                        {renderThinkingBlock(
-                                          activeVariant.responseThinking,
-                                          message.mode === "agent"
-                                        )}
-                                        {message.mode === "agent"
-                                          ? renderAgentRoundCards(
-                                              activeVariant.agentEvents,
-                                              activeVariant.responseAgent,
-                                              true
-                                            )
-                                          : null}
-                                        {activeVariant.responseText && (
-                                          <p
-                                            className={`whitespace-pre-wrap break-words leading-relaxed ${
-                                              activeVariant.imageUrl ? "mb-3" : ""
-                                            }`}
-                                          >
-                                            {activeVariant.responseText}
-                                          </p>
-                                        )}
-                                        {activeVariant.files?.length ? (
-                                          <div className="mt-2 flex flex-col gap-2">
-                                            {activeVariant.files.map((chatFile) => (
-                                              <a
-                                                key={chatFile.url}
-                                                href={chatFile.url}
-                                                download
-                                                className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-sm transition-colors duration-150 hover:bg-muted"
-                                              >
-                                                <FileText className="h-4 w-4" />
-                                                {copy("Download", "下载")}{" "}
-                                                {chatFile.label}
-                                              </a>
-                                            ))}
-                                          </div>
-                                        ) : null}
-                                        {activeVariant.imageUrl && (
-                                          <div className="overflow-hidden rounded-md border bg-background">
-                                            <button
-                                              type="button"
-                                              className="group relative block w-full bg-muted"
-                                              style={{
-                                                aspectRatio: `${
-                                                  parseImageSize(activeVariant.size)
-                                                    ?.width || defaultDimensions.width
-                                                } / ${
-                                                  parseImageSize(activeVariant.size)
-                                                    ?.height ||
-                                                  defaultDimensions.height
-                                                }`,
-                                              }}
-                                              onClick={() => {
-                                                if (activeVariant.generationId) {
-                                                  setSelectedRecentId(
-                                                    activeVariant.generationId
-                                                  );
-                                                }
-                                              }}
-                                              title={copy(
-                                                "Open image preview",
-                                                "打开图片预览"
-                                              )}
-                                            >
-                                              <Image
-                                                src={thumbSrc(
-                                                  activeVariant.imageUrl,
-                                                  512
-                                                )}
-                                                alt={activeVariant.prompt}
-                                                fill
-                                                sizes="(max-width: 768px) 80vw, 420px"
-                                                className="object-contain"
-                                                unoptimized={shouldBypassImageOptimization(
-                                                  activeVariant.imageUrl
-                                                )}
-                                              />
-                                              <span className="absolute right-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground opacity-0 shadow-whisper transition-opacity group-hover:opacity-100">
-                                                <Eye className="mr-1 inline h-3 w-3" />
-                                                {copy("Preview", "预览")}
-                                              </span>
-                                            </button>
-                                            <div className="flex flex-wrap gap-2 p-2">
-                                              <Button
-                                                asChild
-                                                variant="outline"
-                                                size="xs"
-                                              >
-                                                <a
-                                                  href={activeVariant.imageUrl}
-                                                  download
-                                                  target="_blank"
-                                                  rel="noopener noreferrer"
-                                                >
-                                                  <Download className="h-3 w-3" />
-                                                  {copy("Download", "下载")}
-                                                </a>
-                                              </Button>
-                                              <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="xs"
-                                                onClick={() =>
-                                                  attachResultToChat(activeVariant)
-                                                }
-                                              >
-                                                <RefreshCcw className="h-3 w-3" />
-                                                {copy("Edit next", "继续编辑")}
-                                              </Button>
-                                            </div>
-                                          </div>
-                                        )}
-                                        {activeVariantPending && (
-                                          <div className="mt-3 flex items-center gap-2 text-muted-foreground">
-                                            <Loader2 className="h-4 w-4 animate-spin" />
-                                            {copy(
-                                              "Generation is still running. Reconnecting to status...",
-                                              "仍在生成中，正在恢复状态..."
-                                            )}
-                                          </div>
-                                        )}
-                                        {!activeVariant.responseText &&
-                                          !activeVariant.imageUrl &&
-                                          !activeVariantPending && (
-                                            <p className="text-muted-foreground">
-                                              {copy(
-                                                "Response generated",
-                                                "回复已生成"
-                                              )}
-                                            </p>
-                                          )}
-                                      </div>
-                                    ) : (
-                                      <div className="flex items-center gap-2 text-muted-foreground">
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                        {copy("Generating...", "生成中...")}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {message.role === "assistant" && (
-                                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                                      {variants.length > 1 && (
-                                        <div className="inline-flex items-center rounded-md border border-border bg-background text-xs text-muted-foreground">
-                                          <Button
-                                            type="button"
-                                            variant="ghost"
-                                            size="icon-xs"
-                                            disabled={
-                                              isChatGenerating || activeIndex === 0
-                                            }
-                                            onClick={() =>
-                                              handleChatVariantChange(message.id, -1)
-                                            }
-                                            title={copy(
-                                              "Previous variant",
-                                              "上一个版本"
-                                            )}
-                                          >
-                                            <ChevronLeft className="h-3 w-3" />
-                                          </Button>
-                                          <span className="px-2">
-                                            {activeIndex + 1} / {variants.length}
-                                          </span>
-                                          <Button
-                                            type="button"
-                                            variant="ghost"
-                                            size="icon-xs"
-                                            disabled={
-                                              isChatGenerating ||
-                                              activeIndex >= variants.length - 1
-                                            }
-                                            onClick={() =>
-                                              handleChatVariantChange(message.id, 1)
-                                            }
-                                            title={copy("Next variant", "下一个版本")}
-                                          >
-                                            <ChevronRight className="h-3 w-3" />
-                                          </Button>
-                                        </div>
-                                      )}
-                                      {webChoiceVariants.length > 1 && (
-                                        <div className="flex flex-wrap items-center gap-1.5">
-                                          {variants.map((variant, index) => {
-                                            if (
-                                              variant.outputRole !== "choice" ||
-                                              !variant.imageUrl
-                                            ) {
-                                              return null;
-                                            }
-                                            return (
-                                              <button
-                                                key={`${variant.generationId || index}-choice`}
-                                                type="button"
-                                                className={`relative h-10 w-10 overflow-hidden rounded-md border bg-muted ${
-                                                  index === activeIndex
-                                                    ? "border-primary ring-1 ring-primary"
-                                                    : "border-border"
-                                                }`}
-                                                onClick={() =>
-                                                  handleChatVariantSelect(
-                                                    message.id,
-                                                    index
-                                                  )
-                                                }
-                                                title={copy(
-                                                  `Choose image ${index + 1}`,
-                                                  `选择第 ${index + 1} 张`
-                                                )}
-                                              >
-                                                <Image
-                                                  src={thumbSrc(variant.imageUrl, 256)}
-                                                  alt={variant.prompt}
-                                                  fill
-                                                  sizes="40px"
-                                                  className="object-contain"
-                                                  unoptimized={shouldBypassImageOptimization(
-                                                    variant.imageUrl
-                                                  )}
-                                                />
-                                                {index === activeIndex && (
-                                                  <span className="absolute right-0.5 top-0.5 rounded-full bg-primary p-0.5 text-primary-foreground">
-                                                    <Check className="h-2.5 w-2.5" />
-                                                  </span>
-                                                )}
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
-                                      )}
-                                      {variants.some(
-                                        (variant) => variant.outputRole === "choice"
-                                      ) && (
-                                        <span className="text-xs text-muted-foreground">
-                                          {copy(
-                                            "Web returned multiple choices; switching syncs the selected image.",
-                                            "Web 返回了多个候选，切换时会同步选中图片。"
-                                          )}
-                                        </span>
-                                      )}
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon-sm"
-                                        disabled={isChatGenerating}
-                                        onClick={() => handleChatRetry(message.id)}
-                                        title={
-                                          message.error
-                                            ? copy("Retry generation", "重试生成")
-                                            : copy(
-                                                "Generate another variant",
-                                                "再生成一个版本"
-                                              )
-                                        }
-                                      >
-                                        <RefreshCcw className="h-4 w-4" />
-                                      </Button>
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </>
-                      )}
-                          </>
-                        )}
-                      />
-                      <ChatPanelStreamGate activeConversationMode={activeConversationMode} renderBubble={renderChatStreamBubble} retryingChatMessageId={retryingChatMessageId} />
-                    </div>
-
-                    {renderChatInput()}
-                  </div>
-                </div>
-              </div>
-    ),
-    [activeConversationExists, activeConversationMode, attachResultToChat, chatMessagesRef, clearChatAttachments, currentModeConversations, handleChatRetry, handleChatVariantChange, handleChatVariantSelect, handleClearChatHistory, handleNewChat, handleOpenChatConversation, renderAgentRoundCards, renderChatInput, renderChatStreamBubble, renderThinkingBlock]
+  // 对话面板已拆独立组件(ChatPanel):面板订阅 activeMode/附件/生成状态,
+  // 消息流与流式气泡经 ChatMessageList/ChatPanelStreamGate 下沉。
+  const chatPanelElement = (
+    <ChatPanel
+      activeConversationExists={activeConversationExists}
+      activeConversationMode={activeConversationMode}
+      attachResultToChat={attachResultToChat}
+      chatMessagesRef={chatMessagesRef}
+      clearChatAttachments={clearChatAttachments}
+      currentModeConversations={currentModeConversations}
+      handleChatRetry={handleChatRetry}
+      handleChatVariantChange={handleChatVariantChange}
+      handleChatVariantSelect={handleChatVariantSelect}
+      handleClearChatHistory={handleClearChatHistory}
+      handleNewChat={handleNewChat}
+      handleOpenChatConversation={handleOpenChatConversation}
+      renderAgentRoundCards={renderAgentRoundCards}
+      renderChatInput={renderChatInput}
+      renderChatStreamBubble={renderChatStreamBubble}
+      renderThinkingBlock={renderThinkingBlock}
+      isMessageInConversationMode={isMessageInConversationMode}
+    />
   );
-
 
   // 瀑布流单卡渲染:稳定引用传给 WaterfallCardList(订阅 batchCards 的叶子组件),
   // 流式期间每帧的卡片更新只重渲列表层,父组件不再订阅 batchCards。
   const renderBatchCard = (card: BatchCard) => (
-                          <div
-                            key={card.id}
-                            className={`mb-3 break-inside-avoid overflow-hidden rounded-lg border bg-muted/30 ${
-                              card.state === "error"
-                                ? "border-destructive/30"
-                                : "border-border"
-                            }`}
-                            style={
-                              card.aspectRatio &&
-                              (card.state === "loading" ||
-                                (card.state === "image" && !card.imageUrl))
-                                ? { aspectRatio: card.aspectRatio }
-                                : undefined
-                            }
-                          >
-                            {card.state === "loading" && !card.imageUrl && (
-                              <div className="flex h-full min-h-40 items-center justify-center text-muted-foreground">
-                                <Loader2 className="h-5 w-5 animate-spin" />
-                              </div>
-                            )}
+    <div
+      key={card.id}
+      className={`mb-3 break-inside-avoid overflow-hidden rounded-lg border bg-muted/30 ${
+        card.state === "error" ? "border-destructive/30" : "border-border"
+      }`}
+      style={
+        card.aspectRatio &&
+        (card.state === "loading" || (card.state === "image" && !card.imageUrl))
+          ? { aspectRatio: card.aspectRatio }
+          : undefined
+      }
+    >
+      {card.state === "loading" && !card.imageUrl && (
+        <div className="flex h-full min-h-40 items-center justify-center text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin" />
+        </div>
+      )}
 
-                            {card.imageUrl && (
-                              <button
-                                type="button"
-                                className="group relative block w-full bg-muted"
-                                onClick={() => {
-                                  if (card.generationId) {
-                                    setSelectedRecentId(card.generationId);
-                                  }
-                                }}
-                                title={copy("Open image preview", "打开图片预览")}
-                              >
-                                <Image
-                                  src={thumbSrc(card.imageUrl, 640)}
-                                  alt={card.prompt}
-                                  width={640}
-                                  height={640}
-                                  className="h-auto w-full object-contain"
-                                  unoptimized={shouldBypassImageOptimization(
-                                    card.imageUrl
-                                  )}
-                                />
-                                {card.state === "loading" && (
-                                  <span className="absolute left-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-whisper">
-                                    <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
-                                    {copy("Streaming", "流式生成中")}
-                                  </span>
-                                )}
-                                {card.state === "image" && (
-                                  <div className="absolute inset-x-2 bottom-2 hidden items-center justify-end gap-1 group-hover:flex">
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        saveBatchCardToRecent(card);
-                                      }}
-                                      disabled={card.saved}
-                                      title={copy("Save to recent", "保存到最近生成")}
-                                    >
-                                      <Save className="h-3 w-3" />
-                                    </Button>
-                                    <Button
-                                      asChild
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      title={copy("Download", "下载")}
-                                      onClick={(event) => event.stopPropagation()}
-                                    >
-                                      <a
-                                        href={card.imageUrl}
-                                        download
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                      >
-                                        <Download className="h-3 w-3" />
-                                      </a>
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="icon-xs"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        if (card.generationId) {
-                                          setSelectedRecentId(card.generationId);
-                                        }
-                                      }}
-                                      title={copy("Fullscreen", "全屏")}
-                                    >
-                                      <Maximize2 className="h-3 w-3" />
-                                    </Button>
-                                  </div>
-                                )}
-                              </button>
-                            )}
+      {card.imageUrl && (
+        <button
+          type="button"
+          className="group relative block w-full bg-muted"
+          onClick={() => {
+            if (card.generationId) {
+              setSelectedRecentId(card.generationId);
+            }
+          }}
+          title={copy("Open image preview", "打开图片预览")}
+        >
+          <Image
+            src={thumbSrc(card.imageUrl, 640)}
+            alt={card.prompt}
+            width={640}
+            height={640}
+            className="h-auto w-full object-contain"
+            unoptimized={shouldBypassImageOptimization(card.imageUrl)}
+          />
+          {card.state === "loading" && (
+            <span className="absolute left-2 top-2 rounded-sm bg-background/90 px-2 py-1 text-[11px] font-medium text-foreground shadow-whisper">
+              <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />
+              {copy("Streaming", "流式生成中")}
+            </span>
+          )}
+          {card.state === "image" && (
+            <div className="absolute inset-x-2 bottom-2 hidden items-center justify-end gap-1 group-hover:flex">
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon-xs"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  saveBatchCardToRecent(card);
+                }}
+                disabled={card.saved}
+                title={copy("Save to recent", "保存到最近生成")}
+              >
+                <Save className="h-3 w-3" />
+              </Button>
+              <Button
+                asChild
+                variant="secondary"
+                size="icon-xs"
+                title={copy("Download", "下载")}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <a
+                  href={card.imageUrl}
+                  download
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Download className="h-3 w-3" />
+                </a>
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon-xs"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (card.generationId) {
+                    setSelectedRecentId(card.generationId);
+                  }
+                }}
+                title={copy("Fullscreen", "全屏")}
+              >
+                <Maximize2 className="h-3 w-3" />
+              </Button>
+            </div>
+          )}
+        </button>
+      )}
 
-                            {card.state === "text" && (
-                              <div className="p-3 text-sm leading-relaxed">
-                                {renderThinkingBlock(card.streamThinking)}
-                                {renderAgentBlock(card.streamAgent)}
-                                <p className="whitespace-pre-wrap break-words">
-                                  {card.text || card.streamText || ""}
-                                </p>
-                              </div>
-                            )}
+      {card.state === "text" && (
+        <div className="p-3 text-sm leading-relaxed">
+          {renderThinkingBlock(card.streamThinking)}
+          {renderAgentBlock(card.streamAgent)}
+          <p className="whitespace-pre-wrap break-words">
+            {card.text || card.streamText || ""}
+          </p>
+        </div>
+      )}
 
-                            {card.state === "error" && (
-                              <div className="space-y-3 p-3 text-sm text-destructive">
-                                <p className="break-words">
-                                  {card.error ||
-                                    copy("Generation failed", "生成失败")}
-                                </p>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() =>
-                                    triggerBatchGeneration({
-                                      retryCardId: card.id,
-                                    })
-                                  }
-                                >
-                                  <RefreshCcw className="h-4 w-4" />
-                                  {copy("Retry", "重试")}
-                                </Button>
-                              </div>
-                            )}
-                          </div>
+      {card.state === "error" && (
+        <div className="space-y-3 p-3 text-sm text-destructive">
+          <p className="break-words">
+            {card.error || copy("Generation failed", "生成失败")}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              triggerBatchGeneration({
+                retryCardId: card.id,
+              })
+            }
+          >
+            <RefreshCcw className="h-4 w-4" />
+            {copy("Retry", "重试")}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 
   // 瀑布流面板 JSX 缓存:deps 语义同 chatPanelElement。batchCards 是池化 state,
   // 引用仅在卡片集合变化时更新,轮询/流式等其他 state 翻转不再重 diff 本面板。
-  const waterfallPanelElement = useMemo(
-    () => (
-              <div
-                role="tabpanel"
-                hidden={activeMode !== "waterfall"}
-                className="mt-0"
-              >
-                <div className="overflow-hidden rounded-lg border border-border bg-background">
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {renderGptModelSelect({
-                        id: "batch-gpt-model",
-                        value: chatModel,
-                        onChange: (value) => {
-                          if (value !== "default") setChatModel(value);
-                        },
-                        compact: true,
-                      })}
-                      {renderThinkingSelect({
-                        id: "batch-thinking",
-                        value: chatThinking,
-                        onChange: setChatThinking,
-                        compact: true,
-                      })}
-                      {/* 每批并发张数(tier)：对齐原项目 TIER，可选项受套餐并发上限约束 */}
-                      <Select
-                        value={String(effectiveWaterfallTier)}
-                        onValueChange={(value) => setWaterfallTier(Number(value))}
-                        disabled={isBatchActive}
-                      >
-                        <SelectTrigger
-                          id="waterfall-tier"
-                          className="h-8 w-auto gap-1"
-                          title={copy(
-                            "Images per batch (concurrency)",
-                            "每批生成张数(并发)"
-                          )}
-                        >
-                          <span className="text-xs text-muted-foreground">
-                            {copy("Batch", "每批")}
-                          </span>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {waterfallTierOptions.map((value) => (
-                            <SelectItem key={value} value={String(value)}>
-                              {value}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {/* 图像模型：瀑布流此前复用 chat 面板的 chatImageModel 但
-                          不暴露选择器,补齐(与 chat 面板同款紧凑选择器) */}
-                      {showImageModelControls && (
-                        <div
-                          className={chatMixWebFirstActive ? "opacity-55" : ""}
-                          title={
-                            chatMixWebFirstActive
-                              ? responsesOnlyDisabledReason
-                              : imageModelHelpText
-                          }
-                        >
-                          {renderImageModelSelect({
-                            id: "waterfall-image-model",
-                            value: chatImageModel,
-                            onChange: setChatImageModel,
-                            disabled: isBatchActive || chatMixWebFirstActive,
-                            compact: true,
-                          })}
-                        </div>
-                      )}
-                      {/* 质量：复用 quality 状态(瀑布流请求已发送该参数)，Web-only 后端不支持故隐藏 */}
-                      {!isWebOnlyBackend && (
-                        <Select
-                          value={quality}
-                          onValueChange={(value) => setQuality(value as ImageQuality)}
-                          disabled={isBatchActive || disableResponsesOnlyControls}
-                        >
-                          <SelectTrigger
-                            id="waterfall-quality"
-                            className="h-8 w-auto gap-1"
-                            title={copy("Image quality", "图像质量")}
-                          >
-                            <span className="text-xs text-muted-foreground">
-                              {copy("Quality", "质量")}
-                            </span>
-                            <SelectValue>
-                              {qualityLabelWithBilling(
-                                quality,
-                                chatQualityMultipliers
-                              )}
-                            </SelectValue>
-                          </SelectTrigger>
-                          <SelectContent>
-                            {QUALITY_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {qualityLabelWithBilling(
-                                  option.value,
-                                  chatQualityMultipliers
-                                )}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      )}
-                      {/* 尺寸：复用既有 chat 尺寸弹窗(与 getBatchFallbackSize 同源)，运行中禁用避免批次中途变更 */}
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8"
-                        disabled={isBatchActive}
-                        onClick={() => setChatSizeDialogOpen(true)}
-                        title={copy("Set image size", "设置图像尺寸")}
-                      >
-                        {copy("Size", "尺寸")}：
-                        {hasChatImageAttachments
-                          ? useAutoChatEditSize
-                            ? autoSizeLabel
-                            : chatCustomEditSize
-                          : useAutoSize
-                            ? autoSizeLabel
-                            : size}
-                      </Button>
-                      {!isWebOnlyBackend && (
-                        <div
-                          className={chatMixWebFirstActive ? "opacity-55" : ""}
-                          title={
-                            chatMixWebFirstActive
-                              ? responsesOnlyDisabledReason
-                              : backgroundHelpText
-                          }
-                        >
-                          {renderBackgroundSelect({
-                            id: "batch-background",
-                            disabled: isBatchActive || chatMixWebFirstActive,
-                            compact: true,
-                          })}
-                        </div>
-                      )}
-                      {!isWebOnlyBackend &&
-                        renderTransparentMatteToggle({
-                          id: "batch-transparent-matte",
-                          disabled: isBatchActive || chatMixWebFirstActive,
-                        })}
-                      {/* 输出格式：与 chat 面板同款补齐入口（共享 outputFormat 状态）。 */}
-                      {!isWebOnlyBackend && (
-                        <div
-                          className={chatMixWebFirstActive ? "opacity-55" : ""}
-                          title={
-                            chatMixWebFirstActive
-                              ? responsesOnlyDisabledReason
-                              : outputFormatHelpText
-                          }
-                        >
-                          <Select
-                            value={outputFormat}
-                            onValueChange={(value) =>
-                              setOutputFormat(value as ImageOutputFormat)
-                            }
-                            disabled={isBatchActive || chatMixWebFirstActive}
-                          >
-                            <SelectTrigger
-                              id="batch-output-format"
-                              className="h-8 w-auto gap-1"
-                              title={outputFormatHelpText}
-                            >
-                              <span className="text-xs text-muted-foreground">
-                                {copy("Format", "格式")}
-                              </span>
-                              <SelectValue>
-                                {outputFormatLabel(outputFormat)}
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              {OUTPUT_FORMAT_OPTIONS.map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
-                                  {outputFormatLabel(option.value)}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      )}
-                      {renderHdRepairToggle({
-                        id: "batch-hd-repair",
-                        disabled: isBatchActive,
-                      })}
-                    </div>
-                    <div className="flex flex-wrap items-center justify-end gap-3">
-                      {promptOptimizationField(
-                        "batch-prompt-optimization",
-                        isBatchActive
-                      )}
-                      <div className="text-xs text-muted-foreground">
-                        {customApiActive ? (
-                          <span className="font-medium text-foreground">
-                            {customApiBillingLabel}
-                          </span>
-                        ) : (
-                          <>
-                            {copy("Per image", "单张预计")}{" "}
-                            <span className="font-medium text-foreground">
-                              {formattedBatchSingleCreditCost}
-                            </span>{" "}
-                            <span className="text-muted-foreground">
-                              {batchSingleCreditFormula}
-                            </span>
-                            {isBatchActive && (
-                              <>
-                                {" "}
-                                <span className="text-muted-foreground">/</span>{" "}
-                                {copy("Used", "已用")}{" "}
-                                <span className="font-medium text-foreground">
-                                  {formattedWaterfallCreditsConsumed}
-                                </span>
-                              </>
-                            )}{" "}
-                            <span className="text-muted-foreground">/</span>{" "}
-                            {copy("Balance", "余额")}{" "}
-                            <span className="font-medium text-foreground">
-                              {formattedBalance}
-                            </span>{" "}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {!isBatchActive ? (
-                    <div className="mx-auto flex min-h-[560px] max-w-3xl flex-col justify-center px-4 py-10">
-                      <div className="mb-5 text-center">
-                        <h2 className="font-serif text-2xl font-semibold tracking-tight">
-                          {copy(
-                            "What world will you flood with art?",
-                            "你想让哪个世界充满图像？"
-                          )}
-                        </h2>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {copy(
-                            "One prompt, endless creations",
-                            "一个提示词，瀑布生成灵感"
-                          )}
-                        </p>
-                      </div>
-                      <form
-                        onSubmit={handleBatchSubmit}
-                        onPaste={handleChatPaste}
-                        className="space-y-3"
-                      >
-                        {hasChatImageAttachments && (
-                          <div className="flex flex-wrap justify-center gap-2">
-                            {chatAttachments
-                              .filter((item) => item.kind === "image")
-                              .map((item, index) => (
-                                <button
-                                  type="button"
-                                  key={`${item.file.name}-${item.previewUrl}`}
-                                  className="relative h-12 w-12 overflow-hidden rounded-md border bg-muted"
-                                  onClick={() => removeChatAttachment(index)}
-                                  title={copy(
-                                    "Remove reference image",
-                                    "移除参考图片"
-                                  )}
-                                >
-                                  <Image
-                                    src={item.previewUrl || ""}
-                                    alt={item.file.name}
-                                    fill
-                                    sizes="48px"
-                                    className="object-cover"
-                                    unoptimized
-                                  />
-                                </button>
-                              ))}
-                          </div>
-                        )}
-                        <div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            onClick={() => batchImageInputRef.current?.click()}
-                            disabled={chatAttachments.length >= maxChatImages}
-                            title={copy("Attach reference image", "添加参考图片")}
-                          >
-                            <ImagePlus className="h-4 w-4" />
-                          </Button>
-                          <Textarea
-                            value={batchPrompt}
-                            onChange={(event) => setBatchPrompt(event.target.value)}
-                            placeholder={copy(
-                              "Describe the images you want to generate...",
-                              "描述你想生成的图片..."
-                            )}
-                            rows={1}
-                            className="max-h-40 min-h-9 resize-none border-0 bg-transparent px-0 py-2 text-base shadow-none focus-visible:ring-0"
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" && !event.shiftKey) {
-                                event.preventDefault();
-                                event.currentTarget.form?.requestSubmit();
-                              }
-                            }}
-                          />
-                          <Button
-                            type="submit"
-                            size="icon-sm"
-                            disabled={!batchPrompt.trim()}
-                            title={copy("Start waterfall", "开始瀑布流")}
-                          >
-                            <Send className="h-4 w-4" />
-                          </Button>
-                          <input
-                            ref={batchImageInputRef}
-                            type="file"
-                            multiple
-                            accept={IMAGE_ACCEPT}
-                            className="sr-only"
-                            onChange={(event) => {
-                              void addBatchAttachments(event.target.files);
-                              event.target.value = "";
-                            }}
-                          />
-                        </div>
-                      </form>
-                      <div className="mt-4 flex flex-wrap justify-center gap-2">
-                        {chatSuggestions.map((suggestion) => (
-                          <Button
-                            key={suggestion}
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="max-w-full"
-                            onClick={() => handleBatchSuggestion(suggestion)}
-                            title={suggestion}
-                          >
-                            <span className="truncate">
-                              {suggestion.length > 40
-                                ? `${suggestion.slice(0, 40)}...`
-                                : suggestion}
-                            </span>
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div
-                      ref={batchScrollRef}
-                      className="max-h-[760px] overflow-y-auto p-3"
-                    >
-                      <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background/95 px-3 py-2 text-xs shadow-whisper backdrop-blur">
-                        <div className="min-w-0">
-                          <p className="truncate font-medium text-foreground">
-                            {batchPromptRef.current || batchPrompt}
-                          </p>
-                          <p className="text-muted-foreground">
-                            {waterfallStatusText}
-                            {isBatchStopped ? ` · ${copy("Stopped", "已停止")}` : ""}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {isBatchStopped ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                batchStoppedRef.current = false;
-                                setIsBatchStopped(false);
-                                void triggerBatchGeneration();
-                              }}
-                            >
-                              <ChevronDown className="h-4 w-4" />
-                              {copy("Continue", "继续生成")}
-                            </Button>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={handleStopWaterfall}
-                            >
-                              <X className="h-4 w-4" />
-                              {copy("Stop", "停止")}
-                            </Button>
-                          )}
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={handleClearWaterfall}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            {copy("Clear", "清空")}
-                          </Button>
-                        </div>
-                      </div>
-                      <WaterfallCardList renderCard={renderBatchCard} />
-                      <div
-                        ref={batchLoadTriggerRef}
-                        className="flex h-20 flex-col items-center justify-center gap-1 text-xs text-muted-foreground"
-                      >
-                        {isBatchLoadingMore ? (
-                          <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            {copy("Generating...", "生成中...")}
-                          </>
-                        ) : isBatchStopped ? (
-                          <>
-                            <X className="h-4 w-4" />
-                            {copy("Stopped", "已停止")}
-                          </>
-                        ) : (
-                          <>
-                            <ChevronDown className="h-4 w-4" />
-                            {copy("Scroll to generate more", "继续下拉生成更多")}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-    ),
-    [addBatchAttachments, renderBatchCard, autoSizeLabel, batchImageInputRef, batchLoadTriggerRef, batchPromptRef, batchScrollRef, batchSingleCreditFormula, batchStoppedRef, chatCustomEditSize, chatImageModel, chatMixWebFirstActive, chatQualityMultipliers, chatSuggestions, customApiBillingLabel, disableResponsesOnlyControls, effectiveWaterfallTier, formattedBalance, formattedBatchSingleCreditCost, formattedWaterfallCreditsConsumed, getBatchFallbackSize, handleBatchSubmit, handleBatchSuggestion, handleChatPaste, handleClearWaterfall, handleStopWaterfall, hasChatImageAttachments, imageModelHelpText, maxChatImages, promptOptimizationField, removeChatAttachment, renderAgentBlock, renderBackgroundSelect, renderGptModelSelect, renderHdRepairToggle, renderImageModelSelect, renderThinkingBlock, renderThinkingSelect, renderTransparentMatteToggle, responsesOnlyDisabledReason, saveBatchCardToRecent, triggerBatchGeneration, waterfallStatusText, waterfallTierOptions]
+  // 瀑布流面板已拆独立组件(WaterfallPanel):面板订阅 activeMode/batchPrompt/
+  // 附件/批次状态;卡片列经 WaterfallCardList 订阅 batchCards。
+  const waterfallPanelElement = (
+    <WaterfallPanel
+      addBatchAttachments={addBatchAttachments}
+      autoSizeLabel={autoSizeLabel}
+      batchImageInputRef={batchImageInputRef}
+      batchLoadTriggerRef={batchLoadTriggerRef}
+      batchPromptRef={batchPromptRef}
+      batchScrollRef={batchScrollRef}
+      batchSingleCreditFormula={batchSingleCreditFormula}
+      batchStoppedRef={batchStoppedRef}
+      chatCustomEditSize={chatCustomEditSize}
+      chatImageModel={chatImageModel}
+      chatMixWebFirstActive={chatMixWebFirstActive}
+      chatQualityMultipliers={chatQualityMultipliers}
+      chatSuggestions={chatSuggestions}
+      customApiBillingLabel={customApiBillingLabel}
+      disableResponsesOnlyControls={disableResponsesOnlyControls}
+      effectiveWaterfallTier={effectiveWaterfallTier}
+      formattedBalance={formattedBalance}
+      formattedBatchSingleCreditCost={formattedBatchSingleCreditCost}
+      formattedWaterfallCreditsConsumed={formattedWaterfallCreditsConsumed}
+      handleBatchSubmit={handleBatchSubmit}
+      handleBatchSuggestion={handleBatchSuggestion}
+      handleChatPaste={handleChatPaste}
+      handleClearWaterfall={handleClearWaterfall}
+      handleStopWaterfall={handleStopWaterfall}
+      hasChatImageAttachments={hasChatImageAttachments}
+      imageModelHelpText={imageModelHelpText}
+      maxChatImages={maxChatImages}
+      promptOptimizationField={promptOptimizationField}
+      removeChatAttachment={removeChatAttachment}
+      renderBackgroundSelect={renderBackgroundSelect}
+      renderGptModelSelect={renderGptModelSelect}
+      renderHdRepairToggle={renderHdRepairToggle}
+      renderImageModelSelect={renderImageModelSelect}
+      renderThinkingSelect={renderThinkingSelect}
+      renderTransparentMatteToggle={renderTransparentMatteToggle}
+      responsesOnlyDisabledReason={responsesOnlyDisabledReason}
+      triggerBatchGeneration={triggerBatchGeneration}
+      waterfallStatusText={waterfallStatusText}
+      waterfallTierOptions={waterfallTierOptions}
+      isWebOnlyBackend={isWebOnlyBackend}
+      backgroundHelpText={backgroundHelpText}
+      customApiActive={customApiActive}
+      outputFormatHelpText={outputFormatHelpText}
+      outputFormatLabel={outputFormatLabel}
+      qualityLabelWithBilling={qualityLabelWithBilling}
+      showImageModelControls={showImageModelControls}
+      renderBatchCard={renderBatchCard}
+    />
   );
-
-
 
   return (
     <div className="container mx-auto max-w-5xl px-4 py-8 md:px-6 md:py-12">

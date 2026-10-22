@@ -100,6 +100,8 @@ function SidebarLinkPendingIndicator() {
 
 /** 切页后延迟多久刷新未读角标(让出页面自身的请求)。 */
 const UNREAD_REFRESH_DELAY_MS = 3000;
+/** 切页触发的角标刷新最短间隔(读页面的事件刷新不受此限)。 */
+const UNREAD_REFRESH_MIN_INTERVAL_MS = 60_000;
 
 export function DashboardSidebar({
   initialSession,
@@ -153,17 +155,18 @@ export function DashboardSidebar({
 
   // 未读角标刷新。侧栏在共享布局里,软导航不重渲染,首屏值来自服务端预取:
   // - 首次挂载:有预取则直接用,不发请求(无预取的旧调用方立即拉取);
-  // - 之后每次切页:延迟刷新,捕捉新回复 / 新公告,且不与刚发出的页面请求争抢
-  //   高延迟链路;连续切页时只保留最后一次。
-  const skipFirstUnreadRefreshRef = useRef(Boolean(prefetch));
+  // - 之后切页:延迟刷新以捕捉新回复 / 新公告,且至多每分钟一次。WHY 延迟与限频:
+  //   刷新是两次 server action,在高延迟链路上会与紧接着的切页请求争抢带宽;
+  //   读取即已读的页面另有事件立即刷新(见下),这里只需兜底新消息。
+  // 无预取时 lastUnreadRefreshAtRef 为 0,首次立即拉取。
+  const lastUnreadRefreshAtRef = useRef(prefetch ? Date.now() : 0);
   useEffect(() => {
     if (!user) return;
-    if (skipFirstUnreadRefreshRef.current) {
-      skipFirstUnreadRefreshRef.current = false;
-      return;
-    }
+    const sinceLast = Date.now() - lastUnreadRefreshAtRef.current;
+    if (sinceLast < UNREAD_REFRESH_MIN_INTERVAL_MS) return;
     const timer = window.setTimeout(
       () => {
+        lastUnreadRefreshAtRef.current = Date.now();
         fetchUnreadTickets();
         fetchUnreadAnnouncements();
       },
@@ -176,6 +179,7 @@ export function DashboardSidebar({
   useEffect(() => {
     if (!user) return;
     const refresh = () => {
+      lastUnreadRefreshAtRef.current = Date.now();
       fetchUnreadTickets();
       fetchUnreadAnnouncements();
     };

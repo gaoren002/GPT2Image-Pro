@@ -18,6 +18,7 @@
 - [Agent 集成架构](plan/2026-05-31-agent-integration-architecture.md) — 统一接口层(UOL)优先；MCP 适配器默认关闭+管理秘钥；内置 agent 直连接口层；配套盘点表 plan/2026-05-31-feature-interface-inventory.md。**开发新功能前必读**（CLAUDE.md 已立约束）
 - **UOL Phase 0+1 已实现**（分支 `feat/uol-phase0-phase1`，已推送）：脚手架 7 核心模块 + 144 个操作注册(10 域) + 3 测试文件(registry/access/invoke)全绿。execute 均为 stub("Not yet wired")，待 Phase 2 委托对接。合并 dev 前须经 CI。
 
+- [2026-10-22 侧栏切页](memory/2026-10-22-sidebar-navigation.md) — 去掉 window.stop+location.assign 整页跳转拦截、恢复默认预取；**每个 dashboard 路由必须保留 loading.tsx**（否则预取执行页面，公告 / 工单详情的渲染期写入会被误触发）
 - [2026-10-22 系统设置首屏](memory/2026-10-22-admin-settings-first-load.md) — 配置快照服务端预取直出（省一次 action 往返）；页面静态导入的客户端组件必进首屏入口 chunk，重面板须 `next/dynamic`（后端池面板经 lazy-pool-panel）
 - [2026-10-22 全局状态冷路径](memory/2026-10-22-admin-status-cold-path.md) — `generation.metadata` 是 json 文本列，聚合须每行只转换一次（offset 0 子查询）；全站累计改走 `generation_daily_stats` 日汇总 + 实时尾巴，冷路径 31s -> 0.6s；待定：chat completions 把 base64 输入图写进 metadata（约 388MB）
 

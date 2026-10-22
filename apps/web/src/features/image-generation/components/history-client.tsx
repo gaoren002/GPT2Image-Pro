@@ -11,16 +11,18 @@ import {
   Clock,
   ImageIcon,
   ImagePlus,
+  Search,
+  X,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale } from "next-intl";
 import { useEffect, useState } from "react";
-import dynamic from "next/dynamic";
 import type {
-  LightboxReferenceImage,
   LightboxGeneration,
+  LightboxReferenceImage,
 } from "@/features/image-generation/components/image-lightbox";
 
 // 懒加载:lightbox(大图查看模态)仅在点开某张图时才需要,改 next/dynamic 后从列表页
@@ -32,6 +34,7 @@ const ImageLightbox = dynamic(
     ),
   { ssr: false }
 );
+
 import type { GenerationCreditDetails } from "@/features/image-generation/credit-calculation-details";
 
 export interface HistoryGeneration {
@@ -59,6 +62,10 @@ export interface HistoryClientProps {
   page: number;
   pageSize: number;
   timeZone: string;
+  /** 当前搜索关键词(URL query,服务端已过滤)。 */
+  searchQuery: string;
+  /** 当前状态筛选(completed/failed/pending,空为全部)。 */
+  searchStatus: string;
 }
 
 function statusClasses(status: HistoryGeneration["status"]): string {
@@ -131,6 +138,8 @@ export function HistoryClient({
   page,
   pageSize,
   timeZone,
+  searchQuery,
+  searchStatus,
 }: HistoryClientProps) {
   const locale = useLocale();
   const isZh = locale === "zh";
@@ -141,6 +150,14 @@ export function HistoryClient({
   const [items, setItems] = useState<HistoryGeneration[]>(initialGenerations);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pageInput, setPageInput] = useState(String(page));
+  const [queryInput, setQueryInput] = useState(searchQuery);
+  const [statusInput, setStatusInput] = useState(searchStatus);
+
+  // 搜索/筛选变化时同步输入框(如浏览器后退)
+  useEffect(() => {
+    setQueryInput(searchQuery);
+    setStatusInput(searchStatus);
+  }, [searchQuery, searchStatus]);
 
   // page prop 变化时同步输入框显示值
   useEffect(() => {
@@ -149,8 +166,30 @@ export function HistoryClient({
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const selected = items.find((i) => i.id === selectedId) ?? null;
+  // 分页链接保留当前搜索与状态筛选(搜索提交时回到第 1 页)
+  const searchParamsSuffix = (overrides?: { q?: string; status?: string }) => {
+    const q = overrides?.q ?? searchQuery;
+    const status = overrides?.status ?? searchStatus;
+    const parts: string[] = [];
+    if (q) parts.push(`q=${encodeURIComponent(q)}`);
+    if (status) parts.push(`status=${status}`);
+    return parts.length ? `&${parts.join("&")}` : "";
+  };
   const historyHref = (nextPage: number) =>
-    `/${locale}/dashboard/history?page=${nextPage}`;
+    `/${locale}/dashboard/history?page=${nextPage}${searchParamsSuffix()}`;
+
+  /** 搜索提交:回到第 1 页,带关键词与状态。 */
+  const commitSearch = () => {
+    const q = queryInput.trim();
+    const status = statusInput;
+    router.push(
+      `/${locale}/dashboard/history?page=1${searchParamsSuffix({ q, status })}`
+    );
+  };
+  const handleSearchSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    commitSearch();
+  };
   const createHref = `/${locale}/dashboard/create`;
 
   /**
@@ -178,33 +217,92 @@ export function HistoryClient({
     setItems((prev) => prev.filter((x) => x.id !== id));
   };
 
+  /** 搜索栏(关键词 + 状态筛选,URL query 驱动服务端过滤)。 */
+  const searchForm = (
+    <form
+      onSubmit={handleSearchSubmit}
+      className="flex flex-col gap-2 sm:flex-row sm:items-center"
+    >
+      <div className="relative flex-1">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <input
+          value={queryInput}
+          onChange={(event) => setQueryInput(event.target.value)}
+          placeholder={copy("Search prompt or model...", "搜索提示词或模型...")}
+          className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none transition-colors duration-150 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        />
+      </div>
+      <select
+        value={statusInput}
+        onChange={(event) => {
+          setStatusInput(event.target.value);
+        }}
+        className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <option value="">{copy("All statuses", "全部状态")}</option>
+        <option value="completed">{statusLabel("completed")}</option>
+        <option value="failed">{statusLabel("failed")}</option>
+        <option value="pending">{statusLabel("pending")}</option>
+      </select>
+      <Button type="submit" variant="outline" className="h-9">
+        {copy("Search", "搜索")}
+      </Button>
+      {(searchQuery || searchStatus) && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-9 px-2"
+          title={copy("Clear", "清除")}
+          onClick={() => {
+            setQueryInput("");
+            setStatusInput("");
+            router.push(`/${locale}/dashboard/history?page=1`);
+          }}
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      )}
+    </form>
+  );
+
   if (items.length === 0) {
     return (
-      <div className="flex animate-in fade-in flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background px-6 py-24 text-center duration-400 motion-reduce:animate-none">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
-          <ImagePlus
-            className="h-7 w-7 text-muted-foreground"
-            strokeWidth={1.2}
-          />
+      <div className="space-y-4">
+        {searchForm}
+        <div className="flex animate-in fade-in flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background px-6 py-24 text-center duration-400 motion-reduce:animate-none">
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+            <ImagePlus
+              className="h-7 w-7 text-muted-foreground"
+              strokeWidth={1.2}
+            />
+          </div>
+          <h3 className="mt-5 font-serif text-lg font-medium text-foreground">
+            {searchQuery || searchStatus
+              ? copy("No matching records", "没有匹配的记录")
+              : copy("No history yet", "还没有历史记录")}
+          </h3>
+          <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
+            {searchQuery || searchStatus
+              ? copy(
+                  "Try different keywords or clear the filters.",
+                  "换个关键词或清除筛选条件试试。"
+                )
+              : copy(
+                  "Your generation history will appear here once you create images.",
+                  "创建图片后，生成历史会显示在这里。"
+                )}
+          </p>
+          <Button asChild variant="outline" className="mt-8">
+            <Link href={createHref}>{copy("Create an image", "创建图片")}</Link>
+          </Button>
         </div>
-        <h3 className="mt-5 font-serif text-lg font-medium text-foreground">
-          {copy("No history yet", "还没有历史记录")}
-        </h3>
-        <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
-          {copy(
-            "Your generation history will appear here once you create images.",
-            "创建图片后，生成历史会显示在这里。"
-          )}
-        </p>
-        <Button asChild variant="outline" className="mt-8">
-          <Link href={createHref}>{copy("Create an image", "创建图片")}</Link>
-        </Button>
       </div>
     );
   }
 
   return (
     <>
+      {searchForm}
       <div className="overflow-hidden rounded-lg border border-border bg-background">
         <div className="hidden grid-cols-[64px_minmax(0,1fr)_150px_90px_118px_92px_128px] items-center gap-3 border-b border-border bg-muted/30 px-4 py-3 text-[11px] font-medium uppercase tracking-widest text-muted-foreground md:grid">
           <div>{copy("Image", "图片")}</div>
@@ -355,10 +453,7 @@ export function HistoryClient({
                 }
               }}
               onBlur={commitPageInput}
-              aria-label={copy(
-                "Page number",
-                "页码"
-              )}
+              aria-label={copy("Page number", "页码")}
               className="h-8 w-16 rounded-sm border border-border bg-background text-center text-sm text-foreground transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
             <span className="text-xs text-muted-foreground">

@@ -1,25 +1,3 @@
-import { unstable_cache } from "next/cache";
-import { getLocale } from "next-intl/server";
-import { redirect } from "next/navigation";
-import {
-  Activity,
-  AlertTriangle,
-  Coins,
-  ImageIcon,
-  Server,
-} from "lucide-react";
-import {
-  and,
-  count,
-  desc,
-  eq,
-  gte,
-  inArray,
-  lte,
-  sql,
-  type SQL,
-} from "drizzle-orm";
-
 import { db } from "@repo/database";
 import {
   creditsBalance,
@@ -37,8 +15,8 @@ import { canViewImageBackendPool } from "@repo/shared/auth/roles";
 import { getServerSession } from "@repo/shared/auth/server";
 import { formatCredits } from "@repo/shared/credits/format";
 import {
-  formatDateInTimeZone,
   formatDateInputInTimeZone,
+  formatDateInTimeZone,
   parseDateInputInTimeZone,
 } from "@repo/shared/time-zone";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
@@ -52,6 +30,29 @@ import {
   CardTitle,
 } from "@repo/ui/components/card";
 import { Progress } from "@repo/ui/components/progress";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  lte,
+  or,
+  type SQL,
+  sql,
+} from "drizzle-orm";
+import {
+  Activity,
+  AlertTriangle,
+  Coins,
+  ImageIcon,
+  Server,
+} from "lucide-react";
+import { unstable_cache } from "next/cache";
+import { redirect } from "next/navigation";
+import { getLocale } from "next-intl/server";
 import {
   AUTO_IMAGE_SIZE,
   IMAGE_1K_BASE_EDGE,
@@ -73,6 +74,7 @@ interface GlobalStatusPageProps {
     errorFrom?: string;
     errorTo?: string;
     errorPage?: string;
+    errorQ?: string;
   }>;
 }
 
@@ -164,6 +166,8 @@ type HistoricalErrorFilters = {
   fromDate: Date | null;
   toDate: Date | null;
   page: number;
+  /** 关键词:匹配用户邮箱/名字、提示词、错误信息(大小写不敏感子串)。 */
+  keyword: string;
 };
 
 type HistoricalGenerationErrorRow = {
@@ -228,6 +232,8 @@ function parseHistoricalErrorFilters(
   const customFrom = parseDateInput(searchParams.errorFrom, timeZone);
   const customTo = parseDateInput(searchParams.errorTo, timeZone, true);
 
+  const keyword = (searchParams.errorQ ?? "").trim().slice(0, 120);
+
   if (range === "all") {
     return {
       range,
@@ -236,6 +242,7 @@ function parseHistoricalErrorFilters(
       fromDate: null,
       toDate: null,
       page,
+      keyword,
     };
   }
 
@@ -247,6 +254,7 @@ function parseHistoricalErrorFilters(
       fromDate: customFrom,
       toDate: customTo,
       page,
+      keyword,
     };
   }
 
@@ -267,22 +275,41 @@ function parseHistoricalErrorFilters(
     fromDate,
     toDate: null,
     page,
+    keyword,
   };
 }
 
 function buildHistoricalErrorWhere(filters: HistoricalErrorFilters) {
   const conditions: SQL[] = [eq(generation.status, "failed")];
-  if (filters.fromDate) conditions.push(gte(generation.createdAt, filters.fromDate));
-  if (filters.toDate) conditions.push(lte(generation.createdAt, filters.toDate));
+  if (filters.fromDate)
+    conditions.push(gte(generation.createdAt, filters.fromDate));
+  if (filters.toDate)
+    conditions.push(lte(generation.createdAt, filters.toDate));
+  // 关键词 OR 语义:提示词/错误信息 ilike,或用户邮箱/名字命中(exists)。
+  // 任一命中即保留该行;列表与计数共用本 where。
+  if (filters.keyword) {
+    const pattern = `%${filters.keyword}%`;
+    const keywordMatch = or(
+      ilike(generation.prompt, pattern),
+      ilike(generation.error, pattern),
+      sql`exists (select 1 from ${user} where ${user.id} = ${generation.userId} and (${user.email} ilike ${pattern} or ${user.name} ilike ${pattern}))`
+    );
+    if (keywordMatch) conditions.push(keywordMatch);
+  }
   return and(...conditions);
 }
 
 function formatDateTime(value: Date | null, locale: string, timeZone: string) {
   if (!value) return copy(locale, "Not recorded", "未记录");
-  return formatDateInTimeZone(value, locale, {
-    dateStyle: "medium",
-    timeStyle: "medium",
-  }, timeZone);
+  return formatDateInTimeZone(
+    value,
+    locale,
+    {
+      dateStyle: "medium",
+      timeStyle: "medium",
+    },
+    timeZone
+  );
 }
 
 function truncateText(value: string | null, length: number) {
@@ -293,10 +320,7 @@ function truncateText(value: string | null, length: number) {
     : normalized;
 }
 
-function buildErrorPageHref(
-  filters: HistoricalErrorFilters,
-  page: number
-) {
+function buildErrorPageHref(filters: HistoricalErrorFilters, page: number) {
   const params = new URLSearchParams();
   params.set("errorRange", filters.range);
   params.set("errorPage", String(page));
@@ -304,6 +328,8 @@ function buildErrorPageHref(
     if (filters.fromInput) params.set("errorFrom", filters.fromInput);
     if (filters.toInput) params.set("errorTo", filters.toInput);
   }
+  // 关键词随分页保留(翻页不丢搜索上下文)
+  if (filters.keyword) params.set("errorQ", filters.keyword);
   return `?${params.toString()}#historical-errors`;
 }
 
@@ -341,12 +367,8 @@ function buildResolutionPresetSizes(edge: number) {
   const sizes = new Set<string>();
   for (const ratio of RESOLUTION_RATIO_PRESETS) {
     const landscape = ratio.width >= ratio.height;
-    const rawWidth = landscape
-      ? edge
-      : (edge * ratio.width) / ratio.height;
-    const rawHeight = landscape
-      ? (edge * ratio.height) / ratio.width
-      : edge;
+    const rawWidth = landscape ? edge : (edge * ratio.width) / ratio.height;
+    const rawHeight = landscape ? (edge * ratio.height) / ratio.width : edge;
     sizes.add(normalizeValidImageSize({ width: rawWidth, height: rawHeight }));
   }
   return sizes;
@@ -404,13 +426,12 @@ function accumulateModerationPromptRepairStats(
       stats.failed += 1;
     }
 
-    const bucket =
-      byAttempt.get(attemptNumber) || {
-        attempt: attemptNumber,
-        attempted: 0,
-        succeeded: 0,
-        failed: 0,
-      };
+    const bucket = byAttempt.get(attemptNumber) || {
+      attempt: attemptNumber,
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+    };
     bucket.attempted += 1;
     if (status === "succeeded") {
       bucket.succeeded += 1;
@@ -431,7 +452,9 @@ function isResolutionDurationBucket(
   return (RESOLUTION_DURATION_BUCKETS as readonly string[]).includes(value);
 }
 
-function isBackendDurationBucket(value: string): value is BackendDurationBucket {
+function isBackendDurationBucket(
+  value: string
+): value is BackendDurationBucket {
   return (BACKEND_DURATION_BUCKETS as readonly string[]).includes(value);
 }
 
@@ -529,7 +552,9 @@ async function loadGenerationWindowStats(
           backendBucket: sql<string>`${backendBucketExpr}`,
           count: count(),
           avgSeconds: sql<string | null>`avg(${durationExpr})`,
-          p95Seconds: sql<string | null>`percentile_disc(0.95) within group (order by ${durationExpr})`,
+          p95Seconds: sql<
+            string | null
+          >`percentile_disc(0.95) within group (order by ${durationExpr})`,
         })
         .from(generation)
         .where(
@@ -672,7 +697,10 @@ function summarizeBackendRows(
   };
 
   for (const row of rows) {
-    modes.set(row.mode || "unknown", (modes.get(row.mode || "unknown") ?? 0) + 1);
+    modes.set(
+      row.mode || "unknown",
+      (modes.get(row.mode || "unknown") ?? 0) + 1
+    );
     stats.successCount += row.successCount || 0;
     stats.failCount += row.failCount || 0;
     if (!row.isEnabled) {
@@ -680,7 +708,8 @@ function summarizeBackendRows(
       continue;
     }
     stats.enabled += 1;
-    if (row.cooldownUntil && row.cooldownUntil.getTime() > now) stats.cooling += 1;
+    if (row.cooldownUntil && row.cooldownUntil.getTime() > now)
+      stats.cooling += 1;
     if (row.status === "active") stats.active += 1;
     if (row.status === "limited") stats.limited += 1;
     if (row.status === "error") stats.error += 1;
@@ -1064,9 +1093,7 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-async function loadHistoricalGenerationErrors(
-  filters: HistoricalErrorFilters
-) {
+async function loadHistoricalGenerationErrors(filters: HistoricalErrorFilters) {
   const where = buildHistoricalErrorWhere(filters);
   const offset = (filters.page - 1) * ERROR_PAGE_SIZE;
 
@@ -1133,7 +1160,8 @@ function describeErrorFilter(
       : copy(locale, "Unbounded", "不限");
     return `${copy(locale, "Custom", "自定义")}：${from} - ${to}`;
   }
-  if (filters.range === "24h") return copy(locale, "Last 24 hours", "最近24小时");
+  if (filters.range === "24h")
+    return copy(locale, "Last 24 hours", "最近24小时");
   if (filters.range === "30d") return copy(locale, "Last 30 days", "最近30天");
   if (filters.range === "90d") return copy(locale, "Last 90 days", "最近90天");
   return copy(locale, "Last 7 days", "最近7天");
@@ -1171,7 +1199,7 @@ function HistoricalErrorsCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <form className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_auto] md:items-end">
+        <form className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_minmax(200px,1fr)_auto] md:items-end">
           <label className="grid gap-1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
               {copy(locale, "Range", "时间范围")}
@@ -1181,11 +1209,21 @@ function HistoricalErrorsCard({
               defaultValue={filters.range}
               className="h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
             >
-              <option value="24h">{copy(locale, "Last 24 hours", "最近24小时")}</option>
-              <option value="7d">{copy(locale, "Last 7 days", "最近7天")}</option>
-              <option value="30d">{copy(locale, "Last 30 days", "最近30天")}</option>
-              <option value="90d">{copy(locale, "Last 90 days", "最近90天")}</option>
-              <option value="all">{copy(locale, "All history", "全部历史")}</option>
+              <option value="24h">
+                {copy(locale, "Last 24 hours", "最近24小时")}
+              </option>
+              <option value="7d">
+                {copy(locale, "Last 7 days", "最近7天")}
+              </option>
+              <option value="30d">
+                {copy(locale, "Last 30 days", "最近30天")}
+              </option>
+              <option value="90d">
+                {copy(locale, "Last 90 days", "最近90天")}
+              </option>
+              <option value="all">
+                {copy(locale, "All history", "全部历史")}
+              </option>
               <option value="custom">{copy(locale, "Custom", "自定义")}</option>
             </select>
           </label>
@@ -1211,10 +1249,26 @@ function HistoricalErrorsCard({
               className="h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
             />
           </label>
+          <label className="grid gap-1 text-sm">
+            <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+              {copy(locale, "Keyword", "关键词")}
+            </span>
+            <input
+              type="search"
+              name="errorQ"
+              defaultValue={filters.keyword}
+              placeholder={copy(
+                locale,
+                "User / prompt / error message",
+                "用户 / 提示词 / 错误信息"
+              )}
+              className="h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors duration-150 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+            />
+          </label>
           <Button type="submit" className="md:w-fit">
             {copy(locale, "Filter", "筛选")}
           </Button>
-          <p className="text-xs text-muted-foreground md:col-span-4">
+          <p className="text-xs text-muted-foreground md:col-span-5">
             {copy(
               locale,
               "Date inputs are applied when the range is Custom. Fixed ranges ignore manual dates.",
@@ -1225,8 +1279,11 @@ function HistoricalErrorsCard({
 
         <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
           <div>
-            {describeErrorFilter(filters, locale, timeZone)} ·{" "}
-            {copy(locale, "Total", "共")} {formatNumber(errors.total, locale)}{" "}
+            {describeErrorFilter(filters, locale, timeZone)}
+            {filters.keyword
+              ? ` · ${copy(locale, "Keyword", "关键词")}「${filters.keyword}」`
+              : ""}{" "}
+            · {copy(locale, "Total", "共")} {formatNumber(errors.total, locale)}{" "}
             {copy(locale, "records", "条")}
           </div>
           <div>
@@ -1237,7 +1294,11 @@ function HistoricalErrorsCard({
 
         {errors.items.length === 0 ? (
           <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-            {copy(locale, "No failed records in this range.", "该时间范围内没有失败记录。")}
+            {copy(
+              locale,
+              "No failed records in this range.",
+              "该时间范围内没有失败记录。"
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto rounded-lg border">
@@ -1280,11 +1341,7 @@ function HistoricalErrorsCard({
                         {item.completedAt && (
                           <div className="mt-1 text-xs text-muted-foreground">
                             {copy(locale, "Completed", "结束")}{" "}
-                            {formatDateTime(
-                              item.completedAt,
-                              locale,
-                              timeZone
-                            )}
+                            {formatDateTime(item.completedAt, locale, timeZone)}
                           </div>
                         )}
                         <div className="mt-1 break-all text-xs text-muted-foreground">
@@ -1306,7 +1363,9 @@ function HistoricalErrorsCard({
                         </Badge>
                       </td>
                       <td className="px-3 py-3">
-                        <div className="break-all font-medium">{userDisplay}</div>
+                        <div className="break-all font-medium">
+                          {userDisplay}
+                        </div>
                         {userDisplay !== item.userId && (
                           <div className="mt-1 break-all text-xs text-muted-foreground">
                             {item.userId}
@@ -1316,7 +1375,8 @@ function HistoricalErrorsCard({
                       <td className="px-3 py-3">
                         <div className="font-medium">{item.model || "-"}</div>
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {item.size || "-"} · {formatCredits(item.creditsConsumed)}
+                          {item.size || "-"} ·{" "}
+                          {formatCredits(item.creditsConsumed)}
                         </div>
                         {prompt && (
                           <div className="mt-2 break-words text-xs text-muted-foreground">
@@ -1427,9 +1487,10 @@ async function loadStatusData() {
       .from(generation),
     db
       .select({
-        totalBalance: sql<number>`coalesce(sum(${creditsBalance.balance}), 0)`.mapWith(
-          Number
-        ),
+        totalBalance:
+          sql<number>`coalesce(sum(${creditsBalance.balance}), 0)`.mapWith(
+            Number
+          ),
         totalEarned:
           sql<number>`coalesce(sum(${creditsBalance.totalEarned}), 0)`.mapWith(
             Number
@@ -1533,10 +1594,9 @@ async function loadStatusData() {
       .from(user),
     db
       .select({
-        open:
-          sql<number>`sum(case when ${ticket.status} = 'open' then 1 else 0 end)`.mapWith(
-            Number
-          ),
+        open: sql<number>`sum(case when ${ticket.status} = 'open' then 1 else 0 end)`.mapWith(
+          Number
+        ),
         inProgress:
           sql<number>`sum(case when ${ticket.status} = 'in_progress' then 1 else 0 end)`.mapWith(
             Number
@@ -1896,7 +1956,11 @@ export default async function GlobalStatusPage({
             }
           />
           <MiniStat
-            label={copy(locale, "24h avg routing latency", "24小时平均调度耗时")}
+            label={copy(
+              locale,
+              "24h avg routing latency",
+              "24小时平均调度耗时"
+            )}
             value={
               data.scheduler24h.avgLatencyMs === null
                 ? copy(locale, "No sample", "暂无样本")
@@ -1925,9 +1989,15 @@ export default async function GlobalStatusPage({
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="rounded-lg xl:col-span-2">
           <CardHeader>
-            <CardTitle>{copy(locale, "Image Generation", "生图总览")}</CardTitle>
+            <CardTitle>
+              {copy(locale, "Image Generation", "生图总览")}
+            </CardTitle>
             <CardDescription>
-              {copy(locale, "All-time records and recent production output.", "累计记录和近期产出。")}
+              {copy(
+                locale,
+                "All-time records and recent production output.",
+                "累计记录和近期产出。"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1968,9 +2038,15 @@ export default async function GlobalStatusPage({
 
         <Card className="rounded-lg">
           <CardHeader>
-            <CardTitle>{copy(locale, "Users & Support", "用户与工单")}</CardTitle>
+            <CardTitle>
+              {copy(locale, "Users & Support", "用户与工单")}
+            </CardTitle>
             <CardDescription>
-              {copy(locale, "Account growth and unresolved ticket pressure.", "账号增长和未处理工单压力。")}
+              {copy(
+                locale,
+                "Account growth and unresolved ticket pressure.",
+                "账号增长和未处理工单压力。"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -2010,7 +2086,11 @@ export default async function GlobalStatusPage({
           <CardHeader>
             <CardTitle>{copy(locale, "Credits", "积分账本")}</CardTitle>
             <CardDescription>
-              {copy(locale, "Consumption, refunds, grants, and expired write-off.", "消耗、退款、发放和过期核销。")}
+              {copy(
+                locale,
+                "Consumption, refunds, grants, and expired write-off.",
+                "消耗、退款、发放和过期核销。"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -2063,7 +2143,11 @@ export default async function GlobalStatusPage({
           <CardHeader>
             <CardTitle>{copy(locale, "Backend Pool", "后端池")}</CardTitle>
             <CardDescription>
-              {copy(locale, "Platform accounts and external upstream APIs.", "平台账号和外接上游 API。")}
+              {copy(
+                locale,
+                "Platform accounts and external upstream APIs.",
+                "平台账号和外接上游 API。"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -2087,16 +2171,28 @@ export default async function GlobalStatusPage({
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-warning" />
-            {copy(locale, "Top Failed Reasons: last 24 hours", "24小时高频失败原因")}
+            {copy(
+              locale,
+              "Top Failed Reasons: last 24 hours",
+              "24小时高频失败原因"
+            )}
           </CardTitle>
           <CardDescription>
-            {copy(locale, "Grouped by normalized error message.", "按归一化错误信息聚合。")}
+            {copy(
+              locale,
+              "Grouped by normalized error message.",
+              "按归一化错误信息聚合。"
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
           {data.topErrors24h.length === 0 ? (
             <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-              {copy(locale, "No failures in the last 24 hours.", "24小时内没有失败记录。")}
+              {copy(
+                locale,
+                "No failures in the last 24 hours.",
+                "24小时内没有失败记录。"
+              )}
             </div>
           ) : (
             <div className="divide-y overflow-hidden rounded-lg border">

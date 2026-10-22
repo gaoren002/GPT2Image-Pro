@@ -7,21 +7,23 @@ import {
   Download,
   ImagePlus,
   MousePointerClick,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
-import Link from "next/link";
-import { useLocale } from "next-intl";
-import { useCallback, useRef, useState } from "react";
-import { toast } from "sonner";
-import { ImageCard } from "@/features/image-generation/components/image-card";
-import { batchDeleteGenerationAction } from "@/features/image-generation/actions";
-import { generateDownloadFilename } from "@/lib/download-filename";
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useLocale } from "next-intl";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { batchDeleteGenerationAction } from "@/features/image-generation/actions";
+import { ImageCard } from "@/features/image-generation/components/image-card";
 import type {
-  LightboxReferenceImage,
   LightboxGeneration,
+  LightboxReferenceImage,
 } from "@/features/image-generation/components/image-lightbox";
+import { generateDownloadFilename } from "@/lib/download-filename";
 
 // 懒加载:lightbox 仅在点开某张图时才需要,改 next/dynamic 后从图库首屏 bundle 移出。
 const ImageLightbox = dynamic(
@@ -60,6 +62,8 @@ export interface GalleryClientProps {
   activeTab: "final" | "agent-drafts" | "uploads";
   page: number;
   timeZone: string;
+  /** 当前搜索关键词(URL query,服务端已过滤)。 */
+  searchQuery: string;
 }
 
 export function GalleryClient({
@@ -71,23 +75,27 @@ export function GalleryClient({
   activeTab,
   page,
   timeZone,
+  searchQuery,
 }: GalleryClientProps) {
   const locale = useLocale();
   const isZh = locale === "zh";
   const copy = (en: string, zh: string) => (isZh ? zh : en);
+  const router = useRouter();
   const [items, setItems] = useState<GenerationWithUrl[]>(initialGenerations);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [queryInput, setQueryInput] = useState(searchQuery);
+
+  useEffect(() => {
+    setQueryInput(searchQuery);
+  }, [searchQuery]);
 
   // -- 多选模式状态 --
   const [selectMode, setSelectMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    new Set()
-  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   /** 记录上一次点选的索引,用于 Shift 范围选择 */
   const lastSelectedIndexRef = useRef<number>(-1);
   /** 批量删除二次确认:第一次点击设为 true,第二次才真正执行 */
-  const [confirmBatchDelete, setConfirmBatchDelete] =
-    useState(false);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
@@ -115,14 +123,8 @@ export function GalleryClient({
           lastSelectedIndexRef.current >= 0 &&
           lastSelectedIndexRef.current !== currentIndex
         ) {
-          const start = Math.min(
-            lastSelectedIndexRef.current,
-            currentIndex
-          );
-          const end = Math.max(
-            lastSelectedIndexRef.current,
-            currentIndex
-          );
+          const start = Math.min(lastSelectedIndexRef.current, currentIndex);
+          const end = Math.max(lastSelectedIndexRef.current, currentIndex);
           for (let i = start; i <= end; i++) {
             const item = items[i];
             if (item) next.add(item.id);
@@ -148,9 +150,7 @@ export function GalleryClient({
 
   // -- 批量下载:依次创建临时 <a> 触发下载,间隔 100ms 避免浏览器拦截 --
   const handleBatchDownload = useCallback(() => {
-    const toDownload = items.filter(
-      (i) => selectedIds.has(i.id) && i.imageUrl
-    );
+    const toDownload = items.filter((i) => selectedIds.has(i.id) && i.imageUrl);
     if (toDownload.length === 0) return;
     for (let idx = 0; idx < toDownload.length; idx++) {
       const item = toDownload[idx];
@@ -187,31 +187,20 @@ export function GalleryClient({
       });
       if (result?.data?.success) {
         const count = result.data.deletedCount ?? ids.length;
-        setItems((prev) =>
-          prev.filter((i) => !selectedIds.has(i.id))
-        );
+        setItems((prev) => prev.filter((i) => !selectedIds.has(i.id)));
         setSelectedIds(new Set());
         setConfirmBatchDelete(false);
         toast.success(
-          copy(
-            `Deleted ${count} images`,
-            `已删除 ${count} 张图片`
-          )
+          copy(`Deleted ${count} images`, `已删除 ${count} 张图片`)
         );
       } else {
-        const msg =
-          result?.serverError ||
-          copy("Failed to delete", "删除失败");
+        const msg = result?.serverError || copy("Failed to delete", "删除失败");
         toast.error(
-          typeof msg === "string"
-            ? msg
-            : copy("Failed to delete", "删除失败")
+          typeof msg === "string" ? msg : copy("Failed to delete", "删除失败")
         );
       }
     } catch {
-      toast.error(
-        copy("Failed to delete", "删除失败")
-      );
+      toast.error(copy("Failed to delete", "删除失败"));
     } finally {
       setBatchDeleting(false);
     }
@@ -228,9 +217,25 @@ export function GalleryClient({
   }, [items, selectedIds.size]);
 
   const createHref = `/${locale}/dashboard/create`;
-  const galleryHref = (tab: GalleryClientProps["activeTab"], nextPage = 1) =>
-    `/${locale}/dashboard/gallery?tab=${tab}&page=${nextPage}`;
+  // 链接(标签切换/加载更多)保留当前关键词,翻页不丢搜索上下文。
+  const searchSuffix = (q: string = searchQuery) =>
+    q ? `&q=${encodeURIComponent(q)}` : "";
+  const galleryHref = (
+    tab: GalleryClientProps["activeTab"],
+    nextPage = 1,
+    q: string = searchQuery
+  ) =>
+    `/${locale}/dashboard/gallery?tab=${tab}&page=${nextPage}${searchSuffix(q)}`;
   const nextPageHref = galleryHref(activeTab, page + 1);
+
+  /** 搜索提交:回到第 1 页,带关键词(服务端过滤提示词/改写词/模型)。 */
+  const handleSearchSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const q = queryInput.trim();
+    router.push(
+      `/${locale}/dashboard/gallery?tab=${activeTab}&page=1${searchSuffix(q)}`
+    );
+  };
   // 激活徽标用 primary 反差点缀:Tabs 激活态已是柔和灰底(bg-secondary),
   // 旧的 bg-primary-foreground(白底)在灰底上几乎不可见。
   const countBadgeClass = (active: boolean) =>
@@ -254,41 +259,29 @@ export function GalleryClient({
               {copy("Final images", "成品")}
               <Badge
                 variant="outline"
-                className={countBadgeClass(
-                  activeTab === "final"
-                )}
+                className={countBadgeClass(activeTab === "final")}
               >
                 {finalCount}
               </Badge>
             </Link>
           </TabsTrigger>
           <TabsTrigger value="agent-drafts" asChild>
-            <Link
-              href={galleryHref("agent-drafts")}
-              scroll={false}
-            >
+            <Link href={galleryHref("agent-drafts")} scroll={false}>
               {copy("Agent drafts", "Agent 中间图")}
               <Badge
                 variant="outline"
-                className={countBadgeClass(
-                  activeTab === "agent-drafts"
-                )}
+                className={countBadgeClass(activeTab === "agent-drafts")}
               >
                 {draftCount}
               </Badge>
             </Link>
           </TabsTrigger>
           <TabsTrigger value="uploads" asChild>
-            <Link
-              href={galleryHref("uploads")}
-              scroll={false}
-            >
+            <Link href={galleryHref("uploads")} scroll={false}>
               {copy("User uploads", "用户上传图")}
               <Badge
                 variant="outline"
-                className={countBadgeClass(
-                  activeTab === "uploads"
-                )}
+                className={countBadgeClass(activeTab === "uploads")}
               >
                 {uploadCount}
               </Badge>
@@ -296,6 +289,41 @@ export function GalleryClient({
           </TabsTrigger>
         </TabsList>
       </Tabs>
+      {/* 搜索:URL query 驱动服务端过滤(提示词/改写词/模型),标签切换与
+          加载更多保留关键词 */}
+      <form onSubmit={handleSearchSubmit} className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={queryInput}
+            onChange={(event) => setQueryInput(event.target.value)}
+            placeholder={copy(
+              "Search prompt or model...",
+              "搜索提示词或模型..."
+            )}
+            className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none transition-colors duration-150 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          />
+        </div>
+        <Button type="submit" variant="outline" className="h-9 shrink-0">
+          {copy("Search", "搜索")}
+        </Button>
+        {searchQuery && (
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-9 shrink-0 px-2"
+            title={copy("Clear", "清除")}
+            onClick={() => {
+              setQueryInput("");
+              router.push(
+                `/${locale}/dashboard/gallery?tab=${activeTab}&page=1`
+              );
+            }}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </form>
       {/* 多选模式切换按钮 */}
       <Button
         variant={selectMode ? "secondary" : "outline"}
@@ -388,9 +416,7 @@ export function GalleryClient({
               selectable={selectMode}
               selected={selectedIds.has(item.id)}
               onSelect={selectMode ? handleSelect : undefined}
-              onClick={
-                selectMode ? undefined : () => setSelectedId(item.id)
-              }
+              onClick={selectMode ? undefined : () => setSelectedId(item.id)}
               badge={
                 item.outputRole === "agent_draft"
                   ? copy("Draft", "中间图")
@@ -424,27 +450,17 @@ export function GalleryClient({
               )}
             </span>
             <div className="h-4 w-px bg-border" />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleSelectAll}
-            >
+            <Button variant="outline" size="sm" onClick={handleSelectAll}>
               {selectedIds.size === items.length
                 ? copy("Deselect all", "取消全选")
                 : copy("Select all", "全选")}
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleBatchDownload}
-            >
+            <Button variant="outline" size="sm" onClick={handleBatchDownload}>
               <Download className="mr-1.5 h-3.5 w-3.5" />
               {copy("Download", "下载")}
             </Button>
             <Button
-              variant={
-                confirmBatchDelete ? "destructive" : "outline"
-              }
+              variant={confirmBatchDelete ? "destructive" : "outline"}
               size="sm"
               disabled={batchDeleting}
               onClick={handleBatchDelete}

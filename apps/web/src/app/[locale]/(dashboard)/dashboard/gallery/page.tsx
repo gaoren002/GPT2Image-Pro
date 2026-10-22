@@ -3,7 +3,7 @@ import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
-import { and, count, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike, isNotNull, or, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 import { GalleryClient } from "@/features/image-generation/components/gallery-client";
@@ -14,7 +14,7 @@ import {
 import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 
 interface GalleryPageProps {
-  searchParams: Promise<{ page?: string; tab?: string }>;
+  searchParams: Promise<{ page?: string; tab?: string; q?: string }>;
 }
 
 type GalleryOutputRole = "final" | "agent_draft" | "upload";
@@ -135,6 +135,15 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   const pageParam = Number(params.page);
   const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
   const limit = page * PAGE_SIZE;
+  // 关键词搜索:提示词/改写词/模型 ilike 子串(三个标签页共用)。
+  const keyword = params.q?.trim().slice(0, 120) ?? "";
+  const keywordCondition = keyword
+    ? or(
+        ilike(generation.prompt, `%${keyword}%`),
+        ilike(generation.revisedPrompt, `%${keyword}%`),
+        ilike(generation.model, `%${keyword}%`)
+      )
+    : undefined;
   const finalCondition = and(
     eq(generation.userId, user.id),
     eq(generation.status, "completed"),
@@ -143,7 +152,8 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
       SELECT 1
       FROM jsonb_array_elements(COALESCE(${generation.metadata}::jsonb->'outputImage'->'imageOutputs', '[]'::jsonb)) AS output
       WHERE output->>'role' = 'agent_draft' AND output->>'primary' = 'true'
-    )`
+    )`,
+    keywordCondition
   );
   // finalCount 徽标:避免对 finalCondition 的 NOT EXISTS 做无 LIMIT 全表计数(~2.5s)。
   // 改用集合差:完成且有图的总数 − 其中"主体为 agent_draft"的数(后者走 GIN，~2ms),
@@ -151,11 +161,13 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   const completedStorageCondition = and(
     eq(generation.userId, user.id),
     eq(generation.status, "completed"),
-    isNotNull(generation.storageKey)
+    isNotNull(generation.storageKey),
+    keywordCondition
   );
   const draftPrimaryCondition = and(
     completedStorageCondition,
-    sql`(${generation.metadata}::jsonb) @? '$.outputImage.imageOutputs[*] ? (@.role == "agent_draft" && @.primary == true)'`
+    sql`(${generation.metadata}::jsonb) @? '$.outputImage.imageOutputs[*] ? (@.role == "agent_draft" && @.primary == true)'`,
+    keywordCondition
   );
   // @? jsonpath 谓词:命中"含 agent_draft 输出，或存在非主输出(primary=false)"的行。
   // 与原 EXISTS(jsonb_array_elements ...) 逐行解析完全等价(已校验命中数一致),
@@ -165,14 +177,16 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     eq(generation.status, "completed"),
     isNotNull(generation.storageKey),
     isNotNull(generation.metadata),
-    sql`(${generation.metadata}::jsonb) @? '$.outputImage.imageOutputs[*] ? (@.role == "agent_draft" || @.primary == false)'`
+    sql`(${generation.metadata}::jsonb) @? '$.outputImage.imageOutputs[*] ? (@.role == "agent_draft" || @.primary == false)'`,
+    keywordCondition
   );
   // @? jsonpath 谓词:命中"inputImages.images 至少有一个元素"的行。等价于原
   // jsonb_array_length(... ) > 0（已校验命中数一致），可走 generation_metadata_gin_idx。
   const uploadCondition = and(
     eq(generation.userId, user.id),
     isNotNull(generation.metadata),
-    sql`(${generation.metadata}::jsonb) @? '$.inputImages.images[0]'`
+    sql`(${generation.metadata}::jsonb) @? '$.inputImages.images[0]'`,
+    keywordCondition
   );
   // 仅 final 标签页用到带 LIMIT 的成品主查询(finalCondition 命中密集，LIMIT 命中快)。
   // drafts/uploads 标签页的展示来自下面无 LIMIT 的 draft/upload 查询(走 GIN)，故此处不重复
@@ -274,7 +288,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         </p>
       </div>
       <GalleryClient
-        key={`${activeTab}-${page}`}
+        key={`${activeTab}-${page}-${keyword}`}
         initialGenerations={displayedItems}
         totalCount={totalCount}
         finalCount={finalCount}
@@ -283,6 +297,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         activeTab={activeTab}
         page={page}
         timeZone={timeZone}
+        searchQuery={keyword}
       />
     </div>
   );

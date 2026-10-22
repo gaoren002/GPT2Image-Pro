@@ -1,21 +1,52 @@
-import { count, desc, eq } from "drizzle-orm";
-import { getLocale } from "next-intl/server";
-import { redirect } from "next/navigation";
 import { db } from "@repo/database";
 import { generation } from "@repo/database/schema";
+import { getCurrentUser } from "@repo/shared/auth/server";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
+import { getAppTimeZone } from "@repo/shared/time-zone/server";
+import { and, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
+import { redirect } from "next/navigation";
+import { getLocale } from "next-intl/server";
 import { HistoryClient } from "@/features/image-generation/components/history-client";
 import { extractGenerationCreditDetails } from "@/features/image-generation/credit-calculation-details";
-import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 import {
   extractGenerationReferenceImages,
   extractPromptRepairNotice,
 } from "@/features/image-generation/generation-metadata";
-import { getCurrentUser } from "@repo/shared/auth/server";
-import { getAppTimeZone } from "@repo/shared/time-zone/server";
+import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 
 interface HistoryPageProps {
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{
+    page?: string;
+    q?: string;
+    status?: string;
+  }>;
+}
+
+/**
+ * 历史记录查询条件:提示词/改写词/模型的子串匹配(大小写不敏感)+
+ * 状态筛选。空搜索退化为全量(行为与旧版一致)。
+ */
+function buildHistoryWhere(
+  userId: string,
+  q: string | undefined,
+  status: string | undefined
+): SQL | undefined {
+  const conditions: Array<SQL | undefined> = [eq(generation.userId, userId)];
+  const keyword = q?.trim();
+  if (keyword) {
+    const pattern = `%${keyword}%`;
+    conditions.push(
+      or(
+        ilike(generation.prompt, pattern),
+        ilike(generation.revisedPrompt, pattern),
+        ilike(generation.model, pattern)
+      )
+    );
+  }
+  if (status === "completed" || status === "failed" || status === "pending") {
+    conditions.push(eq(generation.status, status));
+  }
+  return and(...conditions);
 }
 
 export default async function HistoryPage({ searchParams }: HistoryPageProps) {
@@ -31,18 +62,17 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
   const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
   const offset = (page - 1) * PAGE_SIZE;
 
+  const where = buildHistoryWhere(user.id, params.q, params.status);
+
   const [generations, totalResult, timeZone] = await Promise.all([
     db
       .select()
       .from(generation)
-      .where(eq(generation.userId, user.id))
+      .where(where)
       .orderBy(desc(generation.createdAt))
       .limit(PAGE_SIZE)
       .offset(offset),
-    db
-      .select({ count: count() })
-      .from(generation)
-      .where(eq(generation.userId, user.id)),
+    db.select({ count: count() }).from(generation).where(where),
     getAppTimeZone(),
   ]);
 
@@ -82,12 +112,14 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
         </p>
       </div>
       <HistoryClient
-        key={page}
+        key={`${page}-${params.q ?? ""}-${params.status ?? ""}`}
         initialGenerations={withUrls}
         totalCount={totalResult[0]?.count ?? 0}
         page={page}
         pageSize={PAGE_SIZE}
         timeZone={timeZone}
+        searchQuery={params.q?.trim() ?? ""}
+        searchStatus={params.status ?? ""}
       />
     </div>
   );

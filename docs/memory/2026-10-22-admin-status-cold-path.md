@@ -26,6 +26,9 @@
 - 调度器关闭时，全站累计会退回全表实时聚合（结果准确，但很慢）。
 - 0049-0051 都是手工执行的，没写 `drizzle.__drizzle_migrations`（账本停在 0048）。三个迁移都幂等，将来重放无害。
 
-## 未处理（待定）
+## 后续：base64 输入图入库（已处理）
+
+用户于 2026-10-22 确认已另行处理。代码中 `buildInputImagesMetadata` 的 data URI 回退仍在；10-22 19:00 JST 之后，生产未再出现超过 50KB 的 metadata 行。以下为当时的分析，留档备查：
+
 
 - `/v1/chat/completions` 收到 base64 输入图时，`buildInputImagesMetadata` 在没有 storageKey 的情况下回退到 `image.url`，把整段 data URI 写进了 `metadata.inputImages.images[].imageUrl`。生产有 470 行 metadata 超过 50KB（压缩后约 388MB，单行最大约 10MB），10 月仍在增长，所有读 metadata 的查询都要为它付出 TOAST 成本。可选方案：不落 data URI，或改为转存对象存储。要不要保留历史详情里的参考图显示，属于产品决定。

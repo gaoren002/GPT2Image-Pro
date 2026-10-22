@@ -27,6 +27,7 @@ import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { isAdminRole } from "@repo/shared/auth/roles";
 import { formatDateInTimeZone } from "@repo/shared/time-zone";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
+import { SidebarUnreadSync } from "@/features/dashboard/components/sidebar-unread-sync";
 
 interface TicketDetailPageProps {
   params: Promise<{
@@ -210,6 +211,8 @@ export default async function TicketDetailPage({
 
   return (
     <div className="space-y-6">
+      {/* 上面已更新本工单的已读时间:挂载后通知侧栏刷新未读角标 */}
+      <SidebarUnreadSync />
       {/* 页面标题 */}
       <div className="flex items-center gap-4">
         <Link href={`/${locale}/dashboard/support`}>

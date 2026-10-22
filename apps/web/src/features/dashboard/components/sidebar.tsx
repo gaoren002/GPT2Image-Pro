@@ -40,17 +40,12 @@ import Link, { useLinkStatus } from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useAction } from "next-safe-action/hooks";
-import {
-  type MouseEvent,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   type CurrentSession,
   useCurrentSession,
 } from "@/features/auth/hooks/use-current-session";
+import { SIDEBAR_UNREAD_CHANGED_EVENT } from "@/features/dashboard/components/sidebar-unread-sync";
 import { useSidebar } from "@/features/dashboard/context";
 
 /**
@@ -81,22 +76,30 @@ type DashboardSidebarProps = {
   prefetch?: SidebarPrefetch | null;
 };
 
-function SidebarNavigationStatus({
-  onPendingChange,
-}: {
-  onPendingChange: (token: symbol, pending: boolean) => void;
-}) {
+/**
+ * 侧栏链接的"导航中"指示:点击后立即在该项显示脉动竖线,直到新页面提交。
+ *
+ * 必须渲染在 <Link> 内部(useLinkStatus 读取的是所在 Link 发起的导航)。预取命中时
+ * 导航几乎瞬时提交,指示一闪而过;未命中(慢网络、预取未完成)时它让用户确认点击已
+ * 生效,避免"没反应再点一次"。
+ */
+function SidebarLinkPendingIndicator() {
   const { pending } = useLinkStatus();
-  const tokenRef = useRef(Symbol("sidebar-navigation"));
-
-  useEffect(() => {
-    const token = tokenRef.current;
-    onPendingChange(token, pending);
-    return () => onPendingChange(token, false);
-  }, [onPendingChange, pending]);
-
-  return null;
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-foreground transition-opacity duration-150",
+        pending
+          ? "animate-pulse opacity-100 motion-reduce:animate-none"
+          : "opacity-0"
+      )}
+    />
+  );
 }
+
+/** 切页后延迟多久刷新未读角标(让出页面自身的请求)。 */
+const UNREAD_REFRESH_DELAY_MS = 3000;
 
 export function DashboardSidebar({
   initialSession,
@@ -117,21 +120,6 @@ export function DashboardSidebar({
 
   // Popover 开关状态
   const [open, setOpen] = useState(false);
-  const navigationIntentRef = useRef<string | null>(null);
-  const pendingNavigationTokensRef = useRef(new Set<symbol>());
-  const handleNavigationPendingChange = useCallback(
-    (token: symbol, pending: boolean) => {
-      if (pending) {
-        pendingNavigationTokensRef.current.add(token);
-      } else {
-        pendingNavigationTokensRef.current.delete(token);
-        if (pendingNavigationTokensRef.current.size === 0) {
-          navigationIntentRef.current = null;
-        }
-      }
-    },
-    []
-  );
 
   // 获取用户订阅计划:预取值直出,action 仅在无预取时兜底
   const { execute: fetchPlan, result: planResult } = useAction(getMyPlanAction);
@@ -163,12 +151,38 @@ export function DashboardSidebar({
     }
   }, [user, prefetch?.plan, fetchPlan]);
 
+  // 未读角标刷新。侧栏在共享布局里,软导航不重渲染,首屏值来自服务端预取:
+  // - 首次挂载:有预取则直接用,不发请求(无预取的旧调用方立即拉取);
+  // - 之后每次切页:延迟刷新,捕捉新回复 / 新公告,且不与刚发出的页面请求争抢
+  //   高延迟链路;连续切页时只保留最后一次。
+  const skipFirstUnreadRefreshRef = useRef(Boolean(prefetch));
   useEffect(() => {
-    if (user && !prefetch) {
+    if (!user) return;
+    if (skipFirstUnreadRefreshRef.current) {
+      skipFirstUnreadRefreshRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(
+      () => {
+        fetchUnreadTickets();
+        fetchUnreadAnnouncements();
+      },
+      prefetch ? UNREAD_REFRESH_DELAY_MS : 0
+    );
+    return () => window.clearTimeout(timer);
+  }, [user, pathname, prefetch, fetchUnreadTickets, fetchUnreadAnnouncements]);
+
+  // "打开即已读"的页面(公告、工单详情)挂载后派发事件,立即刷新角标(见 SidebarUnreadSync)。
+  useEffect(() => {
+    if (!user) return;
+    const refresh = () => {
       fetchUnreadTickets();
       fetchUnreadAnnouncements();
-    }
-  }, [user, pathname, prefetch, fetchUnreadTickets, fetchUnreadAnnouncements]);
+    };
+    window.addEventListener(SIDEBAR_UNREAD_CHANGED_EVENT, refresh);
+    return () =>
+      window.removeEventListener(SIDEBAR_UNREAD_CHANGED_EVENT, refresh);
+  }, [user, fetchUnreadTickets, fetchUnreadAnnouncements]);
 
   /**
    * 导航项标题映射到翻译键
@@ -233,37 +247,13 @@ export function DashboardSidebar({
   const localizedHref = (href: string) =>
     href.startsWith("/") ? `/${locale}${href}` : href;
 
-  const handleNavigationClick = (
-    event: MouseEvent<HTMLAnchorElement>,
-    href: string,
-    mobile: boolean
-  ) => {
+  // 导航完全交给 <Link> 软导航。WHY 不拦截:Next 16 的路由动作队列里,新导航会
+  // 把进行中的导航标记为丢弃并立即开始(app-router-instance dispatchAction),无需
+  // 浏览器层面打断。旧实现在导航挂起时 window.stop() + location.assign() 整页跳转:
+  // stop 会掐断进行中的 RSC 请求,而 Next 对失败的导航兜底整页跳回其原目标,于是
+  // "没反应再点另一个 tab"会整页重载并停在上一个 tab(限速实测 60s 未到达新 tab)。
+  const handleNavigationClick = (mobile: boolean) => {
     if (mobile) setMobileOpen(false);
-    if (
-      event.button !== 0 ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.shiftKey ||
-      event.altKey
-    ) {
-      return;
-    }
-
-    const target = localizedHref(href);
-    if (target === pathname) return;
-
-    const previousTarget = navigationIntentRef.current;
-    navigationIntentRef.current = target;
-    if (
-      pendingNavigationTokensRef.current.size > 0 ||
-      (previousTarget && previousTarget !== target)
-    ) {
-      // App Router cannot cancel an in-flight RSC navigation. Stop it at the
-      // browser level so the newly clicked destination takes over immediately.
-      event.preventDefault();
-      window.stop();
-      window.location.assign(target);
-    }
   };
 
   /**
@@ -377,15 +367,14 @@ export function DashboardSidebar({
                         ? unreadTicketCount
                         : 0;
                   const showUnread = unreadCount > 0;
+                  // 使用 Link 默认预取:各 dashboard 路由都有 loading.tsx,预取只取到该加载
+                  // 骨架(共享布局与页面数据查询都不执行),点击即可立刻切到骨架再流式出内容。
                   return (
                     <Link
                       key={item.href}
                       href={localizedHref(item.href)}
-                      prefetch={false}
                       title={collapsed ? translatedTitle : undefined}
-                      onClick={(event) =>
-                        handleNavigationClick(event, item.href, mobile)
-                      }
+                      onClick={() => handleNavigationClick(mobile)}
                       className={cn(
                         // 激活/hover 均取 sidebar 专属 token:侧栏底色与 secondary/muted
                         // 同值,通用灰阶在此不可见,sidebar-accent 才能在明暗两态浮出
@@ -396,9 +385,7 @@ export function DashboardSidebar({
                         collapsed && "justify-center px-0"
                       )}
                     >
-                      <SidebarNavigationStatus
-                        onPendingChange={handleNavigationPendingChange}
-                      />
+                      {!isActive && <SidebarLinkPendingIndicator />}
                       {/* 激活指示竖线:淡入 + 纵向展开;非激活时保留元素,靠 opacity/scale 过渡 */}
                       <span
                         aria-hidden="true"

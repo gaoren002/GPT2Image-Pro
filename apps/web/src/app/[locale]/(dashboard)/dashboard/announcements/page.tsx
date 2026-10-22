@@ -18,6 +18,8 @@ import {
 } from "@repo/ui/components/card";
 import { cn } from "@repo/ui/utils";
 
+import { SidebarUnreadSync } from "@/features/dashboard/components/sidebar-unread-sync";
+
 /**
  * 公告级别视觉映射：单色为主，仅 success/warning/critical 用语义色 token
  * （--color-success/--color-warning 已入 @theme，直接用标准工具类）。
@@ -95,6 +97,8 @@ export default async function DashboardAnnouncementsPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
+      {/* 上面已把可见公告标记为已读:挂载后通知侧栏刷新未读角标 */}
+      <SidebarUnreadSync />
       <div>
         <h2 className="font-serif text-2xl font-medium tracking-tight">
           {copy("Announcements", "公告")}

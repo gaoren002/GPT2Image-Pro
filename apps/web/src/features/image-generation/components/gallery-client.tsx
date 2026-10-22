@@ -306,45 +306,69 @@ export function GalleryClient({
     setItems((prev) => prev.filter((x) => x.id !== id));
   };
 
+  // 顶栏两行布局:第一行标签页 + 多选按钮(原始排列保持不变);
+  // 第二行搜索表单独占整行(此前塞进同一 flex 行导致 grid 列塌陷、
+  // 标签与按钮被挤压错位)。
   const tabs = (
-    <div className="flex items-center gap-3">
-      <Tabs value={activeTab} className="flex-1">
-        <TabsList className="h-auto flex-wrap justify-start border border-border bg-muted/40">
-          <TabsTrigger value="final" asChild>
-            <Link href={galleryHref("final")} scroll={false}>
-              {copy("Final images", "成品")}
-              <Badge
-                variant="outline"
-                className={countBadgeClass(activeTab === "final")}
-              >
-                {finalCount}
-              </Badge>
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="agent-drafts" asChild>
-            <Link href={galleryHref("agent-drafts")} scroll={false}>
-              {copy("Agent drafts", "Agent 中间图")}
-              <Badge
-                variant="outline"
-                className={countBadgeClass(activeTab === "agent-drafts")}
-              >
-                {draftCount}
-              </Badge>
-            </Link>
-          </TabsTrigger>
-          <TabsTrigger value="uploads" asChild>
-            <Link href={galleryHref("uploads")} scroll={false}>
-              {copy("User uploads", "用户上传图")}
-              <Badge
-                variant="outline"
-                className={countBadgeClass(activeTab === "uploads")}
-              >
-                {uploadCount}
-              </Badge>
-            </Link>
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <Tabs value={activeTab} className="flex-1">
+          <TabsList className="h-auto flex-wrap justify-start border border-border bg-muted/40">
+            <TabsTrigger value="final" asChild>
+              <Link href={galleryHref("final")} scroll={false}>
+                {copy("Final images", "成品")}
+                <Badge
+                  variant="outline"
+                  className={countBadgeClass(activeTab === "final")}
+                >
+                  {finalCount}
+                </Badge>
+              </Link>
+            </TabsTrigger>
+            <TabsTrigger value="agent-drafts" asChild>
+              <Link href={galleryHref("agent-drafts")} scroll={false}>
+                {copy("Agent drafts", "Agent 中间图")}
+                <Badge
+                  variant="outline"
+                  className={countBadgeClass(activeTab === "agent-drafts")}
+                >
+                  {draftCount}
+                </Badge>
+              </Link>
+            </TabsTrigger>
+            <TabsTrigger value="uploads" asChild>
+              <Link href={galleryHref("uploads")} scroll={false}>
+                {copy("User uploads", "用户上传图")}
+                <Badge
+                  variant="outline"
+                  className={countBadgeClass(activeTab === "uploads")}
+                >
+                  {uploadCount}
+                </Badge>
+              </Link>
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {/* 多选模式切换按钮 */}
+        <Button
+          variant={selectMode ? "secondary" : "outline"}
+          size="sm"
+          onClick={selectMode ? exitSelectMode : () => setSelectMode(true)}
+          className="shrink-0"
+        >
+          {selectMode ? (
+            <>
+              <X className="mr-1.5 h-3.5 w-3.5" />
+              {copy("Cancel", "取消")}
+            </>
+          ) : (
+            <>
+              <MousePointerClick className="mr-1.5 h-3.5 w-3.5" />
+              {copy("Select", "选择")}
+            </>
+          )}
+        </Button>
+      </div>
       {/* 搜索:URL query 驱动服务端过滤(关键词/模型/日期),标签切换与
           加载更多保留全部筛选 */}
       <form
@@ -451,25 +475,6 @@ export function GalleryClient({
           </Button>
         )}
       </form>
-      {/* 多选模式切换按钮 */}
-      <Button
-        variant={selectMode ? "secondary" : "outline"}
-        size="sm"
-        onClick={selectMode ? exitSelectMode : () => setSelectMode(true)}
-        className="shrink-0"
-      >
-        {selectMode ? (
-          <>
-            <X className="mr-1.5 h-3.5 w-3.5" />
-            {copy("Cancel", "取消")}
-          </>
-        ) : (
-          <>
-            <MousePointerClick className="mr-1.5 h-3.5 w-3.5" />
-            {copy("Select", "选择")}
-          </>
-        )}
-      </Button>
     </div>
   );
 

@@ -167,6 +167,7 @@ export type SettingKey =
   | "INTERNAL_JOB_CREDITS_EXPIRE_INTERVAL_MINUTES"
   | "INTERNAL_JOB_WEB_ACCOUNTS_REFRESH_INTERVAL_MINUTES"
   | "INTERNAL_JOB_SUB2API_SYNC_INTERVAL_MINUTES"
+  | "INTERNAL_JOB_GENERATION_DAILY_STATS_INTERVAL_MINUTES"
   | "UPSTASH_REDIS_REST_URL"
   | "UPSTASH_REDIS_REST_TOKEN"
   | "RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE"
@@ -1501,7 +1502,7 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     key: "INTERNAL_JOB_SCHEDULER_ENABLED",
     label: "内置定时任务",
     description:
-      "启用后 Web 进程会自动执行 pending 超时、照片清理、积分过期、Web 账号刷新和 Sub2API 同步任务；多实例会用数据库锁避免重复执行。",
+      "启用后 Web 进程会自动执行 pending 超时、照片清理、积分过期、Web 账号刷新、Sub2API 同步和生成统计汇总任务；多实例会用数据库锁避免重复执行。",
     category: "general",
     valueType: "boolean",
     defaultValue: true,
@@ -1535,6 +1536,15 @@ export const SYSTEM_SETTING_DEFINITIONS = [
     label: "Sub2API 同步检查间隔（分钟）",
     description:
       "内置调度器检查 Sub2API 自动同步任务的间隔；实际是否同步仍受 Sub2API 自动同步任务自身间隔控制。",
+    category: "general",
+    valueType: "number",
+    defaultValue: 10,
+  },
+  {
+    key: "INTERNAL_JOB_GENERATION_DAILY_STATS_INTERVAL_MINUTES",
+    label: "生成统计汇总任务间隔（分钟）",
+    description:
+      "全局状态页“全站累计”按日汇总的维护间隔：补齐新结算的日期，并轮转重算旧日期以吸收删除记录与图片销毁。调度器关闭时页面退回全表实时聚合（结果仍准确，但很慢）。",
     category: "general",
     valueType: "number",
     defaultValue: 10,

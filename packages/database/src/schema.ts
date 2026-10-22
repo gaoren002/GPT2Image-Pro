@@ -1,5 +1,6 @@
 import {
   boolean,
+  date,
   index,
   integer,
   json,
@@ -1219,6 +1220,38 @@ export const generation = pgTable("generation", {
 export type Generation = typeof generation.$inferSelect;
 export type NewGeneration = typeof generation.$inferInsert;
 export type GenerationStatus = (typeof generationStatusEnum.enumValues)[number];
+
+/**
+ * generation 按 UTC 日汇总(迁移 0051),全局状态页"全站累计"的已结算前缀。
+ *
+ * 只收录早于"昨天 UTC 0 点"的日期,由内置任务 generation-daily-stats 维护
+ * (apps/web/src/server/generation-daily-stats.ts):补齐新结算的日期,并按
+ * refreshedAt 轮转重算旧日期以吸收硬删除 / 图片销毁对旧行的改写。各列口径与
+ * 对 generation 直接聚合完全一致;本表是可重建的派生数据,不承载业务真相。
+ *
+ * @field day - UTC 日期(generation.created_at::date)
+ * @field completedImages - 产图数:优先 metadata.outputImage.billableImageOutputCount,
+ *   缺失时按 storage_key 是否存在计 1/0(与全局状态页窗口统计同口径)
+ * @field refreshedAt - 该日最近一次重算时间(轮转重算按此挑最旧的日期)
+ */
+export const generationDailyStats = pgTable("generation_daily_stats", {
+  day: date("day", { mode: "string" }).primaryKey(),
+  total: integer("total").notNull().default(0),
+  completed: integer("completed").notNull().default(0),
+  failed: integer("failed").notNull().default(0),
+  pending: integer("pending").notNull().default(0),
+  completedImages: integer("completed_images").notNull().default(0),
+  creditsConsumed: numeric("credits_consumed", {
+    precision: 18,
+    scale: 2,
+    mode: "number",
+  })
+    .notNull()
+    .default(0),
+  refreshedAt: timestamp("refreshed_at").notNull().defaultNow(),
+});
+
+export type GenerationDailyStats = typeof generationDailyStats.$inferSelect;
 
 // ============================================
 // 工单系统类型导出

@@ -1,11 +1,11 @@
 import { db, systemSetting } from "@repo/database";
-import { eq, sql } from "drizzle-orm";
-
 import {
   getRuntimeSettingBoolean,
   getRuntimeSettingNumber,
 } from "@repo/shared/system-settings";
+import { eq, sql } from "drizzle-orm";
 
+import { runGenerationDailyStatsJob } from "./generation-daily-stats";
 import {
   runCreditsExpireJob,
   runImageMaintenanceJob,
@@ -20,7 +20,8 @@ type InternalJob = {
     | "INTERNAL_JOB_IMAGES_MAINTENANCE_INTERVAL_MINUTES"
     | "INTERNAL_JOB_CREDITS_EXPIRE_INTERVAL_MINUTES"
     | "INTERNAL_JOB_WEB_ACCOUNTS_REFRESH_INTERVAL_MINUTES"
-    | "INTERNAL_JOB_SUB2API_SYNC_INTERVAL_MINUTES";
+    | "INTERNAL_JOB_SUB2API_SYNC_INTERVAL_MINUTES"
+    | "INTERNAL_JOB_GENERATION_DAILY_STATS_INTERVAL_MINUTES";
   defaultIntervalMinutes: number;
   initialDelayMs: number;
   run: () => Promise<unknown>;
@@ -70,6 +71,16 @@ const jobs: InternalJob[] = [
     defaultIntervalMinutes: 10,
     initialDelayMs: 120_000,
     run: () => runSub2ApiSyncJob(),
+  },
+  {
+    // 全局状态页"全站累计"的按日汇总:补齐新结算日期 + 轮转重算旧日期。首次运行
+    // 全量回填约 40 秒;初始延迟短于其他任务,让新部署尽早脱离全表聚合的慢路径。
+    name: "generation-daily-stats",
+    lockKey: 5,
+    intervalSettingKey: "INTERNAL_JOB_GENERATION_DAILY_STATS_INTERVAL_MINUTES",
+    defaultIntervalMinutes: 10,
+    initialDelayMs: 20_000,
+    run: () => runGenerationDailyStatsJob(),
   },
 ];
 

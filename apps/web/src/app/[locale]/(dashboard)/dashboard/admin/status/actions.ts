@@ -3,9 +3,9 @@
 /**
  * 全局状态页的 server actions。
  *
- * 全局状态聚合很重(全表 generation jsonb 聚合 + last7d 大量 metadata),已用
- * unstable_cache 按 tag "admin-global-status" 缓存(见 page.tsx)。手动刷新即失效
- * 该 tag,使下次渲染重算最新数据。仅管理员可用。
+ * 全局状态聚合用 unstable_cache 按 tag "admin-global-status" 缓存(见 page.tsx)。
+ * 手动刷新即失效该 tag,使下次渲染同步重算最新数据(全站累计走按日汇总、窗口统计
+ * 每行只解析一次 metadata,重算为亚秒级)。仅管理员可用。
  */
 
 import { adminAction } from "@repo/shared/safe-action";

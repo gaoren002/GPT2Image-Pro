@@ -253,7 +253,9 @@ export function isContentSafetyRejection(error: string | null | undefined) {
   );
 }
 
-export function classifyGenerationError(error: string | null | undefined) {
+export function classifyGenerationError(
+  error: string | null | undefined
+): GenerationErrorCategory {
   const normalized = normalizeErrorText(error);
   if (isModerationServiceFailure(normalized)) {
     return "platform" satisfies GenerationErrorCategory;

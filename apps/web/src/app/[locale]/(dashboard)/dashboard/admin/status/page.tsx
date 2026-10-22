@@ -59,7 +59,11 @@ import {
   IMAGE_1K_BASE_EDGE,
   normalizeValidImageSize,
 } from "@/features/image-generation/resolution";
-import { classifyGenerationError } from "@/features/image-generation/sla";
+import {
+  classifyGenerationError,
+  type GenerationErrorCategory,
+} from "@/features/image-generation/sla";
+import { loadGenerationTotals } from "@/server/generation-daily-stats";
 import { GLOBAL_STATUS_CACHE_TAG } from "./cache-tag";
 import { RefreshStatusButton } from "./refresh-status-button";
 
@@ -79,17 +83,6 @@ interface GlobalStatusPageProps {
     errorCategory?: string;
   }>;
 }
-
-type GenerationMetricRow = {
-  status: "pending" | "completed" | "failed";
-  error: string | null;
-  creditsConsumed: number;
-  storageKey: string | null;
-  size: string;
-  createdAt: Date;
-  completedAt: Date | null;
-  metadata: Record<string, unknown> | null;
-};
 
 const RESOLUTION_DURATION_BUCKETS = ["4k", "2k", "1k", "custom"] as const;
 const BACKEND_DURATION_BUCKETS = ["web", "codex", "images"] as const;
@@ -122,6 +115,14 @@ type GenerationWindowStats = {
   p95Seconds: number | null;
   durationBreakdown: DurationBreakdown;
   moderationPromptRepair: ModerationPromptRepairStats;
+  /** 该窗口失败行按错误文本聚合的 Top 8(与分类计数同一次遍历)。 */
+  topErrors: TopErrorItem[];
+};
+
+type TopErrorItem = {
+  message: string;
+  count: number;
+  category: GenerationErrorCategory;
 };
 
 type ModerationPromptRepairStats = {
@@ -401,12 +402,13 @@ for (const legacySize of ["1024x1024", "1536x1024", "1024x1536"]) {
   RESOLUTION_PRESET_SIZES["1k"].add(legacySize);
 }
 
-function getModerationPromptRepairAttempts(row: {
-  metadata: Record<string, unknown> | null;
-}) {
-  const repair = asRecord(asRecord(row.metadata)?.moderationPromptRepair);
-  const attempts = Array.isArray(repair?.attempts) ? repair.attempts : [];
-  return attempts
+/**
+ * 规整 metadata.moderationPromptRepair.attempts。
+ * @param attempts - SQL 侧取出的 attempts(jsonb 数组,经驱动解析为 JS 值);非数组按空处理
+ */
+function getModerationPromptRepairAttempts(attempts: unknown) {
+  const list = Array.isArray(attempts) ? attempts : [];
+  return list
     .map((item) => asRecord(item))
     .filter((item): item is Record<string, unknown> => Boolean(item));
 }
@@ -422,13 +424,13 @@ function createModerationPromptRepairStats(): ModerationPromptRepairStats {
 
 function accumulateModerationPromptRepairStats(
   stats: ModerationPromptRepairStats,
-  row: { metadata: Record<string, unknown> | null }
+  attempts: unknown
 ) {
   const byAttempt = new Map(
     stats.byAttempt.map((item) => [item.attempt, { ...item }])
   );
 
-  for (const attempt of getModerationPromptRepairAttempts(row)) {
+  for (const attempt of getModerationPromptRepairAttempts(attempts)) {
     const attemptNumber = Math.max(
       1,
       Math.floor(numberFrom(attempt.attempt) || 1)
@@ -492,29 +494,45 @@ function emptyDurationBreakdown(): DurationBreakdown {
   };
 }
 
-// 按窗口精确统计生图 SLA。所有展示字段都按 24h / 7d 各自窗口直接用 SQL 聚合,不再依赖
-// recentGenerationRows 的 10000 行帽子——修复"高峰期 24h 行数即触顶、7d 取样塌缩成与
-// 24h 同一批最近行,导致两窗口数值完全一致"的缺陷。
+// 按窗口精确统计生图 SLA。所有展示字段都按 24h / 7d 各自窗口直接用 SQL 聚合,不依赖
+// 带帽的近期行采样(旧实现取最近 10000 行,高峰期 24h 即触顶、7d 取样塌缩成与 24h
+// 同一批行,导致两窗口数值完全一致)。
 // - 计数 / 时延(avg、P95)/ 产图 / 积分:聚合 SQL。
-// - 错误三分类:只取该窗口 failed 行的 error 文本,喂真实的 classifyGenerationError——
-//   既精确,又不把 sla-classification.ts 约 150 条模式重写进 SQL 而新增第三处分类漂移。
+// - 错误三分类与 Top 错误:只取该窗口 failed 行的 error 文本,喂真实的
+//   classifyGenerationError——既精确,又不把 sla-classification.ts 约 150 条模式重写进
+//   SQL 而新增第三处分类漂移。
 // - 耗时分布(分辨率 x 后端):分组 SQL;backend / 分辨率桶用 CASE 复刻原 JS 口径,
 //   预设尺寸用 RESOLUTION_PRESET_SIZES 作数组参数下推(单一真相源,零漂移)。
-// - 审核修剪重试:只取该窗口含 attempts 的少量行,复用现有 JS 累加(零漂移)。
+// - 审核修剪重试:只回传该窗口含 attempts 的少量行的 attempts 数组,复用 JS 累加(零漂移)。
+//
+// 性能(WHY 子查询 + offset 0):generation.metadata 是 json(文本)列,每个 ::jsonb 都要
+// TOAST 解压并整段解析。展开写法里同一行在 CASE / WHERE 中被引用十余次就解析十余次;
+// 这里读 metadata 的查询都先在带 offset 0 屏障的子查询里每行只转换一次(屏障阻止
+// PostgreSQL 把子查询上拉展开后重复求值),外层只引用已算好的列。生产 7d 窗口实测:
+// 耗时分布 5.2s -> 0.48s、聚合 0.81s -> 0.43s,结果以 EXCEPT 对照逐行一致。审核重试再
+// 加 json 文本预过滤:键名在 JSON 文本中必以原文 "moderationPromptRepair" 出现,不漏行。
 async function loadGenerationWindowStats(
   windowStart: Date
 ): Promise<GenerationWindowStats> {
-  const metaJson = sql`${generation.metadata}::jsonb`;
+  const inWindow = gte(generation.createdAt, windowStart);
   // 完成耗时(秒):clamp 非负 + round,对齐 JS 侧 Math.max(0, Math.round(...))。
   const durationExpr = sql`round(greatest(0, extract(epoch from (${generation.completedAt} - ${generation.createdAt}))))`;
-  const completedDurationFilter = sql`filter (where ${generation.status} = 'completed' and ${generation.completedAt} is not null)`;
-  // 后端桶:取 accountBackend ??
-  // imagesUpstreamMode ?? apiInterfaceMode 映射 web / responses->codex / images。
-  const backendBucketExpr = sql`(case coalesce(${metaJson} #>> '{backend,accountBackend}', ${metaJson} #>> '{backend,imagesUpstreamMode}', ${metaJson} #>> '{backend,apiInterfaceMode}') when 'web' then 'web' when 'responses' then 'codex' when 'images' then 'images' else null end)`;
-  // 请求尺寸:requestedSize -> actualSize -> size 列,统一 lower(trim())。
-  const sizeValueExpr = sql`lower(btrim(coalesce(nullif(${metaJson} #>> '{outputImage,requestedSize}', ''), nullif(${metaJson} #>> '{outputImage,actualSize}', ''), ${generation.size})))`;
+
+  // 聚合源(别名 g):产图数字段只对 completed 行取一次。
+  const aggregateSource = sql`(select ${generation.status} as status, ${generation.storageKey} as storage_key, ${generation.creditsConsumed} as credits_consumed, ${generation.completedAt} as completed_at, ${durationExpr} as duration, case when ${generation.status} = 'completed' then ${generation.metadata}::jsonb #> '{outputImage,billableImageOutputCount}' end as bic from ${generation} where ${inWindow} offset 0) as g`;
+  const completedDurationFilter = sql`filter (where g.status = 'completed' and g.completed_at is not null)`;
+
+  // 耗时分布源(别名 b):completed 行每行只转换一次 jsonb(内层 m),再算:
+  // 后端桶 = accountBackend ?? imagesUpstreamMode ?? apiInterfaceMode 映射
+  // web / responses->codex / images;请求尺寸 = requestedSize -> actualSize -> size 列,
+  // 统一 lower(trim())。
+  const breakdownSource = sql`(select (case coalesce(m.meta #>> '{backend,accountBackend}', m.meta #>> '{backend,imagesUpstreamMode}', m.meta #>> '{backend,apiInterfaceMode}') when 'web' then 'web' when 'responses' then 'codex' when 'images' then 'images' else null end) as backend_bucket, lower(btrim(coalesce(nullif(m.meta #>> '{outputImage,requestedSize}', ''), nullif(m.meta #>> '{outputImage,actualSize}', ''), m.size))) as size_value, m.duration from (select ${generation.metadata}::jsonb as meta, ${generation.size} as size, ${durationExpr} as duration from ${generation} where ${inWindow} and ${generation.status} = 'completed' and ${generation.completedAt} is not null offset 0) as m) as b`;
   // 分辨率桶:web 统一 1k;空 / auto -> custom;否则匹配预设集,余 custom。
-  const resolutionBucketExpr = sql`(case when ${backendBucketExpr} = 'web' then '1k' when ${sizeValueExpr} = '' or ${sizeValueExpr} = ${AUTO_IMAGE_SIZE} then 'custom' when ${inArray(sizeValueExpr, [...RESOLUTION_PRESET_SIZES["4k"]])} then '4k' when ${inArray(sizeValueExpr, [...RESOLUTION_PRESET_SIZES["2k"]])} then '2k' when ${inArray(sizeValueExpr, [...RESOLUTION_PRESET_SIZES["1k"]])} then '1k' else 'custom' end)`;
+  const sizeValue = sql`b.size_value`;
+  const resolutionBucketExpr = sql`(case when b.backend_bucket = 'web' then '1k' when ${sizeValue} = '' or ${sizeValue} = ${AUTO_IMAGE_SIZE} then 'custom' when ${inArray(sizeValue, [...RESOLUTION_PRESET_SIZES["4k"]])} then '4k' when ${inArray(sizeValue, [...RESOLUTION_PRESET_SIZES["2k"]])} then '2k' when ${inArray(sizeValue, [...RESOLUTION_PRESET_SIZES["1k"]])} then '1k' else 'custom' end)`;
+
+  // 审核修剪重试源(别名 r):json 文本预过滤命中后才转 jsonb 取 attempts。
+  const repairSource = sql`(select ${generation.metadata}::jsonb #> '{moderationPromptRepair,attempts}' as attempts from ${generation} where ${inWindow} and ${generation.metadata}::text like '%"moderationPromptRepair"%' offset 0) as r`;
 
   const [aggregateRows, failedRows, durationBreakdownRows, repairRows] =
     await Promise.all([
@@ -522,86 +540,71 @@ async function loadGenerationWindowStats(
         .select({
           total: count(),
           completed:
-            sql<number>`sum(case when ${generation.status} = 'completed' then 1 else 0 end)`.mapWith(
+            sql<number>`coalesce(sum(case when g.status = 'completed' then 1 else 0 end), 0)`.mapWith(
               Number
             ),
           failed:
-            sql<number>`sum(case when ${generation.status} = 'failed' then 1 else 0 end)`.mapWith(
+            sql<number>`coalesce(sum(case when g.status = 'failed' then 1 else 0 end), 0)`.mapWith(
               Number
             ),
           pending:
-            sql<number>`sum(case when ${generation.status} = 'pending' then 1 else 0 end)`.mapWith(
+            sql<number>`coalesce(sum(case when g.status = 'pending' then 1 else 0 end), 0)`.mapWith(
               Number
             ),
-          // 与全站 generationTotals.completedImages 同口径:优先 billableImageOutputCount,
+          // 与全站累计 completedImages 同口径:优先 billableImageOutputCount,
           // 缺失时回退 storageKey 是否存在。
           producedImages:
-            sql<number>`coalesce(sum(case when ${generation.status} = 'completed' then case when jsonb_typeof(${metaJson} #> '{outputImage,billableImageOutputCount}') = 'number' then (${metaJson} #>> '{outputImage,billableImageOutputCount}')::int when ${generation.storageKey} is not null then 1 else 0 end else 0 end), 0)`.mapWith(
+            sql<number>`coalesce(sum(case when g.status = 'completed' then case when jsonb_typeof(g.bic) = 'number' then (g.bic #>> '{}')::int when g.storage_key is not null then 1 else 0 end else 0 end), 0)`.mapWith(
               Number
             ),
           creditsConsumed:
-            sql<number>`coalesce(sum(${generation.creditsConsumed}), 0)`.mapWith(
-              Number
-            ),
+            sql<number>`coalesce(sum(g.credits_consumed), 0)`.mapWith(Number),
           avgSeconds: sql<
             string | null
-          >`avg(${durationExpr}) ${completedDurationFilter}`,
+          >`avg(g.duration) ${completedDurationFilter}`,
           p95Seconds: sql<
             string | null
-          >`percentile_disc(0.95) within group (order by ${durationExpr}) ${completedDurationFilter}`,
+          >`percentile_disc(0.95) within group (order by g.duration) ${completedDurationFilter}`,
         })
-        .from(generation)
-        .where(gte(generation.createdAt, windowStart)),
+        .from(aggregateSource),
       db
         .select({ error: generation.error })
         .from(generation)
-        .where(
-          and(
-            gte(generation.createdAt, windowStart),
-            eq(generation.status, "failed")
-          )
-        ),
+        .where(and(inWindow, eq(generation.status, "failed"))),
       db
         .select({
           resolutionBucket: sql<string>`${resolutionBucketExpr}`,
-          backendBucket: sql<string>`${backendBucketExpr}`,
+          backendBucket: sql<string>`b.backend_bucket`,
           count: count(),
-          avgSeconds: sql<string | null>`avg(${durationExpr})`,
+          avgSeconds: sql<string | null>`avg(b.duration)`,
           p95Seconds: sql<
             string | null
-          >`percentile_disc(0.95) within group (order by ${durationExpr})`,
+          >`percentile_disc(0.95) within group (order by b.duration)`,
         })
-        .from(generation)
-        .where(
-          and(
-            gte(generation.createdAt, windowStart),
-            eq(generation.status, "completed"),
-            sql`${generation.completedAt} is not null`,
-            sql`${backendBucketExpr} is not null`
-          )
-        )
+        .from(breakdownSource)
+        .where(sql`b.backend_bucket is not null`)
         // 按 select 第 1、2 列(分辨率桶、后端桶)分组。
         .groupBy(sql`1`, sql`2`),
       db
-        .select({ metadata: generation.metadata })
-        .from(generation)
+        .select({ attempts: sql<unknown>`r.attempts` })
+        .from(repairSource)
         .where(
-          and(
-            gte(generation.createdAt, windowStart),
-            sql`jsonb_typeof(${metaJson} #> '{moderationPromptRepair,attempts}') = 'array'`,
-            sql`jsonb_array_length(${metaJson} #> '{moderationPromptRepair,attempts}') > 0`
-          )
+          sql`jsonb_typeof(r.attempts) = 'array' and jsonb_array_length(r.attempts) > 0`
         ),
     ]);
 
   const aggregate = aggregateRows[0];
 
-  // 失败行用真实分类器分桶,口径与历史错误列表、后端调度完全一致,零额外漂移。
+  // 失败行用真实分类器分桶(每行只分类一次,分类计数与 Top 错误共用),口径与历史
+  // 错误列表、后端调度完全一致,零额外漂移。
   let platformErrors = 0;
   let moderationErrors = 0;
   let userRequestErrors = 0;
-  for (const row of failedRows) {
-    const category = classifyGenerationError(row.error);
+  const classifiedFailures = failedRows.map((row) => ({
+    error: row.error,
+    category: classifyGenerationError(row.error),
+  }));
+  for (const { category } of classifiedFailures) {
     if (category === "moderation") {
       moderationErrors += 1;
     } else if (category === "user_request") {
@@ -630,7 +633,7 @@ async function loadGenerationWindowStats(
   // 审核修剪重试:复用既有 JS 累加,口径零漂移(行集很小)。
   const moderationPromptRepair = createModerationPromptRepairStats();
   for (const row of repairRows) {
-    accumulateModerationPromptRepairStats(moderationPromptRepair, row);
+    accumulateModerationPromptRepairStats(moderationPromptRepair, row.attempts);
   }
 
   const completed = aggregate?.completed ?? 0;
@@ -659,24 +662,31 @@ async function loadGenerationWindowStats(
     p95Seconds,
     durationBreakdown,
     moderationPromptRepair,
+    topErrors: topErrors(classifiedFailures),
   };
 }
 
-function topErrors(rows: GenerationMetricRow[]) {
+/**
+ * 按错误文本(折叠空白、截断 140 字)聚合失败行,取次数最多的 8 条。
+ * @param failures - 已分类的失败行(调用方只分类一次,与分类计数共用)
+ */
+function topErrors(
+  failures: Array<{ error: string | null; category: GenerationErrorCategory }>
+): TopErrorItem[] {
   const errorCounts = new Map<
     string,
-    { count: number; category: "platform" | "moderation" | "user_request" }
+    { count: number; category: GenerationErrorCategory }
   >();
 
-  for (const row of rows) {
-    if (row.status !== "failed") continue;
-    const message = (row.error || "Unknown error").replace(/\s+/g, " ").trim();
+  for (const failure of failures) {
+    const message = (failure.error || "Unknown error")
+      .replace(/\s+/g, " ")
+      .trim();
     const key = message.length > 140 ? `${message.slice(0, 137)}...` : message;
-    const category = classifyGenerationError(row.error);
     const current = errorCounts.get(key);
     errorCounts.set(key, {
       count: (current?.count ?? 0) + 1,
-      category,
+      category: failure.category,
     });
   }
 
@@ -1476,8 +1486,8 @@ async function loadStatusData() {
   const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const last7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
+  // 全部查询互不依赖,一次并发发出(原先窗口统计要等首批查询结束才开始)。
   const [
-    recentGenerationRows,
     generationTotals,
     creditBalanceRows,
     creditLedger24h,
@@ -1489,47 +1499,11 @@ async function loadStatusData() {
     apiRows,
     schedulerRows24h,
     schedulerRows7d,
+    stats24h,
+    stats7d,
   ] = await Promise.all([
-    db
-      .select({
-        status: generation.status,
-        error: generation.error,
-        creditsConsumed: generation.creditsConsumed,
-        storageKey: generation.storageKey,
-        size: generation.size,
-        createdAt: generation.createdAt,
-        completedAt: generation.completedAt,
-        metadata: generation.metadata,
-      })
-      .from(generation)
-      .where(gte(generation.createdAt, last7d))
-      .orderBy(desc(generation.createdAt))
-      .limit(10000),
-    db
-      .select({
-        total: count(),
-        completed:
-          sql<number>`sum(case when ${generation.status} = 'completed' then 1 else 0 end)`.mapWith(
-            Number
-          ),
-        failed:
-          sql<number>`sum(case when ${generation.status} = 'failed' then 1 else 0 end)`.mapWith(
-            Number
-          ),
-        pending:
-          sql<number>`sum(case when ${generation.status} = 'pending' then 1 else 0 end)`.mapWith(
-            Number
-          ),
-        completedImages:
-          sql<number>`coalesce(sum(case when ${generation.status} = 'completed' then case when jsonb_typeof(${generation.metadata}::jsonb #> '{outputImage,billableImageOutputCount}') = 'number' then (${generation.metadata}::jsonb #>> '{outputImage,billableImageOutputCount}')::int when ${generation.storageKey} is not null then 1 else 0 end else 0 end), 0)`.mapWith(
-            Number
-          ),
-        creditsConsumed:
-          sql<number>`coalesce(sum(${generation.creditsConsumed}), 0)`.mapWith(
-            Number
-          ),
-      })
-      .from(generation),
+    // 全站累计:按日汇总前缀 + 实时尾巴(原为全表聚合,冷缓存时 27-31 秒)。
+    loadGenerationTotals(now),
     db
       .select({
         totalBalance:
@@ -1746,15 +1720,6 @@ async function loadStatusData() {
       .from(imageBackendSchedulerMetric)
       .where(gte(imageBackendSchedulerMetric.bucketStartedAt, last7d))
       .groupBy(imageBackendSchedulerMetric.selectedLayer),
-  ]);
-
-  // recentGenerationRows(带帽 10000 行)现仅用于 topErrors 列表与 rowsTruncated 旗标;
-  // SLA 全部展示字段已由 loadGenerationWindowStats 按窗口用聚合 SQL 精确算,不受帽子限制。
-  const sample7d = recentGenerationRows satisfies GenerationMetricRow[];
-  const sample24h = sample7d.filter((row) => row.createdAt >= last24h);
-  // 仅表示 topErrors 样本触顶,SLA 各窗口数值已不受其影响。
-  const rowsTruncated = sample7d.length >= 10000;
-  const [stats24h, stats7d] = await Promise.all([
     loadGenerationWindowStats(last24h),
     loadGenerationWindowStats(last7d),
   ]);
@@ -1765,17 +1730,9 @@ async function loadStatusData() {
     now: now.toISOString(),
     stats24h,
     stats7d,
-    // 当 last7d 行数触达 limit(10000) 时为 true,表示统计为近似值
-    rowsTruncated,
-    topErrors24h: topErrors(sample24h),
-    generationTotals: generationTotals[0] ?? {
-      total: 0,
-      completed: 0,
-      failed: 0,
-      pending: 0,
-      completedImages: 0,
-      creditsConsumed: 0,
-    },
+    // 精确值:来自 24h 窗口的全部失败行(旧实现取自带帽 10000 行采样)。
+    topErrors24h: stats24h.topErrors,
+    generationTotals,
     credits: {
       balance: creditBalanceRows[0] ?? {
         totalBalance: 0,
@@ -1823,11 +1780,11 @@ async function loadStatusData() {
   };
 }
 
-// 全局状态聚合较重(全表 generation 聚合含逐行 jsonb 解析);last7d 查询已加
-// .limit(10000) 防止无限内存增长,高峰期统计为近似值(rowsTruncated=true)。
-// 对所有 admin 相同、不依赖 searchParams、只需准实时。
-// 用 unstable_cache 缓存其结果(小聚合对象),120s 内重复打开秒开,后台按需重算。
-// 页面仍 force-dynamic(逐请求渲染),数据缓存与整页缓存相互独立。
+// 全局状态聚合对所有 admin 相同、不依赖 searchParams、只需准实时。用 unstable_cache
+// 缓存其结果(小聚合对象):120s 内命中直出;过期后先返回旧值并在后台重算;只有缓存
+// 缺失(部署 / 重启后首访、手动刷新的 updateTag)才在请求内同步计算——冷路径因此必须
+// 快:全站累计走按日汇总、窗口统计每行只解析一次 metadata,生产实测由约 31 秒降至
+// 亚秒级。页面仍 force-dynamic(逐请求渲染),数据缓存与整页缓存相互独立。
 const getCachedStatusData = unstable_cache(
   loadStatusData,
   ["admin-global-status"],

@@ -1,20 +1,44 @@
 "use client";
 
+import { getMyUnreadAnnouncementCountAction } from "@repo/shared/announcements/actions";
+import { signOut } from "@repo/shared/auth/client";
+import { isAdminRole, isObserverAdminRole } from "@repo/shared/auth/roles";
+import { ModeToggle } from "@repo/shared/components";
+import { dashboardConfig } from "@repo/shared/config";
+import { CreditBalanceBadge } from "@repo/shared/credits/components";
+import { getMyPlanAction } from "@repo/shared/subscription/actions/get-user-plan";
+import {
+  PlanBadge,
+  type PlanType,
+} from "@repo/shared/subscription/components/plan-badge";
+import { getMyUnreadTicketCountAction } from "@repo/shared/support/actions/ticket";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@repo/ui/components/avatar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@repo/ui/components/popover";
+import { Separator } from "@repo/ui/components/separator";
+import { Sheet, SheetContent, SheetTitle } from "@repo/ui/components/sheet";
+import { cn } from "@repo/ui/utils";
 import {
   Activity,
   ChevronsUpDown,
   LogOut,
   Megaphone,
   Server,
-  Shield,
   Settings,
+  Shield,
   Users,
 } from "lucide-react";
 import Image from "next/image";
 import Link, { useLinkStatus } from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useLocale } from "next-intl";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useAction } from "next-safe-action/hooks";
 import {
   type MouseEvent,
@@ -23,36 +47,11 @@ import {
   useRef,
   useState,
 } from "react";
-
-import { Avatar, AvatarFallback, AvatarImage } from "@repo/ui/components/avatar";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@repo/ui/components/popover";
-import { Separator } from "@repo/ui/components/separator";
-import { Sheet, SheetContent, SheetTitle } from "@repo/ui/components/sheet";
-import { dashboardConfig } from "@repo/shared/config";
-import { CreditBalanceBadge } from "@repo/shared/credits/components";
-import {
-  isAdminRole,
-  isObserverAdminRole,
-} from "@repo/shared/auth/roles";
-import { useSidebar } from "@/features/dashboard/context";
-import { ModeToggle } from "@repo/shared/components";
-import { getMyUnreadAnnouncementCountAction } from "@repo/shared/announcements/actions";
-import { getMyPlanAction } from "@repo/shared/subscription/actions/get-user-plan";
-import { getMyUnreadTicketCountAction } from "@repo/shared/support/actions/ticket";
-import {
-  PlanBadge,
-  type PlanType,
-} from "@repo/shared/subscription/components/plan-badge";
-import { signOut } from "@repo/shared/auth/client";
-import { cn } from "@repo/ui/utils";
-import {
-  useCurrentSession,
   type CurrentSession,
+  useCurrentSession,
 } from "@/features/auth/hooks/use-current-session";
+import { useSidebar } from "@/features/dashboard/context";
 
 /**
  * Dashboard 侧边栏组件
@@ -65,8 +64,21 @@ import {
  * - 登出功能
  * - 支持折叠/展开
  */
+export type SidebarPrefetch = {
+  /** 积分余额(SSR 直出,徽章零等待)。 */
+  balance: number;
+  /** 套餐标识(PlanBadge 直出)。 */
+  plan: PlanType;
+  /** 未读工单数(初始值,仍支持 action 刷新)。 */
+  unreadTickets: number;
+  /** 未读公告数(初始值,仍支持 action 刷新)。 */
+  unreadAnnouncements: number;
+};
+
 type DashboardSidebarProps = {
   initialSession?: CurrentSession;
+  /** 服务端预取的侧边栏数据;缺省时回退客户端 action(兼容旧调用方)。 */
+  prefetch?: SidebarPrefetch | null;
 };
 
 function SidebarNavigationStatus({
@@ -86,7 +98,10 @@ function SidebarNavigationStatus({
   return null;
 }
 
-export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
+export function DashboardSidebar({
+  initialSession,
+  prefetch,
+}: DashboardSidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const locale = useLocale();
@@ -118,39 +133,42 @@ export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
     []
   );
 
-  // 获取用户订阅计划
+  // 获取用户订阅计划:预取值直出,action 仅在无预取时兜底
   const { execute: fetchPlan, result: planResult } = useAction(getMyPlanAction);
-  const userPlan = (planResult.data?.plan as PlanType) || "free";
-  const {
-    execute: fetchUnreadTickets,
-    result: unreadTicketsResult,
-  } = useAction(getMyUnreadTicketCountAction);
+  const userPlan =
+    prefetch?.plan ?? ((planResult.data?.plan as PlanType) || "free");
+  const { execute: fetchUnreadTickets, result: unreadTicketsResult } =
+    useAction(getMyUnreadTicketCountAction);
   const {
     execute: fetchUnreadAnnouncements,
     result: unreadAnnouncementsResult,
   } = useAction(getMyUnreadAnnouncementCountAction);
   const unreadTicketCount = Math.max(
     0,
-    Number(unreadTicketsResult.data?.count ?? 0)
+    Number(unreadTicketsResult.data?.count ?? prefetch?.unreadTickets ?? 0)
   );
   const unreadAnnouncementCount = Math.max(
     0,
-    Number(unreadAnnouncementsResult.data?.count ?? 0)
+    Number(
+      unreadAnnouncementsResult.data?.count ??
+        prefetch?.unreadAnnouncements ??
+        0
+    )
   );
 
-  // 用户登录后获取计划
+  // 用户登录后获取计划(有预取值时跳过:省一次 action RTT)
   useEffect(() => {
-    if (user) {
+    if (user && !prefetch?.plan) {
       fetchPlan();
     }
-  }, [user, fetchPlan]);
+  }, [user, prefetch?.plan, fetchPlan]);
 
   useEffect(() => {
-    if (user) {
+    if (user && !prefetch) {
       fetchUnreadTickets();
       fetchUnreadAnnouncements();
     }
-  }, [user, pathname, fetchUnreadTickets, fetchUnreadAnnouncements]);
+  }, [user, pathname, prefetch, fetchUnreadTickets, fetchUnreadAnnouncements]);
 
   /**
    * 导航项标题映射到翻译键
@@ -351,8 +369,7 @@ export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
                   const Icon = item.icon;
                   const translatedTitle = getNavTitle(item.title);
                   const showSupportUnread =
-                    item.href === "/dashboard/support" &&
-                    unreadTicketCount > 0;
+                    item.href === "/dashboard/support" && unreadTicketCount > 0;
                   const unreadCount =
                     item.href === "/dashboard/announcements"
                       ? unreadAnnouncementCount
@@ -455,7 +472,10 @@ export function DashboardSidebar({ initialSession }: DashboardSidebarProps) {
                             {user.name}
                           </p>
                           <span className="shrink-0">
-                            <CreditBalanceBadge key={user.id} />
+                            <CreditBalanceBadge
+                              key={user.id}
+                              initialBalance={prefetch?.balance}
+                            />
                           </span>
                         </div>
                         <p className="truncate text-xs text-muted-foreground">

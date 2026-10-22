@@ -1,8 +1,5 @@
 "use server";
 
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { revalidatePath } from "next/cache";
-
 import { db } from "@repo/database";
 import {
   ticket,
@@ -10,27 +7,31 @@ import {
   ticketMessage,
   user,
 } from "@repo/database/schema";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
 import { getUserRoleById } from "../../auth/role-server";
 import { isAdminRole } from "../../auth/roles";
+import { adminAction, protectedAction } from "../../safe-action";
 import { sendTicketAdminNotification } from "../notifications";
 import {
   addTicketMessageSchema,
   createTicketSchema,
   updateTicketStatusSchema,
 } from "../schemas";
-import { adminAction, protectedAction } from "../../safe-action";
 
 const withTicketAction = (name: string) =>
   protectedAction.metadata({ action: `support.${name}` });
 const withAdminTicketAction = (name: string) =>
   adminAction.metadata({ action: `support.admin.${name}` });
 
-const unreadTicketSql = sql<boolean>`${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt}`.mapWith(
-  Boolean
-);
-const unreadTicketCountSql = sql<number>`count(*) filter (where ${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt})`.mapWith(
-  Number
-);
+const unreadTicketSql =
+  sql<boolean>`${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt}`.mapWith(
+    Boolean
+  );
+const unreadTicketCountSql =
+  sql<number>`count(*) filter (where ${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt})`.mapWith(
+    Number
+  );
 const adminUnreadTicketSql =
   sql<boolean>`${ticket.lastUserActivityAt} is not null and (${ticket.adminLastSeenAt} is null or ${ticket.lastUserActivityAt} > ${ticket.adminLastSeenAt})`.mapWith(
     Boolean
@@ -226,20 +227,20 @@ export const getTicketDetailAction = withTicketAction("getTicketDetail")
     // 获取消息列表
     const [messages, attachments] = await Promise.all([
       db
-      .select({
-        id: ticketMessage.id,
-        content: ticketMessage.content,
-        isAdminResponse: ticketMessage.isAdminResponse,
-        createdAt: ticketMessage.createdAt,
-        user: {
-          id: user.id,
-          name: user.name,
-          image: user.image,
-        },
-      })
-      .from(ticketMessage)
-      .leftJoin(user, eq(ticketMessage.userId, user.id))
-      .where(eq(ticketMessage.ticketId, ticketId))
+        .select({
+          id: ticketMessage.id,
+          content: ticketMessage.content,
+          isAdminResponse: ticketMessage.isAdminResponse,
+          createdAt: ticketMessage.createdAt,
+          user: {
+            id: user.id,
+            name: user.name,
+            image: user.image,
+          },
+        })
+        .from(ticketMessage)
+        .leftJoin(user, eq(ticketMessage.userId, user.id))
+        .where(eq(ticketMessage.ticketId, ticketId))
         .orderBy(ticketMessage.createdAt),
       getTicketAttachments(ticketId),
     ]);
@@ -382,10 +383,12 @@ export const getAdminUnreadTicketCountAction = withAdminTicketAction(
 /**
  * 获取当前用户未读工单动态数量
  */
-export const getMyUnreadTicketCountAction = withTicketAction(
-  "getMyUnreadTicketCount"
-).action(async ({ ctx }) => {
-  const role = await getUserRoleById(ctx.userId);
+/**
+ * 未读工单数(服务端直调,供 dashboard layout 预取;action 层薄封装)。
+ * 管理员看全站未读,普通用户看本人未读。
+ */
+export async function countUnreadTicketsForUser(userId: string) {
+  const role = await getUserRoleById(userId);
   if (isAdminRole(role)) {
     const rows = await db
       .select({
@@ -393,7 +396,7 @@ export const getMyUnreadTicketCountAction = withTicketAction(
       })
       .from(ticket);
 
-    return { count: rows[0]?.count ?? 0 };
+    return rows[0]?.count ?? 0;
   }
 
   const rows = await db
@@ -401,10 +404,16 @@ export const getMyUnreadTicketCountAction = withTicketAction(
       count: unreadTicketCountSql,
     })
     .from(ticket)
-    .where(eq(ticket.userId, ctx.userId));
+    .where(eq(ticket.userId, userId));
 
-  return { count: rows[0]?.count ?? 0 };
-});
+  return rows[0]?.count ?? 0;
+}
+
+export const getMyUnreadTicketCountAction = withTicketAction(
+  "getMyUnreadTicketCount"
+).action(async ({ ctx }) => ({
+  count: await countUnreadTicketsForUser(ctx.userId),
+}));
 
 /**
  * 获取工单详情 (管理员)
@@ -446,20 +455,20 @@ export const getAdminTicketDetailAction = withAdminTicketAction(
     // 获取消息列表
     const [messages, attachments] = await Promise.all([
       db
-      .select({
-        id: ticketMessage.id,
-        content: ticketMessage.content,
-        isAdminResponse: ticketMessage.isAdminResponse,
-        createdAt: ticketMessage.createdAt,
-        user: {
-          id: user.id,
-          name: user.name,
-          image: user.image,
-        },
-      })
-      .from(ticketMessage)
-      .leftJoin(user, eq(ticketMessage.userId, user.id))
-      .where(eq(ticketMessage.ticketId, ticketId))
+        .select({
+          id: ticketMessage.id,
+          content: ticketMessage.content,
+          isAdminResponse: ticketMessage.isAdminResponse,
+          createdAt: ticketMessage.createdAt,
+          user: {
+            id: user.id,
+            name: user.name,
+            image: user.image,
+          },
+        })
+        .from(ticketMessage)
+        .leftJoin(user, eq(ticketMessage.userId, user.id))
+        .where(eq(ticketMessage.ticketId, ticketId))
         .orderBy(ticketMessage.createdAt),
       getTicketAttachments(ticketId),
     ]);

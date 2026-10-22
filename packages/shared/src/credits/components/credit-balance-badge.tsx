@@ -6,11 +6,10 @@
  * 显示在侧边栏中，展示用户当前可用积分
  */
 
+import { Badge } from "@repo/ui/components/badge";
 import { Coins } from "lucide-react";
 import { useAction } from "next-safe-action/hooks";
 import { useEffect } from "react";
-
-import { Badge } from "@repo/ui/components/badge";
 import { getMyCreditsBalance } from "../actions";
 import { formatCredits } from "../format";
 
@@ -22,18 +21,25 @@ import { formatCredits } from "../format";
  * - 显示为闪电图标 + 数字格式
  * - 支持 Tooltip 显示详情
  */
-export function CreditBalanceBadge() {
+export function CreditBalanceBadge({
+  initialBalance,
+}: {
+  /** SSR 预取余额:有值时直出数字,不再挂载即拉(侧边栏零等待)。 */
+  initialBalance?: number;
+}) {
   const { execute, result, isPending } = useAction(getMyCreditsBalance);
 
-  // 组件挂载时获取余额
+  // 有 SSR 预取值时跳过挂载拉取;无值(旧调用方/余额变更后显式刷新)才请求。
   useEffect(() => {
-    execute();
-  }, [execute]);
+    if (initialBalance === undefined) {
+      execute();
+    }
+  }, [execute, initialBalance]);
 
-  const balance = result.data?.balance ?? 0;
+  const balance = result.data?.balance ?? initialBalance ?? 0;
 
-  // 加载状态
-  if (isPending) {
+  // 加载状态(仅无预取值的调用方会经历)
+  if (isPending && initialBalance === undefined) {
     return (
       <Badge variant="secondary" className="gap-1 px-2 py-1">
         <Coins className="h-3 w-3" />

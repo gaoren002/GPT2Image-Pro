@@ -6,50 +6,45 @@
  * 提供积分系统的前端调用接口
  */
 
-import { z } from "zod";
-
-import { and, eq, inArray } from "drizzle-orm";
-
 import { db } from "@repo/database";
 import { creditsTransaction, externalApiKey } from "@repo/database/schema";
+import { and, eq, inArray } from "drizzle-orm";
+import { z } from "zod";
 import { getBaseUrl } from "../config/payment";
 import {
   isPlanAtLeast,
   type SubscriptionPlan,
 } from "../config/subscription-plan";
+import { logEvent } from "../logger/index";
 import { creem } from "../payment/creem";
 import {
   createRuntimeEpayPurchase,
   isRuntimeEpayPaymentProvider,
   saveEpayOrder,
 } from "../payment/epay";
-import { logEvent } from "../logger/index";
 import { protectedAction } from "../safe-action";
 import { getUserPlanType } from "../subscription/services/user-plan";
 import { getRuntimeSettingNumber } from "../system-settings";
 
-import {
-  CREDIT_CONFIG_DEFAULTS,
-  isCreditPackageVisible,
-} from "./config";
-import {
-  getRuntimeCreditPackageById,
-  getRuntimeCreditPackages,
-  getCreditPackageCreemProductIdForPlan,
-  getCreditPackagePriceForPlan,
-} from "./packages";
+import { CREDIT_CONFIG_DEFAULTS, isCreditPackageVisible } from "./config";
 import {
   AccountFrozenError,
   consumeCredits,
-  ensureRegistrationBonus,
   ensureRegistrationBonusExpiry,
   getCreditsBalance,
+  getSidebarCreditsBalance,
   getUserActiveBatches,
   getUserTransactions,
   getUserTransactionsCount,
   grantCredits,
   InsufficientCreditsError,
 } from "./core";
+import {
+  getCreditPackageCreemProductIdForPlan,
+  getCreditPackagePriceForPlan,
+  getRuntimeCreditPackageById,
+  getRuntimeCreditPackages,
+} from "./packages";
 
 const withProtectedCreditsAction = (name: string) =>
   protectedAction.metadata({ action: `credits.${name}` });
@@ -160,14 +155,8 @@ export const getMyCreditsBalance = withProtectedCreditsAction(
 ).action(async ({ ctx }) => {
   const { userId } = ctx;
 
-  // 懒加载: 确保新用户获得注册奖励
-  await ensureRegistrationBonus(
-    userId,
-    await getRuntimeRegistrationBonusCredits()
-  );
-
-  // 获取余额
-  const balance = await getCreditsBalance(userId);
+  // 注册奖励兜底 + 余额(与 dashboard SSR 预取共用同一语义)
+  const balance = await getSidebarCreditsBalance(userId);
 
   return {
     balance: balance.balance,

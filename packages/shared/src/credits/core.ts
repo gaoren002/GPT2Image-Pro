@@ -246,6 +246,23 @@ export async function getCreditsBalance(userId: string) {
 }
 
 /**
+ * 侧边栏余额(注册奖励懒发兜底 + 过期批处理 + 余额快照)。
+ * dashboard layout SSR 预取与 getMyCreditsBalance action 共用同一语义,
+ * 新用户首进(SRR 直出)与 action 路径拿到的余额一致。
+ */
+export async function getSidebarCreditsBalance(userId: string) {
+  await ensureRegistrationBonus(
+    userId,
+    await getRuntimeSettingNumber(
+      "REGISTRATION_BONUS_CREDITS",
+      CREDIT_CONFIG_DEFAULTS.registrationBonusCredits,
+      { positive: true }
+    )
+  );
+  return await getCreditsBalance(userId);
+}
+
+/**
  * 确保用户获得注册奖励
  *
  * 懒加载机制：

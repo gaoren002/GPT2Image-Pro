@@ -1909,6 +1909,23 @@ export function CreatePageClient({
   // tab 切换的低优先级调度(见 Tabs onValueChange):isModePending 供后续
   // 按需展示切换指示,当前仅用于消除阻塞。
   const [, startModeTransition] = useTransition();
+  // 面板懒挂载:记录访问过的 tab,未访问过的面板不渲染(hidden 方案下
+  // 四面板首帧全量建 DOM 是入口成本大头;首次切到才挂载,此后保持挂载
+  // 走 hidden 切换以保留状态)。字符串 key 序列化,store 里可直接存。
+  const [visitedModes, setVisitedModes] = useCreateRuntimeState<string>(
+    "visitedModes",
+    () => "text"
+  );
+  const markModeVisited = useCallback(
+    (mode: ActiveMode) => {
+      setVisitedModes((prev) =>
+        prev.split(",").includes(mode) ? prev : `${prev},${mode}`
+      );
+    },
+    [setVisitedModes]
+  );
+  const isModeMounted = (mode: ActiveMode) =>
+    mode === activeMode || visitedModes.split(",").includes(mode);
   // 三个高频提示词输入已下沉到 PromptTextareaField(独立订阅,击键只重渲
   // 小组件)。父组件改用非订阅访问器:getXxx() 在事件处理器里读最新值,
   // setXxx 各调用点(发送后清空、mention 插入等)签名不变。render 路径
@@ -2898,9 +2915,16 @@ export function CreatePageClient({
             ? waterfallAllowed
             : true;
     if (storedModeAllowed) {
+      markModeVisited(stored);
       setActiveMode(stored);
     }
-  }, [chatAllowed, effectiveAgentAllowed, waterfallAllowed, setActiveMode]);
+  }, [
+    chatAllowed,
+    effectiveAgentAllowed,
+    markModeVisited,
+    setActiveMode,
+    waterfallAllowed,
+  ]);
   const currentModeMixWebFirstActive =
     activeMode === "image"
       ? editMixWebFirstActive
@@ -8318,6 +8342,7 @@ export function CreatePageClient({
           }
           // 切 tab 是非紧急更新:包 startTransition 让 React 以低优先级调度
           // 全树重渲染,期间保持输入响应(点击立即反馈,面板切换稍后完成)。
+          markModeVisited(value as ActiveMode);
           startModeTransition(() => {
             setActiveMode(value as ActiveMode);
           });
@@ -8388,13 +8413,17 @@ export function CreatePageClient({
           </TabsTrigger>
         </TabsList>
 
-        {textPanelElement}
+        {isModeMounted("text") && textPanelElement}
 
-        {imagePanelElement}
+        {isModeMounted("image") && imagePanelElement}
 
-        {chatPanelElement}
+        {isModeMounted("chat") ||
+        isModeMounted("agent") ||
+        isModeMounted("chat-web")
+          ? chatPanelElement
+          : null}
 
-        {waterfallPanelElement}
+        {isModeMounted("waterfall") && waterfallPanelElement}
       </Tabs>
 
       {recent.length > 0 && (

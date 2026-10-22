@@ -64,6 +64,13 @@ export interface GalleryClientProps {
   timeZone: string;
   /** 当前搜索关键词(URL query,服务端已过滤)。 */
   searchQuery: string;
+  /** 当前模型筛选(精确匹配,空为全部)。 */
+  searchModel: string;
+  /** 日期范围(YYYY-MM-DD,空为不限)。 */
+  searchFrom: string;
+  searchTo: string;
+  /** 模型下拉选项(该用户实际用过的模型)。 */
+  modelOptions: string[];
 }
 
 export function GalleryClient({
@@ -76,6 +83,10 @@ export function GalleryClient({
   page,
   timeZone,
   searchQuery,
+  searchModel,
+  searchFrom,
+  searchTo,
+  modelOptions,
 }: GalleryClientProps) {
   const locale = useLocale();
   const isZh = locale === "zh";
@@ -84,10 +95,16 @@ export function GalleryClient({
   const [items, setItems] = useState<GenerationWithUrl[]>(initialGenerations);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [queryInput, setQueryInput] = useState(searchQuery);
+  const [modelInput, setModelInput] = useState(searchModel);
+  const [fromInput, setFromInput] = useState(searchFrom);
+  const [toInput, setToInput] = useState(searchTo);
 
   useEffect(() => {
     setQueryInput(searchQuery);
-  }, [searchQuery]);
+    setModelInput(searchModel);
+    setFromInput(searchFrom);
+    setToInput(searchTo);
+  }, [searchQuery, searchModel, searchFrom, searchTo]);
 
   // -- 多选模式状态 --
   const [selectMode, setSelectMode] = useState(false);
@@ -217,23 +234,49 @@ export function GalleryClient({
   }, [items, selectedIds.size]);
 
   const createHref = `/${locale}/dashboard/create`;
-  // 链接(标签切换/加载更多)保留当前关键词,翻页不丢搜索上下文。
-  const searchSuffix = (q: string = searchQuery) =>
-    q ? `&q=${encodeURIComponent(q)}` : "";
+  // 链接(标签切换/加载更多)保留全部筛选,翻页不丢上下文。
+  const filterSuffix = (next: {
+    q: string;
+    model: string;
+    from: string;
+    to: string;
+  }) => {
+    const parts: string[] = [];
+    if (next.q) parts.push(`q=${encodeURIComponent(next.q)}`);
+    if (next.model) parts.push(`model=${encodeURIComponent(next.model)}`);
+    if (next.from) parts.push(`from=${next.from}`);
+    if (next.to) parts.push(`to=${next.to}`);
+    return parts.length ? `&${parts.join("&")}` : "";
+  };
+  const currentFilters = {
+    q: searchQuery,
+    model: searchModel,
+    from: searchFrom,
+    to: searchTo,
+  };
   const galleryHref = (
     tab: GalleryClientProps["activeTab"],
     nextPage = 1,
-    q: string = searchQuery
+    filters: {
+      q: string;
+      model: string;
+      from: string;
+      to: string;
+    } = currentFilters
   ) =>
-    `/${locale}/dashboard/gallery?tab=${tab}&page=${nextPage}${searchSuffix(q)}`;
+    `/${locale}/dashboard/gallery?tab=${tab}&page=${nextPage}${filterSuffix(filters)}`;
   const nextPageHref = galleryHref(activeTab, page + 1);
 
-  /** 搜索提交:回到第 1 页,带关键词(服务端过滤提示词/改写词/模型)。 */
+  /** 搜索提交:回到第 1 页,带全部筛选(服务端过滤)。 */
   const handleSearchSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    const q = queryInput.trim();
     router.push(
-      `/${locale}/dashboard/gallery?tab=${activeTab}&page=1${searchSuffix(q)}`
+      `/${locale}/dashboard/gallery?tab=${activeTab}&page=1${filterSuffix({
+        q: queryInput.trim(),
+        model: modelInput,
+        from: fromInput,
+        to: toInput,
+      })}`
     );
   };
   // 激活徽标用 primary 反差点缀:Tabs 激活态已是柔和灰底(bg-secondary),
@@ -289,10 +332,13 @@ export function GalleryClient({
           </TabsTrigger>
         </TabsList>
       </Tabs>
-      {/* 搜索:URL query 驱动服务端过滤(提示词/改写词/模型),标签切换与
-          加载更多保留关键词 */}
-      <form onSubmit={handleSearchSubmit} className="flex items-center gap-2">
-        <div className="relative flex-1">
+      {/* 搜索:URL query 驱动服务端过滤(关键词/模型/日期),标签切换与
+          加载更多保留全部筛选 */}
+      <form
+        onSubmit={handleSearchSubmit}
+        className="grid gap-2 md:grid-cols-[minmax(200px,1fr)_160px_140px_140px_auto_auto] md:items-center"
+      >
+        <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             value={queryInput}
@@ -304,17 +350,46 @@ export function GalleryClient({
             className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none transition-colors duration-150 placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
         </div>
-        <Button type="submit" variant="outline" className="h-9 shrink-0">
+        <select
+          value={modelInput}
+          onChange={(event) => setModelInput(event.target.value)}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          <option value="">{copy("All models", "全部模型")}</option>
+          {modelOptions.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+        <input
+          type="date"
+          value={fromInput}
+          onChange={(event) => setFromInput(event.target.value)}
+          title={copy("From date", "开始日期")}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        />
+        <input
+          type="date"
+          value={toInput}
+          onChange={(event) => setToInput(event.target.value)}
+          title={copy("To date", "结束日期")}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        />
+        <Button type="submit" variant="outline" className="h-9">
           {copy("Search", "搜索")}
         </Button>
-        {searchQuery && (
+        {(searchQuery || searchModel || searchFrom || searchTo) && (
           <Button
             type="button"
             variant="ghost"
-            className="h-9 shrink-0 px-2"
+            className="h-9 px-2"
             title={copy("Clear", "清除")}
             onClick={() => {
               setQueryInput("");
+              setModelInput("");
+              setFromInput("");
+              setToInput("");
               router.push(
                 `/${locale}/dashboard/gallery?tab=${activeTab}&page=1`
               );

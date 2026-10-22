@@ -3,7 +3,18 @@ import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
-import { and, count, desc, eq, ilike, isNotNull, or, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  isNotNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 import { GalleryClient } from "@/features/image-generation/components/gallery-client";
@@ -14,7 +25,14 @@ import {
 import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 
 interface GalleryPageProps {
-  searchParams: Promise<{ page?: string; tab?: string; q?: string }>;
+  searchParams: Promise<{
+    page?: string;
+    tab?: string;
+    q?: string;
+    model?: string;
+    from?: string;
+    to?: string;
+  }>;
 }
 
 type GalleryOutputRole = "final" | "agent_draft" | "upload";
@@ -135,15 +153,28 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   const pageParam = Number(params.page);
   const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
   const limit = page * PAGE_SIZE;
-  // 关键词搜索:提示词/改写词/模型 ilike 子串(三个标签页共用)。
+  // 关键词搜索:提示词/改写词/模型 ilike 子串(三个标签页共用);
+  // 模型精确筛选 + 日期范围一并并入公共条件。
   const keyword = params.q?.trim().slice(0, 120) ?? "";
-  const keywordCondition = keyword
-    ? or(
-        ilike(generation.prompt, `%${keyword}%`),
-        ilike(generation.revisedPrompt, `%${keyword}%`),
-        ilike(generation.model, `%${keyword}%`)
-      )
-    : undefined;
+  const modelFilter = params.model?.trim() ?? "";
+  const fromInput = params.from?.trim() ?? "";
+  const toInput = params.to?.trim() ?? "";
+  const keywordCondition = and(
+    keyword
+      ? or(
+          ilike(generation.prompt, `%${keyword}%`),
+          ilike(generation.revisedPrompt, `%${keyword}%`),
+          ilike(generation.model, `%${keyword}%`)
+        )
+      : undefined,
+    modelFilter ? eq(generation.model, modelFilter) : undefined,
+    fromInput
+      ? gte(generation.createdAt, new Date(`${fromInput}T00:00:00`))
+      : undefined,
+    toInput
+      ? lte(generation.createdAt, new Date(`${toInput}T23:59:59.999`))
+      : undefined
+  );
   const finalCondition = and(
     eq(generation.userId, user.id),
     eq(generation.status, "completed"),
@@ -202,6 +233,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     draftCountResult,
     uploadCountResult,
     timeZone,
+    modelRows,
   ] = await Promise.all([
     isFinalTab
       ? db
@@ -234,7 +266,17 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     db.select({ count: count() }).from(generation).where(draftCondition),
     db.select({ count: count() }).from(generation).where(uploadCondition),
     getAppTimeZone(),
+    // 模型下拉选项:该用户完成生成的历史里实际用过的模型
+    db
+      .selectDistinct({ model: generation.model })
+      .from(generation)
+      .where(eq(generation.userId, user.id))
+      .orderBy(generation.model),
   ]);
+
+  const modelOptions = (modelRows as Array<{ model: string | null }>)
+    .map((row) => row.model)
+    .filter((value): value is string => Boolean(value));
 
   const allDraftItems = extractAgentDraftGenerations(draftParentRows);
   const allUploadItems = extractUploadedImageGenerations(
@@ -288,7 +330,7 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         </p>
       </div>
       <GalleryClient
-        key={`${activeTab}-${page}-${keyword}`}
+        key={`${activeTab}-${page}-${keyword}-${modelFilter}-${fromInput}-${toInput}`}
         initialGenerations={displayedItems}
         totalCount={totalCount}
         finalCount={finalCount}
@@ -298,6 +340,10 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         page={page}
         timeZone={timeZone}
         searchQuery={keyword}
+        searchModel={modelFilter}
+        searchFrom={fromInput}
+        searchTo={toInput}
+        modelOptions={modelOptions}
       />
     </div>
   );

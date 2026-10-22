@@ -3,7 +3,17 @@ import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
-import { and, count, desc, eq, ilike, or, type SQL } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  lte,
+  or,
+  type SQL,
+} from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 import { HistoryClient } from "@/features/image-generation/components/history-client";
@@ -19,6 +29,9 @@ interface HistoryPageProps {
     page?: string;
     q?: string;
     status?: string;
+    model?: string;
+    from?: string;
+    to?: string;
   }>;
 }
 
@@ -28,11 +41,16 @@ interface HistoryPageProps {
  */
 function buildHistoryWhere(
   userId: string,
-  q: string | undefined,
-  status: string | undefined
+  filters: {
+    q?: string;
+    status?: string;
+    model?: string;
+    from?: string;
+    to?: string;
+  }
 ): SQL | undefined {
   const conditions: Array<SQL | undefined> = [eq(generation.userId, userId)];
-  const keyword = q?.trim();
+  const keyword = filters.q?.trim();
   if (keyword) {
     const pattern = `%${keyword}%`;
     conditions.push(
@@ -43,8 +61,25 @@ function buildHistoryWhere(
       )
     );
   }
-  if (status === "completed" || status === "failed" || status === "pending") {
-    conditions.push(eq(generation.status, status));
+  if (
+    filters.status === "completed" ||
+    filters.status === "failed" ||
+    filters.status === "pending"
+  ) {
+    conditions.push(eq(generation.status, filters.status));
+  }
+  // 模型精确匹配:下拉项来自该用户实际用过的模型,值可信
+  if (filters.model?.trim()) {
+    conditions.push(eq(generation.model, filters.model.trim()));
+  }
+  // 日期范围含当天(to 取当日末尾)
+  const fromDate = filters.from ? new Date(`${filters.from}T00:00:00`) : null;
+  const toDate = filters.to ? new Date(`${filters.to}T23:59:59.999`) : null;
+  if (fromDate && !Number.isNaN(fromDate.getTime())) {
+    conditions.push(gte(generation.createdAt, fromDate));
+  }
+  if (toDate && !Number.isNaN(toDate.getTime())) {
+    conditions.push(lte(generation.createdAt, toDate));
   }
   return and(...conditions);
 }
@@ -62,9 +97,11 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
   const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
   const offset = (page - 1) * PAGE_SIZE;
 
-  const where = buildHistoryWhere(user.id, params.q, params.status);
+  const where = buildHistoryWhere(user.id, params);
 
-  const [generations, totalResult, timeZone] = await Promise.all([
+  // 模型下拉选项:该用户实际用过的模型(排除被关键词/状态过滤干扰,
+  // 独立查询全量 distinct,通常个位数)
+  const [generations, totalResult, timeZone, modelRows] = await Promise.all([
     db
       .select()
       .from(generation)
@@ -74,7 +111,15 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
       .offset(offset),
     db.select({ count: count() }).from(generation).where(where),
     getAppTimeZone(),
+    db
+      .selectDistinct({ model: generation.model })
+      .from(generation)
+      .where(eq(generation.userId, user.id))
+      .orderBy(generation.model),
   ]);
+  const modelOptions = modelRows
+    .map((row) => row.model)
+    .filter((value): value is string => Boolean(value));
 
   const withUrls = generations.map((g) => ({
     id: g.id,
@@ -112,7 +157,14 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
         </p>
       </div>
       <HistoryClient
-        key={`${page}-${params.q ?? ""}-${params.status ?? ""}`}
+        key={[
+          page,
+          params.q ?? "",
+          params.status ?? "",
+          params.model ?? "",
+          params.from ?? "",
+          params.to ?? "",
+        ].join("|")}
         initialGenerations={withUrls}
         totalCount={totalResult[0]?.count ?? 0}
         page={page}
@@ -120,6 +172,10 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
         timeZone={timeZone}
         searchQuery={params.q?.trim() ?? ""}
         searchStatus={params.status ?? ""}
+        searchModel={params.model ?? ""}
+        searchFrom={params.from ?? ""}
+        searchTo={params.to ?? ""}
+        modelOptions={modelOptions}
       />
     </div>
   );

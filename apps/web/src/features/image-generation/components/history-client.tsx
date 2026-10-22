@@ -66,6 +66,13 @@ export interface HistoryClientProps {
   searchQuery: string;
   /** 当前状态筛选(completed/failed/pending,空为全部)。 */
   searchStatus: string;
+  /** 当前模型筛选(精确匹配,空为全部)。 */
+  searchModel: string;
+  /** 日期范围(YYYY-MM-DD,空为不限)。 */
+  searchFrom: string;
+  searchTo: string;
+  /** 模型下拉选项(该用户实际用过的模型)。 */
+  modelOptions: string[];
 }
 
 function statusClasses(status: HistoryGeneration["status"]): string {
@@ -140,6 +147,10 @@ export function HistoryClient({
   timeZone,
   searchQuery,
   searchStatus,
+  searchModel,
+  searchFrom,
+  searchTo,
+  modelOptions,
 }: HistoryClientProps) {
   const locale = useLocale();
   const isZh = locale === "zh";
@@ -152,12 +163,18 @@ export function HistoryClient({
   const [pageInput, setPageInput] = useState(String(page));
   const [queryInput, setQueryInput] = useState(searchQuery);
   const [statusInput, setStatusInput] = useState(searchStatus);
+  const [modelInput, setModelInput] = useState(searchModel);
+  const [fromInput, setFromInput] = useState(searchFrom);
+  const [toInput, setToInput] = useState(searchTo);
 
   // 搜索/筛选变化时同步输入框(如浏览器后退)
   useEffect(() => {
     setQueryInput(searchQuery);
     setStatusInput(searchStatus);
-  }, [searchQuery, searchStatus]);
+    setModelInput(searchModel);
+    setFromInput(searchFrom);
+    setToInput(searchTo);
+  }, [searchQuery, searchStatus, searchModel, searchFrom, searchTo]);
 
   // page prop 变化时同步输入框显示值
   useEffect(() => {
@@ -166,29 +183,44 @@ export function HistoryClient({
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  // 分页链接保留当前搜索与状态筛选(搜索提交时回到第 1 页)
-  const searchParamsSuffix = (overrides?: { q?: string; status?: string }) => {
-    const q = overrides?.q ?? searchQuery;
-    const status = overrides?.status ?? searchStatus;
+  // 分页链接保留全部筛选(搜索提交时回到第 1 页)
+  const filterSuffix = (next: {
+    q: string;
+    status: string;
+    model: string;
+    from: string;
+    to: string;
+  }) => {
     const parts: string[] = [];
-    if (q) parts.push(`q=${encodeURIComponent(q)}`);
-    if (status) parts.push(`status=${status}`);
+    if (next.q) parts.push(`q=${encodeURIComponent(next.q)}`);
+    if (next.status) parts.push(`status=${next.status}`);
+    if (next.model) parts.push(`model=${encodeURIComponent(next.model)}`);
+    if (next.from) parts.push(`from=${next.from}`);
+    if (next.to) parts.push(`to=${next.to}`);
     return parts.length ? `&${parts.join("&")}` : "";
   };
-  const historyHref = (nextPage: number) =>
-    `/${locale}/dashboard/history?page=${nextPage}${searchParamsSuffix()}`;
-
-  /** 搜索提交:回到第 1 页,带关键词与状态。 */
-  const commitSearch = () => {
-    const q = queryInput.trim();
-    const status = statusInput;
-    router.push(
-      `/${locale}/dashboard/history?page=1${searchParamsSuffix({ q, status })}`
-    );
+  const currentFilters = {
+    q: searchQuery,
+    status: searchStatus,
+    model: searchModel,
+    from: searchFrom,
+    to: searchTo,
   };
+  const historyHref = (nextPage: number) =>
+    `/${locale}/dashboard/history?page=${nextPage}${filterSuffix(currentFilters)}`;
+
+  /** 搜索提交:回到第 1 页,带全部筛选条件。 */
   const handleSearchSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    commitSearch();
+    router.push(
+      `/${locale}/dashboard/history?page=1${filterSuffix({
+        q: queryInput.trim(),
+        status: statusInput,
+        model: modelInput,
+        from: fromInput,
+        to: toInput,
+      })}`
+    );
   };
   const createHref = `/${locale}/dashboard/create`;
 
@@ -217,13 +249,15 @@ export function HistoryClient({
     setItems((prev) => prev.filter((x) => x.id !== id));
   };
 
-  /** 搜索栏(关键词 + 状态筛选,URL query 驱动服务端过滤)。 */
+  /** 搜索栏(关键词 + 状态/模型筛选 + 日期范围,URL query 驱动服务端过滤)。 */
+  const hasActiveFilters =
+    searchQuery || searchStatus || searchModel || searchFrom || searchTo;
   const searchForm = (
     <form
       onSubmit={handleSearchSubmit}
-      className="flex flex-col gap-2 sm:flex-row sm:items-center"
+      className="grid gap-2 rounded-lg border border-border bg-muted/20 p-3 md:grid-cols-[minmax(220px,1fr)_140px_160px_140px_140px_auto_auto] md:items-center"
     >
-      <div className="relative flex-1">
+      <div className="relative">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <input
           value={queryInput}
@@ -234,9 +268,7 @@ export function HistoryClient({
       </div>
       <select
         value={statusInput}
-        onChange={(event) => {
-          setStatusInput(event.target.value);
-        }}
+        onChange={(event) => setStatusInput(event.target.value)}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
       >
         <option value="">{copy("All statuses", "全部状态")}</option>
@@ -244,10 +276,36 @@ export function HistoryClient({
         <option value="failed">{statusLabel("failed")}</option>
         <option value="pending">{statusLabel("pending")}</option>
       </select>
+      <select
+        value={modelInput}
+        onChange={(event) => setModelInput(event.target.value)}
+        className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <option value="">{copy("All models", "全部模型")}</option>
+        {modelOptions.map((model) => (
+          <option key={model} value={model}>
+            {model}
+          </option>
+        ))}
+      </select>
+      <input
+        type="date"
+        value={fromInput}
+        onChange={(event) => setFromInput(event.target.value)}
+        title={copy("From date", "开始日期")}
+        className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      />
+      <input
+        type="date"
+        value={toInput}
+        onChange={(event) => setToInput(event.target.value)}
+        title={copy("To date", "结束日期")}
+        className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      />
       <Button type="submit" variant="outline" className="h-9">
         {copy("Search", "搜索")}
       </Button>
-      {(searchQuery || searchStatus) && (
+      {hasActiveFilters && (
         <Button
           type="button"
           variant="ghost"
@@ -256,6 +314,9 @@ export function HistoryClient({
           onClick={() => {
             setQueryInput("");
             setStatusInput("");
+            setModelInput("");
+            setFromInput("");
+            setToInput("");
             router.push(`/${locale}/dashboard/history?page=1`);
           }}
         >

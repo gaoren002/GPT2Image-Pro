@@ -75,6 +75,7 @@ interface GlobalStatusPageProps {
     errorTo?: string;
     errorPage?: string;
     errorQ?: string;
+    errorCategory?: string;
   }>;
 }
 
@@ -168,6 +169,8 @@ type HistoricalErrorFilters = {
   page: number;
   /** 关键词:匹配用户邮箱/名字、提示词、错误信息(大小写不敏感子串)。 */
   keyword: string;
+  /** 错误分类筛选(platform/moderation/user_request,空为全部)。 */
+  category: "" | "platform" | "moderation" | "user_request";
 };
 
 type HistoricalGenerationErrorRow = {
@@ -233,6 +236,13 @@ function parseHistoricalErrorFilters(
   const customTo = parseDateInput(searchParams.errorTo, timeZone, true);
 
   const keyword = (searchParams.errorQ ?? "").trim().slice(0, 120);
+  const rawCategory = searchParams.errorCategory;
+  const category: HistoricalErrorFilters["category"] =
+    rawCategory === "platform" ||
+    rawCategory === "moderation" ||
+    rawCategory === "user_request"
+      ? rawCategory
+      : "";
 
   if (range === "all") {
     return {
@@ -243,6 +253,7 @@ function parseHistoricalErrorFilters(
       toDate: null,
       page,
       keyword,
+      category,
     };
   }
 
@@ -255,6 +266,7 @@ function parseHistoricalErrorFilters(
       toDate: customTo,
       page,
       keyword,
+      category,
     };
   }
 
@@ -276,6 +288,7 @@ function parseHistoricalErrorFilters(
     toDate: null,
     page,
     keyword,
+    category,
   };
 }
 
@@ -328,8 +341,9 @@ function buildErrorPageHref(filters: HistoricalErrorFilters, page: number) {
     if (filters.fromInput) params.set("errorFrom", filters.fromInput);
     if (filters.toInput) params.set("errorTo", filters.toInput);
   }
-  // 关键词随分页保留(翻页不丢搜索上下文)
+  // 关键词/分类随分页保留(翻页不丢搜索上下文)
   if (filters.keyword) params.set("errorQ", filters.keyword);
+  if (filters.category) params.set("errorCategory", filters.category);
   return `?${params.toString()}#historical-errors`;
 }
 
@@ -1199,7 +1213,7 @@ function HistoricalErrorsCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <form className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_minmax(200px,1fr)_auto] md:items-end">
+        <form className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_150px_minmax(180px,1fr)_auto] md:items-end">
           <label className="grid gap-1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
               {copy(locale, "Range", "时间范围")}
@@ -1251,6 +1265,29 @@ function HistoricalErrorsCard({
           </label>
           <label className="grid gap-1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+              {copy(locale, "Category", "错误类型")}
+            </span>
+            <select
+              name="errorCategory"
+              defaultValue={filters.category}
+              className="h-9 rounded-md border bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+            >
+              <option value="">
+                {copy(locale, "All categories", "全部类型")}
+              </option>
+              <option value="platform">
+                {errorCategoryLabel("platform", locale)}
+              </option>
+              <option value="moderation">
+                {errorCategoryLabel("moderation", locale)}
+              </option>
+              <option value="user_request">
+                {errorCategoryLabel("user_request", locale)}
+              </option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm">
+            <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
               {copy(locale, "Keyword", "关键词")}
             </span>
             <input
@@ -1268,7 +1305,7 @@ function HistoricalErrorsCard({
           <Button type="submit" className="md:w-fit">
             {copy(locale, "Filter", "筛选")}
           </Button>
-          <p className="text-xs text-muted-foreground md:col-span-5">
+          <p className="text-xs text-muted-foreground md:col-span-6">
             {copy(
               locale,
               "Date inputs are applied when the range is Custom. Fixed ranges ignore manual dates.",
@@ -1282,6 +1319,9 @@ function HistoricalErrorsCard({
             {describeErrorFilter(filters, locale, timeZone)}
             {filters.keyword
               ? ` · ${copy(locale, "Keyword", "关键词")}「${filters.keyword}」`
+              : ""}
+            {filters.category
+              ? ` · ${errorCategoryLabel(filters.category, locale)}`
               : ""}{" "}
             · {copy(locale, "Total", "共")} {formatNumber(errors.total, locale)}{" "}
             {copy(locale, "records", "条")}

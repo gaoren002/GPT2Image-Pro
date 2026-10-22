@@ -15,7 +15,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale } from "next-intl";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { batchDeleteGenerationAction } from "@/features/image-generation/actions";
 import { ImageCard } from "@/features/image-generation/components/image-card";
@@ -267,17 +267,30 @@ export function GalleryClient({
     `/${locale}/dashboard/gallery?tab=${tab}&page=${nextPage}${filterSuffix(filters)}`;
   const nextPageHref = galleryHref(activeTab, page + 1);
 
-  /** 搜索提交:回到第 1 页,带全部筛选(服务端过滤)。 */
+  // startTransition:筛选导航低优先级调度,控件保持即时响应。
+  const [, startFilterTransition] = useTransition();
+
+  const filterHref = (next: {
+    q: string;
+    model: string;
+    from: string;
+    to: string;
+  }) =>
+    `/${locale}/dashboard/gallery?tab=${activeTab}&page=1${filterSuffix(next)}`;
+
+  /** 搜索提交(回车/按钮):回到第 1 页。 */
   const handleSearchSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    router.push(
-      `/${locale}/dashboard/gallery?tab=${activeTab}&page=1${filterSuffix({
-        q: queryInput.trim(),
-        model: modelInput,
-        from: fromInput,
-        to: toInput,
-      })}`
-    );
+    startFilterTransition(() => {
+      router.push(
+        filterHref({
+          q: queryInput.trim(),
+          model: modelInput,
+          from: fromInput,
+          to: toInput,
+        })
+      );
+    });
   };
   // 激活徽标用 primary 反差点缀:Tabs 激活态已是柔和灰底(bg-secondary),
   // 旧的 bg-primary-foreground(白底)在灰底上几乎不可见。
@@ -352,7 +365,20 @@ export function GalleryClient({
         </div>
         <select
           value={modelInput}
-          onChange={(event) => setModelInput(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setModelInput(next);
+            startFilterTransition(() => {
+              router.push(
+                filterHref({
+                  q: queryInput.trim(),
+                  model: next,
+                  from: fromInput,
+                  to: toInput,
+                })
+              );
+            });
+          }}
           className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         >
           <option value="">{copy("All models", "全部模型")}</option>
@@ -365,14 +391,40 @@ export function GalleryClient({
         <input
           type="date"
           value={fromInput}
-          onChange={(event) => setFromInput(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setFromInput(next);
+            startFilterTransition(() => {
+              router.push(
+                filterHref({
+                  q: queryInput.trim(),
+                  model: modelInput,
+                  from: next,
+                  to: toInput,
+                })
+              );
+            });
+          }}
           title={copy("From date", "开始日期")}
           className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />
         <input
           type="date"
           value={toInput}
-          onChange={(event) => setToInput(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setToInput(next);
+            startFilterTransition(() => {
+              router.push(
+                filterHref({
+                  q: queryInput.trim(),
+                  model: modelInput,
+                  from: fromInput,
+                  to: next,
+                })
+              );
+            });
+          }}
           title={copy("To date", "结束日期")}
           className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />

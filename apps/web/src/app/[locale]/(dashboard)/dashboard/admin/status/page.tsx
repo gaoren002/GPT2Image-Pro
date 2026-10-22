@@ -53,6 +53,7 @@ import {
 import { unstable_cache } from "next/cache";
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
+import { InstantFilterForm } from "@/features/dashboard/components/instant-filter-form";
 import {
   AUTO_IMAGE_SIZE,
   IMAGE_1K_BASE_EDGE,
@@ -1213,7 +1214,11 @@ function HistoricalErrorsCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <form className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_150px_minmax(180px,1fr)_auto] md:items-end">
+        <InstantFilterForm
+          basePath={`/${locale}/dashboard/admin/status`}
+          hash="#historical-errors"
+          className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[160px_180px_180px_150px_minmax(180px,1fr)_auto] md:items-end"
+        >
           <label className="grid gap-1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
               {copy(locale, "Range", "时间范围")}
@@ -1312,7 +1317,7 @@ function HistoricalErrorsCard({
               "日期输入仅在选择自定义时生效；固定时间范围会忽略手动日期。"
             )}
           </p>
-        </form>
+        </InstantFilterForm>
 
         <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
           <div>

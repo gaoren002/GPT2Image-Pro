@@ -19,7 +19,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale } from "next-intl";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import type {
   LightboxGeneration,
   LightboxReferenceImage,
@@ -209,19 +209,30 @@ export function HistoryClient({
   const historyHref = (nextPage: number) =>
     `/${locale}/dashboard/history?page=${nextPage}${filterSuffix(currentFilters)}`;
 
-  /** 搜索提交:回到第 1 页,带全部筛选条件。 */
+  // 导航经 startTransition:筛选变更触发的服务端渲染标记为低优先级,
+  // 输入框/下拉保持即时响应,不再有"整页刷新"的卡顿体感。
+  const [, startFilterTransition] = useTransition();
+
+  /** 提交当前筛选(回到第 1 页)。下拉/日期变更时即时调用,无需点按钮。 */
+  const applyFilters = () => {
+    const href = `/${locale}/dashboard/history?page=1${filterSuffix({
+      q: queryInput.trim(),
+      status: statusInput,
+      model: modelInput,
+      from: fromInput,
+      to: toInput,
+    })}`;
+    startFilterTransition(() => {
+      router.push(href);
+    });
+  };
+
+  /** 回车提交(Enter)仍保留;下拉与日期在 onChange 即时触发。 */
   const handleSearchSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    router.push(
-      `/${locale}/dashboard/history?page=1${filterSuffix({
-        q: queryInput.trim(),
-        status: statusInput,
-        model: modelInput,
-        from: fromInput,
-        to: toInput,
-      })}`
-    );
+    applyFilters();
   };
+
   const createHref = `/${locale}/dashboard/create`;
 
   /**
@@ -268,7 +279,21 @@ export function HistoryClient({
       </div>
       <select
         value={statusInput}
-        onChange={(event) => setStatusInput(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setStatusInput(next);
+          startFilterTransition(() => {
+            router.push(
+              `/${locale}/dashboard/history?page=1${filterSuffix({
+                q: queryInput.trim(),
+                status: next,
+                model: modelInput,
+                from: fromInput,
+                to: toInput,
+              })}`
+            );
+          });
+        }}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
       >
         <option value="">{copy("All statuses", "全部状态")}</option>
@@ -278,7 +303,21 @@ export function HistoryClient({
       </select>
       <select
         value={modelInput}
-        onChange={(event) => setModelInput(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setModelInput(next);
+          startFilterTransition(() => {
+            router.push(
+              `/${locale}/dashboard/history?page=1${filterSuffix({
+                q: queryInput.trim(),
+                status: statusInput,
+                model: next,
+                from: fromInput,
+                to: toInput,
+              })}`
+            );
+          });
+        }}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
       >
         <option value="">{copy("All models", "全部模型")}</option>
@@ -291,14 +330,42 @@ export function HistoryClient({
       <input
         type="date"
         value={fromInput}
-        onChange={(event) => setFromInput(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setFromInput(next);
+          startFilterTransition(() => {
+            router.push(
+              `/${locale}/dashboard/history?page=1${filterSuffix({
+                q: queryInput.trim(),
+                status: statusInput,
+                model: modelInput,
+                from: next,
+                to: toInput,
+              })}`
+            );
+          });
+        }}
         title={copy("From date", "开始日期")}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
       />
       <input
         type="date"
         value={toInput}
-        onChange={(event) => setToInput(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setToInput(next);
+          startFilterTransition(() => {
+            router.push(
+              `/${locale}/dashboard/history?page=1${filterSuffix({
+                q: queryInput.trim(),
+                status: statusInput,
+                model: modelInput,
+                from: fromInput,
+                to: next,
+              })}`
+            );
+          });
+        }}
         title={copy("To date", "结束日期")}
         className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors duration-150 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
       />

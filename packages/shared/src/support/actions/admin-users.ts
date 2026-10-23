@@ -1,13 +1,10 @@
 "use server";
 
+/** 用户管理 Server Actions；列表委托共享查询，其余操作保留原鉴权、审计和事务护栏。 */
 import {
   and,
-  count,
   desc,
   eq,
-  ilike,
-  inArray,
-  or,
   sql,
 } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -27,15 +24,11 @@ import {
   user,
 } from "@repo/database/schema";
 import {
-  ADMIN_MANAGEMENT_ROLES,
   APP_USER_ROLES,
   canActOnTargetRole,
   getUserRoleLabel,
 } from "../../auth/roles";
-import {
-  getPlanFromPriceId,
-  type SubscriptionPlan,
-} from "../../config/subscription-plan";
+import type { SubscriptionPlan } from "../../config/subscription-plan";
 import { PRICE_IDS } from "../../config/payment";
 import {
   consumeCredits,
@@ -55,6 +48,10 @@ import {
 import { buildSignedStorageImageUrl } from "../../storage/signed-url";
 import { getUserPlan } from "../../subscription/services/user-plan";
 import { randomUUID } from "node:crypto";
+import {
+  getAdminUsersListSnapshot,
+  listUsersSchema,
+} from "../services/admin-users-list";
 // 密码哈希链路：与 bootstrap-super-admin.ts 完全一致，写入 account.password，禁止明文/自造哈希
 import { hashPassword } from "better-auth/crypto";
 // 积分账户惰性创建（新建用户后初始化积分账户，余额 0）
@@ -88,37 +85,6 @@ function assertCanActOnTarget(
     throw new Error(`无权对该账户执行${operation}：目标权限不低于操作者`);
   }
 }
-
-const userStatusSchema = z.enum(["all", "active", "banned", "unverified"]);
-const subscriptionStatusSchema = z.enum([
-  "all",
-  "none",
-  "active",
-  "canceled",
-  "past_due",
-  "incomplete",
-]);
-const creditsStatusSchema = z.enum(["all", "active", "frozen"]);
-const planFilterSchema = z.enum([
-  "all",
-  "free",
-  "starter",
-  "pro",
-  "ultra",
-  "enterprise",
-]);
-
-const listUsersSchema = z
-  .object({
-    query: z.string().trim().optional(),
-    page: z.number().int().min(1).default(1),
-    pageSize: z.number().int().min(10).max(100).default(20),
-    status: userStatusSchema.default("all"),
-    subscriptionStatus: subscriptionStatusSchema.default("all"),
-    creditsStatus: creditsStatusSchema.default("all"),
-    plan: planFilterSchema.default("all"),
-  })
-  .optional();
 
 const userIdSchema = z.object({
   userId: z.string().min(1, "用户ID不能为空"),
@@ -223,73 +189,6 @@ const setUserPasswordSchema = userIdSchema.extend({
   reason: reasonSchema,
 });
 
-type ListUsersInput = z.infer<typeof listUsersSchema>;
-type PlanFilter = z.infer<typeof planFilterSchema>;
-
-function normalizeListInput(input: ListUsersInput) {
-  return {
-    query: input?.query?.trim() || "",
-    page: input?.page ?? 1,
-    pageSize: input?.pageSize ?? 20,
-    status: input?.status ?? "all",
-    subscriptionStatus: input?.subscriptionStatus ?? "all",
-    creditsStatus: input?.creditsStatus ?? "all",
-    plan: input?.plan ?? "all",
-  };
-}
-
-function getPlanFromSubscriptionPriceId(priceId: string | null | undefined) {
-  if (!priceId) {
-    return "free" satisfies SubscriptionPlan;
-  }
-  return getPlanFromPriceId(priceId) ?? ("free" satisfies SubscriptionPlan);
-}
-
-function isSubscriptionWithinPeriod(sub: {
-  currentPeriodEnd: Date | null;
-  status: string | null;
-}) {
-  if (!sub.status) {
-    return false;
-  }
-  if (sub.status === "lifetime") {
-    return true;
-  }
-  const withinPeriod = !sub.currentPeriodEnd || sub.currentPeriodEnd > new Date();
-  return (
-    (["active", "trialing"].includes(sub.status) && withinPeriod) ||
-    (sub.status === "canceled" && withinPeriod)
-  );
-}
-
-function effectiveSubscriptionCondition() {
-  return sql<boolean>`(
-    ${subscription.status} = 'lifetime'
-    OR (
-      ${subscription.status} IN ('active', 'trialing')
-      AND (
-        ${subscription.currentPeriodEnd} IS NULL
-        OR ${subscription.currentPeriodEnd} > now()
-      )
-    )
-    OR (
-      ${subscription.status} = 'canceled'
-      AND ${subscription.currentPeriodEnd} IS NOT NULL
-      AND ${subscription.currentPeriodEnd} > now()
-    )
-  )`;
-}
-
-function getPlanPriceIds(plan: Exclude<PlanFilter, "all" | "free">) {
-  return Object.values(PRICE_IDS)
-    .filter((value): value is string => {
-      if (!value) {
-        return false;
-      }
-      return getPlanFromPriceId(value) === plan;
-    });
-}
-
 function getMonthlyPriceIdForPlan(plan: Exclude<SubscriptionPlan, "free">) {
   const priceIdMap: Record<Exclude<SubscriptionPlan, "free">, string> = {
     starter: PRICE_IDS.STARTER_MONTHLY,
@@ -309,58 +208,6 @@ function getMonthlyPriceIdForPlan(plan: Exclude<SubscriptionPlan, "free">) {
 
 function normalizeAdminCreditAmount(amount: number) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
-}
-
-function buildUserFilters(input: ReturnType<typeof normalizeListInput>) {
-  const filters = [];
-
-  if (input.query) {
-    const query = `%${input.query}%`;
-    filters.push(
-      or(
-        ilike(user.id, query),
-        ilike(user.name, query),
-        ilike(user.email, query)
-      )
-    );
-  }
-
-  if (input.status === "active") {
-    filters.push(eq(user.banned, false));
-  } else if (input.status === "banned") {
-    filters.push(eq(user.banned, true));
-  } else if (input.status === "unverified") {
-    filters.push(eq(user.emailVerified, false));
-  }
-
-  if (input.creditsStatus !== "all") {
-    filters.push(eq(creditsBalance.status, input.creditsStatus));
-  }
-
-  if (input.subscriptionStatus === "none") {
-    filters.push(sql`${subscription.id} IS NULL`);
-  } else if (input.subscriptionStatus !== "all") {
-    filters.push(eq(subscription.status, input.subscriptionStatus));
-  }
-
-  if (input.plan === "free") {
-    filters.push(
-      or(
-        sql`${subscription.id} IS NULL`,
-        sql`NOT ${effectiveSubscriptionCondition()}`
-      )
-    );
-  } else if (input.plan !== "all") {
-    const priceIds = getPlanPriceIds(input.plan);
-    if (priceIds.length > 0) {
-      filters.push(inArray(subscription.priceId, priceIds));
-      filters.push(effectiveSubscriptionCondition());
-    } else {
-      filters.push(sql`false`);
-    }
-  }
-
-  return filters.length > 0 ? and(...filters) : undefined;
 }
 
 function sanitizeSnapshot(value: unknown): Record<string, unknown> | undefined {
@@ -415,138 +262,9 @@ async function getUserBasicOrThrow(userId: string) {
 
 export const getAllUsersAction = withAdminUsersAction("getAllUsers")
   .schema(listUsersSchema)
-  .action(async ({ parsedInput }) => {
-    const input = normalizeListInput(parsedInput);
-    const where = buildUserFilters(input);
-    const offset = (input.page - 1) * input.pageSize;
-
-    const baseQuery = db
-      .select({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        image: user.image,
-        role: user.role,
-        banned: user.banned,
-        bannedReason: user.bannedReason,
-        emailVerified: user.emailVerified,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        creditsBalance: sql<number>`coalesce(${creditsBalance.balance}, 0)`.mapWith(Number),
-        creditsTotalEarned:
-          sql<number>`coalesce(${creditsBalance.totalEarned}, 0)`.mapWith(
-            Number
-          ),
-        creditsTotalSpent:
-          sql<number>`coalesce(${creditsBalance.totalSpent}, 0)`.mapWith(
-            Number
-          ),
-        creditsStatus: creditsBalance.status,
-        subscriptionStatus: subscription.status,
-        subscriptionPriceId: subscription.priceId,
-        subscriptionCurrentPeriodEnd: subscription.currentPeriodEnd,
-      })
-      .from(user)
-      .leftJoin(creditsBalance, eq(creditsBalance.userId, user.id))
-      .leftJoin(subscription, eq(subscription.userId, user.id));
-
-    const countQuery = db
-      .select({ count: count() })
-      .from(user)
-      .leftJoin(creditsBalance, eq(creditsBalance.userId, user.id))
-      .leftJoin(subscription, eq(subscription.userId, user.id));
-
-    const [rows, totalResult, statsResults] = await Promise.all([
-      (where ? baseQuery.where(where) : baseQuery)
-        .orderBy(desc(user.createdAt))
-        .limit(input.pageSize)
-        .offset(offset),
-      (where ? countQuery.where(where) : countQuery),
-      Promise.all([
-        db.select({ count: count() }).from(user),
-        db
-          .select({ count: count() })
-          .from(user)
-          .where(inArray(user.role, [
-            "observer_admin",
-            ...ADMIN_MANAGEMENT_ROLES,
-          ])),
-        db.select({ count: count() }).from(user).where(eq(user.banned, true)),
-        db
-          .select({ count: count() })
-          .from(subscription)
-          .where(effectiveSubscriptionCondition()),
-      ]),
-    ]);
-
-    const userIds = rows.map((row) => row.id);
-    const [generationCounts, apiKeyCounts] =
-      userIds.length > 0
-        ? await Promise.all([
-            db
-              .select({
-                userId: generation.userId,
-                total: sql<number>`count(*)`.mapWith(Number),
-                failed: sql<number>`sum(case when ${generation.status} = 'failed' then 1 else 0 end)`.mapWith(
-                  Number
-                ),
-              })
-              .from(generation)
-              .where(inArray(generation.userId, userIds))
-              .groupBy(generation.userId),
-            db
-              .select({
-                userId: externalApiKey.userId,
-                total: sql<number>`count(*)`.mapWith(Number),
-                active: sql<number>`sum(case when ${externalApiKey.isActive} then 1 else 0 end)`.mapWith(
-                  Number
-                ),
-              })
-              .from(externalApiKey)
-              .where(inArray(externalApiKey.userId, userIds))
-              .groupBy(externalApiKey.userId),
-          ])
-        : [[], []];
-
-    const generationCountMap = new Map(
-      generationCounts.map((item) => [item.userId, item])
-    );
-    const apiKeyCountMap = new Map(
-      apiKeyCounts.map((item) => [item.userId, item])
-    );
-
-    return {
-      users: rows.map((row) => {
-        const generationStats = generationCountMap.get(row.id);
-        const apiKeyStats = apiKeyCountMap.get(row.id);
-        return {
-          ...row,
-          plan: isSubscriptionWithinPeriod({
-            status: row.subscriptionStatus,
-            currentPeriodEnd: row.subscriptionCurrentPeriodEnd,
-          })
-            ? getPlanFromSubscriptionPriceId(row.subscriptionPriceId)
-            : ("free" satisfies SubscriptionPlan),
-          creditsStatus: row.creditsStatus ?? "active",
-          generationCount: generationStats?.total ?? 0,
-          failedGenerationCount: generationStats?.failed ?? 0,
-          apiKeyCount: apiKeyStats?.total ?? 0,
-          activeApiKeyCount: apiKeyStats?.active ?? 0,
-        };
-      }),
-      pagination: {
-        page: input.page,
-        pageSize: input.pageSize,
-        total: totalResult[0]?.count ?? 0,
-      },
-      stats: {
-        totalUsers: statsResults[0][0]?.count ?? 0,
-        admins: statsResults[1][0]?.count ?? 0,
-        banned: statsResults[2][0]?.count ?? 0,
-        activeSubscriptions: statsResults[3][0]?.count ?? 0,
-      },
-    };
-  });
+  .action(async ({ parsedInput, ctx }) =>
+    getAdminUsersListSnapshot(parsedInput, ctx.role)
+  );
 
 export const getUserDetailAction = withAdminUsersAction("getUserDetail")
   .schema(userIdSchema)

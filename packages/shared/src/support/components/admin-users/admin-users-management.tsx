@@ -1,5 +1,6 @@
 "use client";
 
+/** 管理员用户列表和操作界面；首屏消费服务端快照，后续筛选与管理操作调用受保护 action。 */
 import {
   Ban,
   Coins,
@@ -19,11 +20,12 @@ import {
   XCircle,
 } from "lucide-react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AdminUsersListSnapshot } from "../../services/admin-users-list";
 import { toast } from "sonner";
 
 import { formatCredits } from "../../../credits/format";
-import { buildStorageThumbnailUrl } from "../../../storage/signed-url";
+import { buildStorageThumbnailUrl } from "../../../storage/image-url";
 import { formatDateInTimeZone } from "../../../time-zone";
 import {
   adminAdjustCreditsAction,
@@ -317,26 +319,43 @@ function userRoleBadge(role: AppUserRole) {
   return null;
 }
 
+/** 服务端可传默认列表快照，省去挂载后的取数往返；后续筛选和操作仍经原 action。 */
 export function AdminUsersManagement({
   canManageRoles = false,
   timeZone,
+  initialData,
 }: {
   canManageRoles?: boolean;
   timeZone?: string;
+  initialData?: AdminUsersListSnapshot;
 }) {
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [stats, setStats] = useState({
-    totalUsers: 0,
-    admins: 0,
-    banned: 0,
-    activeSubscriptions: 0,
-  });
-  const [pagination, setPagination] = useState({
-    page: 1,
-    pageSize: 20,
-    total: 0,
-  });
-  const [isLoading, setIsLoading] = useState(true);
+  const [users, setUsers] = useState<UserRow[]>(() => initialData?.users ?? []);
+  const [stats, setStats] = useState(() =>
+    initialData?.stats ?? {
+      totalUsers: 0,
+      admins: 0,
+      banned: 0,
+      activeSubscriptions: 0,
+    }
+  );
+  const [pagination, setPagination] = useState(() =>
+    initialData?.pagination ?? { page: 1, pageSize: 20, total: 0 }
+  );
+  const [isLoading, setIsLoading] = useState(!initialData);
+  const listRequest = useRef(0);
+  // 初始快照仅对应默认筛选；保存其签名也可避免 StrictMode 重放 effect 时重查。
+  const loadedFilters = useRef<string | null>(
+    initialData
+      ? JSON.stringify([
+          "",
+          "all",
+          "all",
+          "all",
+          "all",
+          initialData.pagination.pageSize,
+        ])
+      : null
+  );
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<UserStatusFilter>("all");
@@ -421,7 +440,8 @@ export function AdminUsersManagement({
     pagination.total
   );
 
-  const loadUsers = async (nextPage = pagination.page) => {
+  const loadUsers = useCallback(async (nextPage = pagination.page) => {
+    const request = ++listRequest.current;
     setIsLoading(true);
     try {
       const result = await getAllUsersAction({
@@ -433,6 +453,7 @@ export function AdminUsersManagement({
         creditsStatus,
         plan,
       });
+      if (request !== listRequest.current) return;
       if (result?.data) {
         setUsers(result.data.users as UserRow[]);
         setStats(result.data.stats);
@@ -441,15 +462,43 @@ export function AdminUsersManagement({
         toast.error(result.serverError);
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载用户列表失败");
+      if (request === listRequest.current) {
+        toast.error(error instanceof Error ? error.message : "加载用户列表失败");
+      }
     } finally {
-      setIsLoading(false);
+      if (request === listRequest.current) setIsLoading(false);
     }
-  };
+  }, [
+    query,
+    pagination.page,
+    pagination.pageSize,
+    status,
+    subscriptionStatus,
+    creditsStatus,
+    plan,
+  ]);
 
   useEffect(() => {
+    const filters = JSON.stringify([
+      query,
+      status,
+      subscriptionStatus,
+      creditsStatus,
+      plan,
+      pagination.pageSize,
+    ]);
+    if (loadedFilters.current === filters) return;
+    loadedFilters.current = filters;
     void loadUsers(1);
-  }, [query, status, subscriptionStatus, creditsStatus, plan, pagination.pageSize]);
+  }, [
+    query,
+    status,
+    subscriptionStatus,
+    creditsStatus,
+    plan,
+    pagination.pageSize,
+    loadUsers,
+  ]);
 
   const reloadCurrent = async () => {
     await loadUsers(pagination.page);

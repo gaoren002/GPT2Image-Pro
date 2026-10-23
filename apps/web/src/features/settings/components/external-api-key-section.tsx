@@ -1,5 +1,7 @@
 "use client";
 
+/** 外接 Key 管理面板：可接收受保护查询的首屏摘要，修改后仍用原 action 刷新。 */
+
 import {
   canUseExternalApi,
   getAllowedModerationBlockRiskLevels,
@@ -47,41 +49,12 @@ import {
   updateExternalApiKeyQuota,
   updateExternalApiKeyRelay,
 } from "../actions";
-import type {
-  ImageBackendGroupBackendType,
-  ImageBackendGroupSizeTier,
-} from "@/features/image-backend-pool/types";
-
-type ImageBackendGroupOption = {
-  id: string;
-  name: string;
-  description: string | null;
-  isDefault: boolean;
-  isUserSelectable: boolean;
-  isEnabled: boolean;
-  contentSafetyEnabled: boolean | null;
-  backendType: ImageBackendGroupBackendType;
-  sizeTier?: ImageBackendGroupSizeTier;
-  billingMultiplier?: number;
-  // 质量计价倍率（quality 档位 → 倍率，取该组各启用成员的最大值）；
-  // null=组内无任何质量计价配置，按 1 倍。
-  qualityMultipliers?: Partial<Record<string, number>> | null;
-};
-
-type ExternalApiKeySummary = {
-  id: string;
-  name: string;
-  keyPrefix: string;
-  lastFour: string;
-  moderationBlockRiskLevel: ModerationBlockRiskLevel;
-  generationGroupId: string | null;
-  creditLimit: number | null;
-  creditsUsed: number;
-  relayOnly: boolean;
-  lastUsedAt: Date | string | null;
-  isActive: boolean;
-  createdAt: Date | string;
-};
+import {
+  type ExternalApiKeyInitialSnapshot,
+  type ExternalApiKeySummary,
+  type ImageBackendGroupOption,
+  normalizeExternalApiKeySummaries,
+} from "../external-api-key-snapshot";
 
 function formatDate(
   value: Date | string | null,
@@ -135,28 +108,62 @@ function groupOptionLabel(group: ImageBackendGroupOption) {
   )}${qualitySuffix}`;
 }
 
-export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
+/** 首屏与列表刷新共用配额输入值，null 表示不限制。 */
+function quotaDraftsForKeys(keys: ExternalApiKeySummary[]) {
+  return Object.fromEntries(
+    keys.map((key) => [
+      key.id,
+      key.creditLimit === null ? "" : String(key.creditLimit),
+    ])
+  );
+}
+
+/** 服务端快照直出首屏；无快照时兼容原查询，所有写操作仍用原 action 刷新列表。 */
+export function ExternalApiKeySection({
+  timeZone,
+  initialSnapshot,
+}: {
+  timeZone?: string;
+  initialSnapshot?: ExternalApiKeyInitialSnapshot;
+}) {
   const locale = useLocale();
   const t = useTranslations("Settings.externalApi");
   const baseUrl =
     process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ||
     "https://your-domain.example";
   const didLoadRef = useRef(false);
-  const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
+  const initialKeys = initialSnapshot?.keys ?? [];
+  const initialPlan = initialSnapshot?.plan ?? "free";
+  const initialCapabilities = initialSnapshot?.capabilities ?? null;
+  const initialModerationOptions =
+    initialCapabilities?.moderation.allowedBlockRiskLevels ||
+    getAllowedModerationBlockRiskLevels(initialPlan);
+  const [keys, setKeys] = useState<ExternalApiKeySummary[]>(initialKeys);
   const [newKey, setNewKey] = useState("");
   const [keyName, setKeyName] = useState(t("defaultName"));
   const [newKeyModerationLevel, setNewKeyModerationLevel] =
-    useState<ModerationBlockRiskLevel>("low");
+    useState<ModerationBlockRiskLevel>(
+      initialSnapshot ? initialModerationOptions.at(-1) || "low" : "low"
+    );
   const [newKeyGroupId, setNewKeyGroupId] = useState("default");
   const [newKeyCreditLimit, setNewKeyCreditLimit] = useState("");
   const [newKeyRelayOnly, setNewKeyRelayOnly] = useState(false);
-  const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>({});
-  const [groups, setGroups] = useState<ImageBackendGroupOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [externalApiAllowed, setExternalApiAllowed] = useState(false);
-  const [userPlan, setUserPlan] = useState<SubscriptionPlan>("free");
+  const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>(() =>
+    quotaDraftsForKeys(initialKeys)
+  );
+  const [groups, setGroups] = useState<ImageBackendGroupOption[]>(
+    initialSnapshot?.groups ?? []
+  );
+  const [loading, setLoading] = useState(!initialSnapshot);
+  const [externalApiAllowed, setExternalApiAllowed] = useState(
+    initialSnapshot
+      ? (initialCapabilities?.features["externalApi.keys.manage"] ??
+          canUseExternalApi(initialPlan))
+      : false
+  );
+  const [userPlan, setUserPlan] = useState<SubscriptionPlan>(initialPlan);
   const [capabilities, setCapabilities] =
-    useState<PlanCapabilitySnapshot | null>(null);
+    useState<PlanCapabilitySnapshot | null>(initialCapabilities);
   const moderationOptions =
     capabilities?.moderation.allowedBlockRiskLevels ||
     getAllowedModerationBlockRiskLevels(userPlan);
@@ -180,27 +187,9 @@ export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
     getExternalApiKeys,
     {
       onSuccess: ({ data }) => {
-        const nextKeys = (data?.keys || []).map((key) => ({
-            ...key,
-            creditLimit:
-              typeof key.creditLimit === "number" ? key.creditLimit : null,
-            creditsUsed: Number(key.creditsUsed || 0),
-            relayOnly: key.relayOnly === true,
-            moderationBlockRiskLevel:
-              key.moderationBlockRiskLevel === "medium" ||
-              key.moderationBlockRiskLevel === "high"
-                ? key.moderationBlockRiskLevel
-                : ("low" as ModerationBlockRiskLevel),
-          }));
+        const nextKeys = normalizeExternalApiKeySummaries(data?.keys || []);
         setKeys(nextKeys);
-        setQuotaDrafts(
-          Object.fromEntries(
-            nextKeys.map((key) => [
-              key.id,
-              key.creditLimit === null ? "" : String(key.creditLimit),
-            ])
-          )
-        );
+        setQuotaDrafts(quotaDraftsForKeys(nextKeys));
         setGroups((data?.groups || []) as ImageBackendGroupOption[]);
         setLoading(false);
       },
@@ -309,6 +298,7 @@ export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
   useEffect(() => {
     if (didLoadRef.current) return;
     didLoadRef.current = true;
+    if (initialSnapshot) return;
     loadKeys();
     getMyPlanAction().then((result) => {
       const plan = result?.data?.plan || "free";
@@ -323,7 +313,7 @@ export function ExternalApiKeySection({ timeZone }: { timeZone?: string }) {
         getAllowedModerationBlockRiskLevels(plan);
       setNewKeyModerationLevel(allowed.at(-1) || "low");
     });
-  }, [loadKeys]);
+  }, [loadKeys, initialSnapshot]);
 
   const copyNewKey = async () => {
     if (!newKey) return;

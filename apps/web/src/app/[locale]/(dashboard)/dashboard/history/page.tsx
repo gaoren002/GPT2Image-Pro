@@ -17,6 +17,12 @@ import {
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 import { HistoryClient } from "@/features/image-generation/components/history-client";
+import {
+  type GenerationListSearchParams,
+  getSingleGenerationListParam,
+  normalizeGenerationListDate,
+  normalizeGenerationListPage,
+} from "@/features/image-generation/generation-list-filters";
 import { extractGenerationCreditDetails } from "@/features/image-generation/credit-calculation-details";
 import {
   extractGenerationReferenceImages,
@@ -25,14 +31,7 @@ import {
 import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 
 interface HistoryPageProps {
-  searchParams: Promise<{
-    page?: string;
-    q?: string;
-    status?: string;
-    model?: string;
-    from?: string;
-    to?: string;
-  }>;
+  searchParams: Promise<GenerationListSearchParams>;
 }
 
 /**
@@ -93,11 +92,21 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
 
   const params = await searchParams;
   const PAGE_SIZE = 20;
-  const pageParam = Number(params.page);
-  const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+  const page = normalizeGenerationListPage(params.page, PAGE_SIZE);
   const offset = (page - 1) * PAGE_SIZE;
+  const queryInput = getSingleGenerationListParam(params.q).trim();
+  const statusInput = getSingleGenerationListParam(params.status);
+  const modelInput = getSingleGenerationListParam(params.model);
+  const fromInput = normalizeGenerationListDate(params.from);
+  const toInput = normalizeGenerationListDate(params.to);
 
-  const where = buildHistoryWhere(user.id, params);
+  const where = buildHistoryWhere(user.id, {
+    q: queryInput,
+    status: statusInput,
+    model: modelInput,
+    from: fromInput,
+    to: toInput,
+  });
 
   // 模型下拉选项:该用户实际用过的模型(排除被关键词/状态过滤干扰,
   // 独立查询全量 distinct,通常个位数)
@@ -159,22 +168,22 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
       <HistoryClient
         key={[
           page,
-          params.q ?? "",
-          params.status ?? "",
-          params.model ?? "",
-          params.from ?? "",
-          params.to ?? "",
+          queryInput,
+          statusInput,
+          modelInput,
+          fromInput,
+          toInput,
         ].join("|")}
         initialGenerations={withUrls}
         totalCount={totalResult[0]?.count ?? 0}
         page={page}
         pageSize={PAGE_SIZE}
         timeZone={timeZone}
-        searchQuery={params.q?.trim() ?? ""}
-        searchStatus={params.status ?? ""}
-        searchModel={params.model ?? ""}
-        searchFrom={params.from ?? ""}
-        searchTo={params.to ?? ""}
+        searchQuery={queryInput}
+        searchStatus={statusInput}
+        searchModel={modelInput}
+        searchFrom={fromInput}
+        searchTo={toInput}
         modelOptions={modelOptions}
       />
     </div>

@@ -19,20 +19,20 @@ import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 import { GalleryClient } from "@/features/image-generation/components/gallery-client";
 import {
+  type GenerationListSearchParams,
+  getSingleGenerationListParam,
+  normalizeGenerationListDate,
+  normalizeGenerationListPage,
+} from "@/features/image-generation/generation-list-filters";
+import {
   extractGenerationReferenceImages,
   extractPromptRepairNotice,
 } from "@/features/image-generation/generation-metadata";
+import { hasMoreGalleryItems } from "@/features/image-generation/gallery-pagination";
 import { hasLayeredMeta } from "@/features/psd-export/layered-meta";
 
 interface GalleryPageProps {
-  searchParams: Promise<{
-    page?: string;
-    tab?: string;
-    q?: string;
-    model?: string;
-    from?: string;
-    to?: string;
-  }>;
+  searchParams: Promise<GenerationListSearchParams>;
 }
 
 type GalleryOutputRole = "final" | "agent_draft" | "upload";
@@ -144,21 +144,21 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
 
   const params = await searchParams;
   const PAGE_SIZE = 20;
+  const tab = getSingleGenerationListParam(params.tab);
   const activeTab: GalleryTab =
-    params.tab === "agent-drafts"
+    tab === "agent-drafts"
       ? "agent-drafts"
-      : params.tab === "uploads"
+      : tab === "uploads"
         ? "uploads"
         : "final";
-  const pageParam = Number(params.page);
-  const page = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+  const page = normalizeGenerationListPage(params.page, PAGE_SIZE);
   const limit = page * PAGE_SIZE;
   // 关键词搜索:提示词/改写词/模型 ilike 子串(三个标签页共用);
   // 模型精确筛选 + 日期范围一并并入公共条件。
-  const keyword = params.q?.trim().slice(0, 120) ?? "";
-  const modelFilter = params.model?.trim() ?? "";
-  const fromInput = params.from?.trim() ?? "";
-  const toInput = params.to?.trim() ?? "";
+  const keyword = getSingleGenerationListParam(params.q).trim().slice(0, 120);
+  const modelFilter = getSingleGenerationListParam(params.model).trim();
+  const fromInput = normalizeGenerationListDate(params.from);
+  const toInput = normalizeGenerationListDate(params.to);
   const keywordCondition = and(
     keyword
       ? or(
@@ -219,10 +219,8 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     sql`(${generation.metadata}::jsonb) @? '$.inputImages.images[0]'`,
     keywordCondition
   );
-  // 仅 final 标签页用到带 LIMIT 的成品主查询(finalCondition 命中密集，LIMIT 命中快)。
-  // drafts/uploads 标签页的展示来自下面无 LIMIT 的 draft/upload 查询(走 GIN)，故此处不重复
-  // 执行——否则会在这两个标签页跑一条结果用不到、且对稀疏谓词极慢(~1.3s)的 LIMIT 查询。
-  // 同时移除原 totalResult:它只在 final 标签页用到，且与 finalCountResult 完全等价(重复计数)。
+  // 每个标签仅查询自身要展示的实体行；其余标签只保留徽章 COUNT，
+  // 避免读取并解析当前页面用不到的 metadata。
   const isFinalTab = activeTab === "final";
   const [
     finalRows,
@@ -248,18 +246,22 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
       .from(generation)
       .where(completedStorageCondition),
     db.select({ count: count() }).from(generation).where(draftPrimaryCondition),
-    db
-      .select()
-      .from(generation)
-      .where(draftCondition)
-      .orderBy(desc(generation.createdAt))
-      .limit(limit),
-    db
-      .select()
-      .from(generation)
-      .where(uploadCondition)
-      .orderBy(desc(generation.createdAt))
-      .limit(limit),
+    activeTab === "agent-drafts"
+      ? db
+          .select()
+          .from(generation)
+          .where(draftCondition)
+          .orderBy(desc(generation.createdAt))
+          .limit(limit)
+      : Promise.resolve([] as Array<typeof generation.$inferSelect>),
+    activeTab === "uploads"
+      ? db
+          .select()
+          .from(generation)
+          .where(uploadCondition)
+          .orderBy(desc(generation.createdAt))
+          .limit(limit)
+      : Promise.resolve([] as Array<typeof generation.$inferSelect>),
     // 徽章计数：独立 COUNT 查询，避免加载全部行到内存
     // 注意：draft 的 COUNT 是父行数（近似值），因为每个父行可能通过
     // extractAgentDraftGenerations 展开为多个子项，但作为徽章计数足够
@@ -278,16 +280,11 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     .map((row) => row.model)
     .filter((value): value is string => Boolean(value));
 
-  const allDraftItems = extractAgentDraftGenerations(draftParentRows);
-  const allUploadItems = extractUploadedImageGenerations(
-    uploadParentRows,
-    copy
-  );
-  const displayedItems =
+  const allItems =
     activeTab === "agent-drafts"
-      ? allDraftItems.slice(0, limit)
+      ? extractAgentDraftGenerations(draftParentRows)
       : activeTab === "uploads"
-        ? allUploadItems.slice(0, limit)
+        ? extractUploadedImageGenerations(uploadParentRows, copy)
         : finalRows.map((g) => ({
             id: g.id,
             parentId: g.id,
@@ -312,12 +309,23 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     (draftPrimaryCountResult[0]?.count ?? 0);
   const draftCount = draftCountResult[0]?.count ?? 0;
   const uploadCount = uploadCountResult[0]?.count ?? 0;
-  const totalCount =
+  const totalParentCount =
     activeTab === "agent-drafts"
       ? draftCount
       : activeTab === "uploads"
         ? uploadCount
         : finalCount;
+  const hasMore = hasMoreGalleryItems({
+    itemCount: allItems.length,
+    limit,
+    parentCount:
+      activeTab === "agent-drafts"
+        ? draftParentRows.length
+        : activeTab === "uploads"
+          ? uploadParentRows.length
+          : finalRows.length,
+    totalParentCount,
+  });
 
   return (
     <div className="container mx-auto space-y-8 px-4 py-6 md:px-6">
@@ -331,8 +339,8 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
       </div>
       <GalleryClient
         key={`${activeTab}-${page}-${keyword}-${modelFilter}-${fromInput}-${toInput}`}
-        initialGenerations={displayedItems}
-        totalCount={totalCount}
+        initialGenerations={allItems.slice(0, limit)}
+        hasMore={hasMore}
         finalCount={finalCount}
         draftCount={draftCount}
         uploadCount={uploadCount}

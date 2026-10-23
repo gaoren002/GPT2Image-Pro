@@ -55,7 +55,7 @@ export interface GenerationWithUrl {
 
 export interface GalleryClientProps {
   initialGenerations: GenerationWithUrl[];
-  totalCount: number;
+  hasMore: boolean;
   finalCount: number;
   draftCount: number;
   uploadCount: number;
@@ -73,9 +73,44 @@ export interface GalleryClientProps {
   modelOptions: string[];
 }
 
+/** 图库多选删除按钮；派生图片沿用单图预览的权限，仅成品可删除生成记录。 */
+export function GalleryBatchDeleteButton({
+  activeTab,
+  confirmed,
+  deleting,
+  selectedCount,
+  onDelete,
+}: {
+  activeTab: GalleryClientProps["activeTab"];
+  confirmed: boolean;
+  deleting: boolean;
+  selectedCount: number;
+  onDelete: () => void;
+}) {
+  const isZh = useLocale() === "zh";
+  const copy = (en: string, zh: string) => (isZh ? zh : en);
+  if (activeTab !== "final") return null;
+  return (
+    <Button
+      variant={confirmed ? "destructive" : "outline"}
+      size="sm"
+      disabled={deleting}
+      onClick={onDelete}
+    >
+      <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+      {confirmed
+        ? copy(
+            `Confirm delete ${selectedCount} items`,
+            `确认删除 ${selectedCount} 项`
+          )
+        : copy("Delete", "删除")}
+    </Button>
+  );
+}
+
 export function GalleryClient({
   initialGenerations,
-  totalCount,
+  hasMore,
   finalCount,
   draftCount,
   uploadCount,
@@ -90,7 +125,7 @@ export function GalleryClient({
 }: GalleryClientProps) {
   const locale = useLocale();
   const isZh = locale === "zh";
-  const copy = (en: string, zh: string) => (isZh ? zh : en);
+  const copy = useCallback((en: string, zh: string) => (isZh ? zh : en), [isZh]);
   const router = useRouter();
   const [items, setItems] = useState<GenerationWithUrl[]>(initialGenerations);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -116,7 +151,6 @@ export function GalleryClient({
   const [batchDeleting, setBatchDeleting] = useState(false);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const hasMore = items.length < totalCount;
 
   // -- 多选模式:退出时清空选中集 --
   const exitSelectMode = useCallback(() => {
@@ -192,6 +226,8 @@ export function GalleryClient({
 
   // -- 批量删除 --
   const handleBatchDelete = useCallback(async () => {
+    // 草稿与上传图的 ID 来自元数据展开，不能交给生成记录删除接口。
+    if (activeTab !== "final") return;
     if (!confirmBatchDelete) {
       setConfirmBatchDelete(true);
       return;
@@ -221,7 +257,7 @@ export function GalleryClient({
     } finally {
       setBatchDeleting(false);
     }
-  }, [confirmBatchDelete, selectedIds, copy]);
+  }, [activeTab, confirmBatchDelete, selectedIds, copy]);
 
   // -- 全选 / 取消全选 --
   const handleSelectAll = useCallback(() => {
@@ -478,6 +514,17 @@ export function GalleryClient({
     </div>
   );
 
+  // 父记录可能没有有效图片，空态也必须保留读取后续父记录的入口。
+  const loadMore = hasMore ? (
+    <div className="flex justify-center pt-4">
+      <Button asChild variant="outline">
+        <Link href={nextPageHref} scroll={false}>
+          {copy("Load more", "加载更多")}
+        </Link>
+      </Button>
+    </div>
+  ) : null;
+
   if (items.length === 0) {
     // 空态文案区分"库本来就空"与"筛选无结果":任一筛选生效即视为后者。
     const hasGalleryFilters =
@@ -526,6 +573,7 @@ export function GalleryClient({
             <Link href={createHref}>{copy("Create an image", "创建图片")}</Link>
           </Button>
         </div>
+        {loadMore}
       </div>
     );
   }
@@ -571,15 +619,7 @@ export function GalleryClient({
         ))}
       </div>
 
-      {hasMore && (
-        <div className="flex justify-center pt-4">
-          <Button asChild variant="outline">
-            <Link href={nextPageHref} scroll={false}>
-              {copy("Load more", "加载更多")}
-            </Link>
-          </Button>
-        </div>
-      )}
+      {loadMore}
 
       {/* 多选模式下的浮动批量操作栏:从底部滑入淡入,模态级投影 */}
       {selectMode && selectedIds.size > 0 && (
@@ -601,20 +641,13 @@ export function GalleryClient({
               <Download className="mr-1.5 h-3.5 w-3.5" />
               {copy("Download", "下载")}
             </Button>
-            <Button
-              variant={confirmBatchDelete ? "destructive" : "outline"}
-              size="sm"
-              disabled={batchDeleting}
-              onClick={handleBatchDelete}
-            >
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-              {confirmBatchDelete
-                ? copy(
-                    `Confirm delete ${selectedIds.size} items`,
-                    `确认删除 ${selectedIds.size} 项`
-                  )
-                : copy("Delete", "删除")}
-            </Button>
+            <GalleryBatchDeleteButton
+              activeTab={activeTab}
+              confirmed={confirmBatchDelete}
+              deleting={batchDeleting}
+              selectedCount={selectedIds.size}
+              onDelete={handleBatchDelete}
+            />
           </div>
         </div>
       )}

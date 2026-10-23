@@ -1,7 +1,8 @@
 // 系统设置读写与运行时取值。读路径(loadSystemSettingsMap)带 10s 进程内
-// 缓存;DB 查询失败按空设置兜底并负缓存 5s——空设置与空库行为一致(全部
-// getRuntimeSetting* 落代码默认值),保证 DB 抖动时整站不 500,同时负缓存
-// 兼顾故障期不打爆 DB 与恢复后快速生效。写路径不经缓存读取函数,不受影响。
+// 缓存，并合并缓存缺失时的并发查询；DB 查询失败按空设置兜底并负缓存 5s。
+// 空设置与空库行为一致(全部 getRuntimeSetting* 落代码默认值),保证 DB
+// 抖动时整站不 500；负缓存兼顾故障期不打爆 DB 与恢复后快速生效。
+// 写路径不经缓存读取函数,不受影响。
 import { createHash } from "node:crypto";
 
 import { db } from "@repo/database";
@@ -40,6 +41,8 @@ let settingsCache:
       values: Map<string, unknown>;
     }
   | undefined;
+let settingsLoad: Promise<Map<string, unknown>> | undefined;
+let settingsCacheGeneration = 0;
 
 function normalizeStoredValue(value: unknown) {
   if (typeof value === "string") {
@@ -49,12 +52,8 @@ function normalizeStoredValue(value: unknown) {
   return value;
 }
 
-async function loadSystemSettingsMap() {
-  const now = Date.now();
-  if (settingsCache && settingsCache.expiresAt > now) {
-    return settingsCache.values;
-  }
-
+/** 读取一版全局配置；失效代次的在途读仍返回给原调用方，但不能回填当前缓存。 */
+async function readSystemSettingsMap(generation: number, now: number) {
   let rows: Array<{ key: string; value: unknown }>;
   try {
     rows = await db
@@ -72,10 +71,12 @@ async function loadSystemSettingsMap() {
       err
     );
     const empty = new Map<string, unknown>();
-    settingsCache = {
-      expiresAt: now + NEGATIVE_CACHE_TTL_MS,
-      values: empty,
-    };
+    if (generation === settingsCacheGeneration) {
+      settingsCache = {
+        expiresAt: now + NEGATIVE_CACHE_TTL_MS,
+        values: empty,
+      };
+    }
     return empty;
   }
 
@@ -87,16 +88,38 @@ async function loadSystemSettingsMap() {
     }
   }
 
-  settingsCache = {
-    expiresAt: now + CACHE_TTL_MS,
-    values,
-  };
+  if (generation === settingsCacheGeneration) {
+    settingsCache = {
+      expiresAt: now + CACHE_TTL_MS,
+      values,
+    };
+  }
 
   return values;
 }
 
+/** 同一代的并发配置键共享查询；有效配置与负缓存的 TTL 仍按原规则计算。 */
+async function loadSystemSettingsMap() {
+  const now = Date.now();
+  if (settingsCache && settingsCache.expiresAt > now) {
+    return settingsCache.values;
+  }
+  if (settingsLoad) return settingsLoad;
+
+  const pending = readSystemSettingsMap(settingsCacheGeneration, now);
+  settingsLoad = pending;
+  try {
+    return await pending;
+  } finally {
+    // 写入失效后可能已启动下一代查询，旧查询完成时不能清除新查询的合并入口。
+    if (settingsLoad === pending) settingsLoad = undefined;
+  }
+}
+
 export function clearSystemSettingsCache() {
+  settingsCacheGeneration += 1;
   settingsCache = undefined;
+  settingsLoad = undefined;
   // 级联失效:下游缓存(如营销首页 home-data)注册同一个失效点,
   // 任何写路径(管理面板/UOL/sla 开关)保存后即刻全站生效
   settingsCacheInvalidator?.();

@@ -35,6 +35,15 @@ const deletedKeys = vi.hoisted(() => ({ value: [] as string[] }));
 // 模拟 DB 抖动/不可达，供 loadSystemSettingsMap 失败兜底用例使用。
 const selectFailure = vi.hoisted(() => ({ error: null as Error | null }));
 
+// 可控的在途查询快照，供并发读和“写入时旧查询尚未完成”的交错回归使用。
+const selectResponses = vi.hoisted(() => {
+  const responses: Array<{
+    result: Promise<StoredSetting[]>;
+    start: () => void;
+  }> = [];
+  return responses;
+});
+
 const dbMock = vi.hoisted(() => {
   const readRows = () =>
     [...store.values()].map((row) => ({
@@ -44,18 +53,22 @@ const dbMock = vi.hoisted(() => {
       updatedAt: row.updatedAt ?? null,
     }));
 
+  const readResult = () => {
+    const pending = selectResponses.shift();
+    if (pending) {
+      pending.start();
+      return pending.result;
+    }
+    return selectFailure.error
+      ? Promise.reject(selectFailure.error)
+      : Promise.resolve(readRows());
+  };
+
   const selectBuilder = {
     from: vi.fn(() => selectBuilder),
-    where: vi.fn(async () => {
-      if (selectFailure.error) throw selectFailure.error;
-      return readRows();
-    }),
+    where: vi.fn(() => readResult()),
     // biome-ignore lint/suspicious/noThenProperty: 刻意暴露 then 模拟 drizzle 查询构造器的 thenable(await 直接消费)
-    then: vi.fn((resolve, reject) =>
-      selectFailure.error
-        ? Promise.reject(selectFailure.error).then(resolve, reject)
-        : Promise.resolve(readRows()).then(resolve, reject)
-    ),
+    then: vi.fn((resolve, reject) => readResult().then(resolve, reject)),
   };
 
   // upsert 语义：onConflictDoUpdate 时覆盖既有行，模拟 setSystemSettings/
@@ -654,6 +667,131 @@ describe("loadSystemSettingsMap 查询失败兜底(空设置 + 负缓存 5s)", (
       "Asia/Shanghai"
     );
     expect(dbMock.select).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** 构造可控 DB 响应；started 确保测试先观测到查询开始，再安排写入或返回。 */
+function createPendingSelect() {
+  let start: () => void = () => undefined;
+  let resolve: (rows: StoredSetting[]) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  const started = new Promise<void>((done) => {
+    start = done;
+  });
+  const result = new Promise<StoredSetting[]>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { response: { result, start }, started, resolve, reject };
+}
+
+describe("运行时配置并发读取与写入失效", () => {
+  beforeEach(() => {
+    store.clear();
+    selectResponses.length = 0;
+    selectFailure.error = null;
+    clearSystemSettingsCache();
+    dbMock.select.mockClear();
+    delete process.env.APP_TIME_ZONE;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    selectFailure.error = null;
+    vi.restoreAllMocks();
+  });
+
+  it("冷缓存下的不同配置键共享一次查询", async () => {
+    const rows = [
+      { key: "APP_TIME_ZONE", value: "Asia/Shanghai" },
+      { key: "IMAGE_BASE_CREDITS_1024", value: 3 },
+    ];
+    for (const row of rows) store.set(row.key, row);
+    const pending = createPendingSelect();
+    selectResponses.push(pending.response);
+    const values = Promise.all([
+      getRuntimeSettingString("APP_TIME_ZONE"),
+      getRuntimeSettingNumber("IMAGE_BASE_CREDITS_1024", 7),
+      getRuntimeSettingString("APP_TIME_ZONE"),
+    ]);
+    await pending.started;
+    pending.resolve(rows);
+
+    await expect(values).resolves.toEqual([
+      "Asia/Shanghai",
+      3,
+      "Asia/Shanghai",
+    ]);
+    expect(dbMock.select).toHaveBeenCalledTimes(1);
+  });
+
+  it("并发故障只记录一次日志并共享原有负缓存", async () => {
+    const pending = createPendingSelect();
+    selectResponses.push(pending.response);
+    selectFailure.error = new Error("db down");
+    const values = Promise.all([
+      getRuntimeSettingNumber("IMAGE_BASE_CREDITS_1024", 7),
+      getRuntimeSettingString("APP_TIME_ZONE"),
+      getRuntimeSettingNumber("IMAGE_BASE_CREDITS_4K", 11),
+    ]);
+    await pending.started;
+    pending.reject(selectFailure.error);
+
+    await expect(values).resolves.toEqual([7, undefined, 11]);
+    await expect(
+      getRuntimeSettingString("APP_TIME_ZONE")
+    ).resolves.toBeUndefined();
+    expect(dbMock.select).toHaveBeenCalledTimes(1);
+    expect(console.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("写入后启动新查询，旧查询完成也不能回填缓存或拆散新查询", async () => {
+    const previous = createPendingSelect();
+    selectResponses.push(previous.response);
+    const oldRead = getRuntimeSettingString("APP_TIME_ZONE");
+    await previous.started;
+
+    await setSystemSettings(
+      [{ key: "APP_TIME_ZONE", value: "Asia/Shanghai" }],
+      "tester"
+    );
+    const current = createPendingSelect();
+    selectResponses.push(current.response);
+    const freshRead = getRuntimeSettingString("APP_TIME_ZONE");
+    await current.started;
+
+    previous.resolve([{ key: "APP_TIME_ZONE", value: "UTC" }]);
+    await expect(oldRead).resolves.toBe("UTC");
+    const joinedRead = getRuntimeSettingString("APP_TIME_ZONE");
+    current.resolve([{ key: "APP_TIME_ZONE", value: "Asia/Shanghai" }]);
+
+    await expect(freshRead).resolves.toBe("Asia/Shanghai");
+    await expect(joinedRead).resolves.toBe("Asia/Shanghai");
+    await expect(getRuntimeSettingString("APP_TIME_ZONE")).resolves.toBe(
+      "Asia/Shanghai"
+    );
+    expect(dbMock.select).toHaveBeenCalledTimes(2);
+  });
+
+  it("写入前的查询稍后失败，不能覆盖已经刷新的正常缓存", async () => {
+    const previous = createPendingSelect();
+    selectResponses.push(previous.response);
+    const oldRead = getRuntimeSettingString("APP_TIME_ZONE");
+    await previous.started;
+    await setSystemSettings(
+      [{ key: "APP_TIME_ZONE", value: "Asia/Shanghai" }],
+      "tester"
+    );
+    await expect(getRuntimeSettingString("APP_TIME_ZONE")).resolves.toBe(
+      "Asia/Shanghai"
+    );
+
+    previous.reject(new Error("old query failed"));
+    await expect(oldRead).resolves.toBeUndefined();
+    await expect(getRuntimeSettingString("APP_TIME_ZONE")).resolves.toBe(
+      "Asia/Shanghai"
+    );
+    expect(dbMock.select).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -66,12 +66,9 @@ function makeTx(tableRows: {
   const returningRows: Record<string, Array<Record<string, unknown>>> = {};
 
   const chainFinal = (rows: Array<Record<string, unknown>> = []) => {
-    const fn = () => Promise.resolve(rows);
-    return Object.assign(fn, {
+    return Object.assign(Promise.resolve(rows), {
       returning: () => Promise.resolve(rows),
-      then: (onFulfilled: (v: unknown) => unknown) =>
-        Promise.resolve(rows).then(onFulfilled),
-      catch: () => Promise.resolve(rows),
+      for: () => Promise.resolve(rows),
     });
   };
 
@@ -133,10 +130,8 @@ function makeTx(tableRows: {
             : "other";
         calls.updates.push({ table: tableKind, values: v });
         return {
-          where: () => ({
+          where: () => Object.assign(Promise.resolve([{ id: "updated" }]), {
             returning: () => Promise.resolve([{ id: "updated" }]),
-            then: (onFulfilled: (v: unknown) => unknown) =>
-              Promise.resolve([{ id: "updated" }]).then(onFulfilled),
           }),
         };
       },

@@ -350,7 +350,7 @@ export async function ensureRegistrationBonusExpiry(userId: string) {
     .returning({ id: creditsBatch.id });
 
   if (updatedBatches.length > 0) {
-    await processExpiredBatches();
+    await processExpiredBatches({ userId });
   }
 }
 
@@ -464,8 +464,8 @@ export async function grantCredits(params: GrantCreditsParams) {
         : expiresAt;
     // refund 批次合并:退款按 generation 逐笔发放,若每笔一条批次行,单用户
     // 可积累数万条 active 批次(2026-10 生产实测 42615 条/用户),扣费挑选
-    // 与余额列举成本随批次数线性放大。退款改为并入该用户唯一的"退款池批次"
-    // (source_ref 为 NULL 的 active refund 批次;不存在则首笔创建)。
+    // 与余额列举成本随批次数线性放大。退款改为并入该用户已有的"退款池批次"
+    // (source_ref 为 NULL 且未过期的 active refund 批次;不存在则首笔创建)。
     // 幂等不受影响:退款查重在调用方按 credits_transaction(source_ref)
     // 判断(见 refundGenerationCredits),不依赖批次行;amount 记 pool 累加
     // 前的原始值,remaining 每次加 amount。其他 sourceType 行为不变。
@@ -479,11 +479,18 @@ export async function grantCredits(params: GrantCreditsParams) {
             eq(creditsBatch.userId, userId),
             eq(creditsBatch.sourceType, "refund"),
             eq(creditsBatch.status, "active"),
-            isNull(creditsBatch.sourceRef)
+            isNull(creditsBatch.sourceRef),
+            or(
+              isNull(creditsBatch.expiresAt),
+              gt(creditsBatch.expiresAt, issuedAt)
+            )
           )
         )
         .orderBy(asc(creditsBatch.issuedAt))
-        .limit(1);
+        .limit(1)
+        // 先锁批次再改余额，与消费路径保持同一顺序。否则消费可在读池后
+        // 将其标为 consumed，退款随后只增加 remaining，导致余额无法消费。
+        .for("update");
 
       if (pool) {
         batchId = pool.id;
@@ -742,7 +749,11 @@ export async function consumeCredits(
           consumedFromBatch: consumeFromThisBatch,
         });
 
-        remainingToConsume -= consumeFromThisBatch;
+        // 批次与账本均保留两位小数；每步归一化，避免 0.4 - 4 × 0.1
+        // 留下正浮点余数，让足额消费在批次耗尽后被误判为余额不足。
+        remainingToConsume = normalizeCreditAmount(
+          remainingToConsume - consumeFromThisBatch
+        );
       }
 
       if (remainingToConsume > 0) {

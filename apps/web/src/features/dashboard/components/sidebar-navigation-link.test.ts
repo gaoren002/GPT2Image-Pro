@@ -12,14 +12,28 @@ import {
 const observed = vi.hoisted(() => ({
   prefetch: null as boolean | null,
   renders: [] as Array<boolean | null>,
+  onNavigate: undefined as
+    | ((event: { preventDefault: () => void }) => void)
+    | undefined,
+}));
+const modulePreload = vi.hoisted(() =>
+  vi.fn<(href: string) => Promise<unknown>>()
+);
+vi.mock("@/features/dashboard/sidebar-page-module-preload", () => ({
+  preloadSidebarPageModule: modulePreload,
 }));
 vi.mock("next/link", () => ({
   default: ({
     prefetch,
+    onNavigate,
     ...props
-  }: ComponentProps<"a"> & { prefetch?: boolean | null }) => {
+  }: ComponentProps<"a"> & {
+    prefetch?: boolean | null;
+    onNavigate?: (event: { preventDefault: () => void }) => void;
+  }) => {
     observed.prefetch = prefetch ?? null;
     observed.renders.push(observed.prefetch);
+    observed.onNavigate = onNavigate;
     return createElement("a", props);
   },
 }));
@@ -76,6 +90,8 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   observed.prefetch = null;
   observed.renders = [];
+  observed.onNavigate = undefined;
+  modulePreload.mockReset().mockResolvedValue({ status: "loaded" });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -311,5 +327,38 @@ describe("SidebarNavigationLink", () => {
     await renderStableSidebar({ href, pathname: detail });
     expect(hasVisitedHref(href)).toBe(true);
     expect(observed.prefetch).toBeNull();
+  });
+
+  it("只在 Next 确认导航时传递完整 href 预热模块，hover/focus/touch 不预热", async () => {
+    const href = "/en/dashboard/history?page=2#details";
+    await renderLink({ href, isActive: false });
+    await dispatch("mouseover");
+    await advance(100);
+    await dispatch("focusin");
+    await dispatch("touchstart");
+    expect(modulePreload).not.toHaveBeenCalled();
+
+    // 只驱动 Link 的公开回调；modifier 与导航判定仍由真实 Next 实现。
+    expect(observed.onNavigate).toBeTypeOf("function");
+    const event = { preventDefault: vi.fn() };
+    observed.onNavigate?.(event);
+    expect(modulePreload).toHaveBeenCalledExactlyOnceWith(href);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("onNavigate 不等待未结束的模块 Promise，不拦截正常导航返回", async () => {
+    const pending = new Promise<unknown>(() => {
+      // 模块保持加载中，导航回调仍须立即返回。
+    });
+    modulePreload.mockReturnValue(pending);
+    await renderLink();
+    expect(observed.onNavigate).toBeTypeOf("function");
+    const event = { preventDefault: vi.fn() };
+    const result = observed.onNavigate?.(event);
+    expect(result).toBeUndefined();
+    expect(modulePreload).toHaveBeenCalledExactlyOnceWith(
+      "/zh/dashboard/history"
+    );
+    expect(event.preventDefault).not.toHaveBeenCalled();
   });
 });

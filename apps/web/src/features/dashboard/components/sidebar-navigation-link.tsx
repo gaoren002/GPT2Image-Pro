@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { preloadSidebarPageModule } from "@/features/dashboard/sidebar-page-module-preload";
 
 const HOVER_PREFETCH_DELAY_MS = 100;
 
@@ -124,6 +125,10 @@ function SidebarNavigationLinkState({
       title={title}
       className={className}
       onClick={onClick}
+      onNavigate={() => {
+        // Next 已确认客户端导航；JS 导入与正常 RSC 并行，不等待模块就绪或拦截导航。
+        void preloadSidebarPageModule(href);
+      }}
       prefetch={isActive || hasVisited || hasIntent ? null : false}
       onMouseEnter={scheduleHoverPrefetch}
       onMouseLeave={disablePrefetch}

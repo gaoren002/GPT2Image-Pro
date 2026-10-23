@@ -40,12 +40,16 @@ import Link, { useLinkStatus } from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useAction } from "next-safe-action/hooks";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type CurrentSession,
   useCurrentSession,
 } from "@/features/auth/hooks/use-current-session";
 import { SIDEBAR_UNREAD_CHANGED_EVENT } from "@/features/dashboard/components/sidebar-unread-sync";
+import {
+  SidebarNavigationLink,
+  useSidebarVisitedHrefs,
+} from "@/features/dashboard/components/sidebar-navigation-link";
 import { useSidebar } from "@/features/dashboard/context";
 
 /**
@@ -248,8 +252,73 @@ export function DashboardSidebar({
     router.push(`/${locale}/dashboard/settings`);
   };
 
-  const localizedHref = (href: string) =>
-    href.startsWith("/") ? `/${locale}${href}` : href;
+  const localizedHref = useCallback(
+    (href: string) => (href.startsWith("/") ? `/${locale}${href}` : href),
+    [locale]
+  );
+
+  // 渲染与曾访登记共用同一份有限菜单；桌面与 Sheet 子树卸载不会清掉稳定层记录。
+  const navigationGroups = useMemo(
+    () =>
+      dashboardConfig.sidebarNav.map((group) => ({
+        ...group,
+        items: [
+          ...group.items,
+          ...(isAdmin
+            ? [
+                {
+                  title: "Global Status",
+                  href: "/dashboard/admin/status",
+                  icon: Activity,
+                },
+                {
+                  title: "User Management",
+                  href: "/dashboard/admin/users",
+                  icon: Users,
+                },
+                {
+                  title: "Announcement Management",
+                  href: "/dashboard/admin/announcements",
+                  icon: Megaphone,
+                },
+                {
+                  title: "System Settings",
+                  href: "/dashboard/admin/settings",
+                  icon: Shield,
+                },
+              ]
+            : isObserverAdmin
+              ? [
+                  {
+                    title: "Global Status",
+                    href: "/dashboard/admin/status",
+                    icon: Activity,
+                  },
+                  {
+                    title: "Image Backend Pool",
+                    href: "/dashboard/admin/settings",
+                    icon: Server,
+                  },
+                ]
+              : []),
+        ],
+      })),
+    [isAdmin, isObserverAdmin]
+  );
+  const navigationHrefs = useMemo(
+    () =>
+      new Set(
+        navigationGroups.flatMap((group) =>
+          group.items.map((item) => localizedHref(item.href))
+        )
+      ),
+    [navigationGroups, localizedHref]
+  );
+  const hasVisitedHref = useSidebarVisitedHrefs(
+    user?.id,
+    pathname,
+    navigationHrefs
+  );
 
   // 导航完全交给 <Link> 软导航。WHY 不拦截:Next 16 的路由动作队列里,新导航会
   // 把进行中的导航标记为丢弃并立即开始(app-router-instance dispatchAction),无需
@@ -305,7 +374,7 @@ export function DashboardSidebar({
 
         {/* 导航菜单 */}
         <nav className="flex-1 space-y-4 overflow-y-auto p-3">
-          {dashboardConfig.sidebarNav.map((group) => (
+          {navigationGroups.map((group) => (
             <div key={group.title}>
               {/* Group Label - 折叠时隐藏 */}
               {!collapsed && (
@@ -314,50 +383,12 @@ export function DashboardSidebar({
                 </p>
               )}
               <div className="space-y-0.5">
-                {[
-                  ...group.items,
-                  ...(isAdmin
-                    ? [
-                        {
-                          title: "Global Status",
-                          href: "/dashboard/admin/status",
-                          icon: Activity,
-                        },
-                        {
-                          title: "User Management",
-                          href: "/dashboard/admin/users",
-                          icon: Users,
-                        },
-                        {
-                          title: "Announcement Management",
-                          href: "/dashboard/admin/announcements",
-                          icon: Megaphone,
-                        },
-                        {
-                          title: "System Settings",
-                          href: "/dashboard/admin/settings",
-                          icon: Shield,
-                        },
-                      ]
-                    : isObserverAdmin
-                      ? [
-                          {
-                            title: "Global Status",
-                            href: "/dashboard/admin/status",
-                            icon: Activity,
-                          },
-                          {
-                            title: "Image Backend Pool",
-                            href: "/dashboard/admin/settings",
-                            icon: Server,
-                          },
-                        ]
-                      : []),
-                ].map((item) => {
+                {group.items.map((item) => {
                   // 去掉 locale 前缀后比较路径
                   const normalizedPath = pathname.replace(/^\/[a-z]{2}\//, "/");
+                  const isCurrentPage = normalizedPath === item.href;
                   const isActive =
-                    normalizedPath === item.href ||
+                    isCurrentPage ||
                     (item.href !== "/dashboard" &&
                       normalizedPath.startsWith(`${item.href}/`));
                   const Icon = item.icon;
@@ -371,12 +402,14 @@ export function DashboardSidebar({
                         ? unreadTicketCount
                         : 0;
                   const showUnread = unreadCount > 0;
-                  // 使用 Link 默认预取:各 dashboard 路由都有 loading.tsx,预取只取到该加载
-                  // 骨架(共享布局与页面数据查询都不执行),点击即可立刻切到骨架再流式出内容。
+                  const href = localizedHref(item.href);
+                  // 预取策略集中在主导航包装中；保留 loading 边界与 Next 软导航。
                   return (
-                    <Link
+                    <SidebarNavigationLink
                       key={item.href}
-                      href={localizedHref(item.href)}
+                      href={href}
+                      isActive={isCurrentPage}
+                      hasVisited={hasVisitedHref(href)}
                       title={collapsed ? translatedTitle : undefined}
                       onClick={() => handleNavigationClick(mobile)}
                       className={cn(
@@ -418,7 +451,7 @@ export function DashboardSidebar({
                           )}
                         </>
                       )}
-                    </Link>
+                    </SidebarNavigationLink>
                   );
                 })}
               </div>

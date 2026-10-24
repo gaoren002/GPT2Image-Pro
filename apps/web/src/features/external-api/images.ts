@@ -1,8 +1,6 @@
 import { logWarn } from "@repo/shared/logger";
-import {
-  buildPublicImageUrl,
-  parseStorageImageUrl,
-} from "@repo/shared/storage/signed-url";
+import { buildPublicImageUrl } from "@repo/shared/storage/signed-url";
+import { readGeneratedImage } from "@/features/image-generation/generated-image";
 import type { ImageGenerationOperationResult } from "@/features/image-generation/operations";
 import { isContentSafetyRejection } from "@/features/image-generation/sla-classification";
 import type { GeneratedImageOutput } from "@/features/image-generation/types";
@@ -64,60 +62,20 @@ function getRequestBaseUrl(request: Request) {
 }
 
 export function getPublicImageUrl(request: Request, imageUrl?: string) {
-  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request));
+  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request), 3600, {});
 }
 
 export async function getImageBase64(request: Request, imageUrl?: string) {
   if (!imageUrl) return undefined;
 
-  // 本地存储直读快路：若 imageUrl 指向我方存储对象，直接读对象拿字节，
-  // 省去一次回环 HTTP（远端引入的优化）。
-  const storageReference = parseStorageImageUrl(
-    imageUrl,
-    getRequestBaseUrl(request)
-  );
-  if (storageReference) {
-    const { getStorageProvider } = await import(
-      "@repo/shared/storage/providers"
-    );
-    const storage = await getStorageProvider();
-    const data = await storage.getObject(
-      storageReference.key,
-      storageReference.bucket
-    );
-    return Buffer.from(data).toString("base64");
-  }
-
-  const isAbsolute =
-    imageUrl.startsWith("http://") || imageUrl.startsWith("https://");
-  const url = isAbsolute
-    ? imageUrl
-    : new URL(imageUrl, getRequestBaseUrl(request)).toString();
-
-  // 仅在目标为第一方（相对路径或我方 origin）时转发客户端 Authorization。
-  // 纯中转模式下 imageUrl 可能是上游第三方 URL，绝不能把用户的 bearer token 外发。
-  let firstParty = !isAbsolute;
-  if (isAbsolute) {
-    try {
-      firstParty =
-        new URL(url).origin === new URL(getRequestBaseUrl(request)).origin;
-    } catch {
-      firstParty = false;
+  const buffer = await readGeneratedImage(
+    { imageUrl },
+    {
+      publicBaseUrl: getRequestBaseUrl(request),
+      signal: request.signal,
     }
-  }
-  const authorization = firstParty
-    ? request.headers.get("authorization")
-    : null;
-  // 仅在需要转发授权时附带 headers；否则用单参 fetch(url)，
-  // 避免向上游第三方传出任何（哪怕是 undefined 的）请求头。
-  const response = authorization
-    ? await fetch(url, { headers: { Authorization: authorization } })
-    : await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to load generated image: ${response.status}`);
-  }
-
-  return Buffer.from(await response.arrayBuffer()).toString("base64");
+  );
+  return buffer.toString("base64");
 }
 
 export async function toOpenAIImageData(
@@ -464,6 +422,14 @@ function parseUpstreamHttpError(message: string) {
 
 function parseLooseUpstreamStatusError(message: string) {
   const normalized = message.toLowerCase();
+
+  if (normalized.includes("generation task id is already in use")) {
+    return {
+      type: "invalid_request_error",
+      code: "idempotency_conflict",
+      status: 409,
+    };
+  }
   const statusMatch =
     /status_code\s*=\s*(\d{3})/.exec(normalized) ||
     /bad response status code\s+(\d{3})/.exec(normalized) ||
@@ -483,6 +449,20 @@ function parseLooseUpstreamStatusError(message: string) {
 }
 
 function classifyExternalApiError(message: string) {
+  if (message === "Image generation input exceeds the request memory budget.") {
+    return {
+      type: "invalid_request_error",
+      code: "image_generation_input_too_large",
+      status: 413,
+    };
+  }
+  if (message === "Image generation queue request cancelled.") {
+    return {
+      type: "invalid_request_error",
+      code: "image_generation_cancelled",
+      status: 499,
+    };
+  }
   if (isContentSafetyRejection(message)) {
     return {
       type: "invalid_request_error",

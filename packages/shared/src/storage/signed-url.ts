@@ -18,7 +18,12 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { isPublicBucket, parseStorageImageUrl } from "./image-url";
+import {
+  buildStorageThumbnailUrl,
+  isPublicBucket,
+  parseStorageImageUrl,
+} from "./image-url";
+import { storageKeyBelongsToUser } from "./utils";
 
 export * from "./image-url";
 
@@ -29,9 +34,7 @@ export * from "./image-url";
 function getSigningSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
   if (!secret) {
-    throw new Error(
-      "BETTER_AUTH_SECRET is required for storage URL signing"
-    );
+    throw new Error("BETTER_AUTH_SECRET is required for storage URL signing");
   }
   return secret;
 }
@@ -97,11 +100,7 @@ export function generateSignedImageUrl(
   if (isPublicBucket(bucket)) {
     return `/api/storage/${bucket}/${key}`;
   }
-  const { sig, exp } = generateSignedImageParams(
-    bucket,
-    key,
-    expiresInSeconds
-  );
+  const { sig, exp } = generateSignedImageParams(bucket, key, expiresInSeconds);
   return `/api/storage/${bucket}/${key}?sig=${sig}&exp=${exp}`;
 }
 
@@ -143,30 +142,109 @@ function isOwnStorageImageUrl(raw: string, publicBaseUrl?: string | null) {
   }
 }
 
+/** 不可信图片引用未获得读取权限；由 API 层映射为请求错误，不能进入下载或重签。 */
+export class StorageImageAccessError extends Error {
+  readonly status = 403;
+
+  constructor(
+    message = "Storage image access requires permission or a valid signature."
+  ) {
+    super(message);
+    this.name = "StorageImageAccessError";
+  }
+}
+
+/**
+ * 校验客户端/上游提交的站内图片引用；返回实际对象键与能否重签。
+ * 本人可按不可变用户前缀读自己的对象；他人的有效签名仅是限时访问凭证，不能续期。
+ * 私有桶白名单与存储读取路由一致。外部 URL 返回 null，交由公网下载层处理。
+ */
+export function assertStorageImageUrlAccess(
+  imageUrl: string,
+  publicBaseUrl?: string | null,
+  userId?: string
+) {
+  const reference = parseStorageImageUrl(imageUrl, publicBaseUrl);
+  if (!reference) {
+    if (isOwnStorageImageUrl(imageUrl, publicBaseUrl)) {
+      throw new StorageImageAccessError();
+    }
+    return null;
+  }
+  const generationsBucket =
+    process.env.NEXT_PUBLIC_GENERATIONS_BUCKET_NAME?.trim() || "generations";
+  if (
+    !isPublicBucket(reference.bucket) &&
+    reference.bucket !== generationsBucket
+  ) {
+    throw new StorageImageAccessError("Storage bucket access is not allowed.");
+  }
+  const key = reference.key.replace(/^w\d+\//, "");
+  const canResign =
+    isPublicBucket(reference.bucket) ||
+    Boolean(userId && storageKeyBelongsToUser(key, userId));
+  if (!canResign) {
+    const parsed = new URL(imageUrl, publicBaseUrl || "http://localhost");
+    const signature = parsed.searchParams.get("sig") || "";
+    const expiresAt = Number(parsed.searchParams.get("exp"));
+    if (
+      !/^[a-f0-9]{64}$/i.test(signature) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= 0 ||
+      verifySignedImageUrl(reference.bucket, key, signature, expiresAt) !==
+        "valid"
+    ) {
+      throw new StorageImageAccessError();
+    }
+  }
+  return { ...reference, key, canResign };
+}
+
 /**
  * 将图片 URL 规范化为对外可访问 URL。
  *
- * - 本站 /api/storage/... URL 会统一重签，避免旧裸 URL 被 OAI/外部客户端下载
- *   时返回 Missing signature；
+ * - 可信服务端结果可重签；不可信输入必须提供 authorization，只有本人对象能续期，
+ *   他人的有效签名原样保留有效期；
  * - 第三方 http(s) URL 保持原样；
  * - 其他相对 URL 在提供 publicBaseUrl 时转绝对 URL。
  */
 export function buildPublicImageUrl(
   imageUrl: string | null | undefined,
   publicBaseUrl?: string | null,
-  expiresInSeconds = 3600
+  expiresInSeconds = 3600,
+  authorization?: { userId?: string }
 ): string | undefined {
   const raw = imageUrl?.trim();
   if (!raw) return undefined;
 
+  if (authorization) {
+    const access = assertStorageImageUrlAccess(
+      raw,
+      publicBaseUrl,
+      authorization.userId
+    );
+    if (access && !access.canResign) {
+      return publicBaseUrl?.trim()
+        ? new URL(raw, publicBaseUrl).toString()
+        : raw;
+    }
+  }
+
   const storageReference = parseStorageImageUrl(raw, publicBaseUrl);
   if (storageReference) {
-    const signedUrl =
+    const widthSegment = storageReference.key.match(/^w(\d+)\//)?.[1];
+    const objectKey = storageReference.key.replace(/^w\d+\//, "");
+    const originalUrl =
       buildSignedStorageImageUrl(
-        storageReference.key,
+        objectKey,
         storageReference.bucket,
         expiresInSeconds
       ) || raw;
+    // 宽度属于展示路径，不参与HMAC；否则路由剥离宽度后会验签失败。
+    const signedUrl = widthSegment
+      ? buildStorageThumbnailUrl(originalUrl, Number(widthSegment)) ||
+        originalUrl
+      : originalUrl;
     return publicBaseUrl?.trim()
       ? new URL(signedUrl, publicBaseUrl).toString()
       : signedUrl;

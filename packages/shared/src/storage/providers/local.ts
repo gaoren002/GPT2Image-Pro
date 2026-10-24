@@ -1,6 +1,11 @@
 import type { StorageProvider } from "../types";
 import { getRuntimeSettingString } from "../../system-settings";
 import { buildSignedStorageImageUrl } from "../signed-url";
+import {
+  assertObjectReadBudget,
+  readObjectBody,
+  type ObjectReadOptions,
+} from "./object-budget";
 
 /**
  * 路径模块的最小接口
@@ -8,10 +13,7 @@ import { buildSignedStorageImageUrl } from "../signed-url";
  * 仅声明 resolveSafePath 所需的方法，便于在 DB-free 单测中直接注入
  * node:path，避免依赖运行时设置（getBaseDir → getRuntimeSettingString → DB）。
  */
-type PathLike = Pick<
-  typeof import("node:path"),
-  "join" | "resolve" | "sep"
->;
+type PathLike = Pick<typeof import("node:path"), "join" | "resolve" | "sep">;
 
 /**
  * 解析并校验本地存储的最终文件路径（纯函数）
@@ -120,10 +122,34 @@ export const localProvider: StorageProvider = {
   async getObject(
     key: string,
     bucket: string,
-    options?: { signal?: AbortSignal }
+    options?: ObjectReadOptions
   ): Promise<Buffer> {
+    assertObjectReadBudget(options);
     const filePath = await safePath(bucket, key);
     const fs = await getFs();
+    if (options?.maxBytes !== undefined) {
+      const handle = await fs.open(filePath, "r");
+      try {
+        const size = (await handle.stat()).size;
+        if (size > options.maxBytes)
+          throw new Error("Object exceeds the byte limit.");
+        const { Readable } = await import("node:stream");
+        const stream = handle.createReadStream({
+          autoClose: false,
+          signal: options.signal,
+        });
+        // Web流的队列策略按字节计数，不能让默认的chunk计数放大磁盘预读内存。
+        const body = Readable.toWeb(stream, {
+          strategy: {
+            highWaterMark: 64 * 1024,
+            size: (chunk: Uint8Array) => chunk.byteLength,
+          },
+        }) as ReadableStream<Uint8Array>;
+        return await readObjectBody(body, options, size);
+      } finally {
+        await handle.close();
+      }
+    }
     // 透传 signal：调用方取消时中止读取（fs/promises.readFile 支持 { signal }）。
     return fs.readFile(
       filePath,

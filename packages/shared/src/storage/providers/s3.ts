@@ -19,6 +19,11 @@ import {
   type StorageProvider,
 } from "../types";
 import { getRuntimeSettingString } from "../../system-settings";
+import {
+  assertObjectReadBudget,
+  readObjectBody,
+  type ObjectReadOptions,
+} from "./object-budget";
 
 // ============================================
 // S3 客户端单例
@@ -183,8 +188,9 @@ export const s3Provider: StorageProvider = {
   async getObject(
     key: string,
     bucket: string,
-    options?: { signal?: AbortSignal }
+    options?: ObjectReadOptions
   ): Promise<Buffer> {
+    assertObjectReadBudget(options);
     const client = await getS3Client();
 
     const command = new GetObjectCommand({
@@ -204,17 +210,11 @@ export const s3Provider: StorageProvider = {
       throw new Error(`File not found: ${key}`);
     }
 
-    // 将 ReadableStream 转换为 Buffer
-    const chunks: Uint8Array[] = [];
-    const reader = response.Body.transformToWebStream().getReader();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-    }
-
-    return Buffer.concat(chunks);
+    return readObjectBody(
+      response.Body.transformToWebStream(),
+      options,
+      response.ContentLength
+    );
   },
 
   async putObject(

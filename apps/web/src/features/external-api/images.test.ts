@@ -1,3 +1,4 @@
+import { generateSignedImageUrl } from "@repo/shared/storage/signed-url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NO_WEB_ACCOUNT_ERROR } from "@/features/image-generation/editable-file-util";
@@ -13,6 +14,21 @@ import {
   toOpenAIErrorPayload,
   toOpenAIImagesResponse,
 } from "./images";
+
+const imageFixture = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJk0AAAAASUVORK5CYII=",
+  "base64"
+);
+
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn(async () => [{ address: "1.1.1.1", family: 4 }]),
+}));
+vi.mock("@repo/shared/security/dns-pin", () => ({
+  fetchWithDnsPin: vi.fn((url: string, options: RequestInit) =>
+    fetch(url, options)
+  ),
+  SsrfBlockedError: class extends Error {},
+}));
 
 const storageMocks = vi.hoisted(() => {
   const getObjectMock = vi.fn();
@@ -182,17 +198,17 @@ describe("external final image selection", () => {
       [
         {
           generationId: "gen_1",
-          imageUrl: "/api/storage/generations/final.png",
+          imageUrl: generateSignedImageUrl("generations", "final.png"),
           revisedPrompt: "top level prompt",
           creditsConsumed: 1,
           imageOutputs: [
             {
-              imageUrl: "/api/storage/generations/draft.png",
+              imageUrl: generateSignedImageUrl("generations", "draft.png"),
               revisedPrompt: "draft prompt",
               outputRole: "agent_draft",
             },
             {
-              imageUrl: "/api/storage/generations/final.png",
+              imageUrl: generateSignedImageUrl("generations", "final.png"),
               revisedPrompt: "final prompt",
               outputRole: "final",
             },
@@ -224,11 +240,14 @@ describe("external final image selection", () => {
     );
   });
 
-  it("signs same-origin absolute storage URLs before returning them to API clients", () => {
+  it("preserves valid same-origin storage signatures for API clients", () => {
     const request = new Request("https://example.com/v1/images/edits");
     const publicUrl = getPublicImageUrl(
       request,
-      "https://example.com/api/storage/generations/user/out.png"
+      new URL(
+        generateSignedImageUrl("generations", "user/out.png"),
+        "https://example.com"
+      ).toString()
     );
 
     const url = new URL(publicUrl!);
@@ -313,41 +332,52 @@ describe("external image error payload", () => {
 
 describe("external image base64 loading", () => {
   it("reads local storage URLs directly instead of fetching the public route", async () => {
-    storageMocks.getObjectMock.mockResolvedValue(Buffer.from("image-bytes"));
+    storageMocks.getObjectMock.mockResolvedValue(imageFixture);
     const request = new Request("https://example.com/v1/images/generations", {
       headers: { Authorization: "Bearer external-key" },
     });
 
     await expect(
-      getImageBase64(request, "/api/storage/generations/user/out.png")
-    ).resolves.toBe(Buffer.from("image-bytes").toString("base64"));
+      getImageBase64(
+        request,
+        generateSignedImageUrl("generations", "user/out.png")
+      )
+    ).resolves.toBe(imageFixture.toString("base64"));
 
     expect(storageMocks.getStorageProviderMock).toHaveBeenCalledTimes(1);
     expect(storageMocks.getObjectMock).toHaveBeenCalledWith(
       "user/out.png",
-      "generations"
+      "generations",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
   });
 
   it("reads same-origin absolute storage URLs directly", async () => {
-    storageMocks.getObjectMock.mockResolvedValue(Buffer.from("absolute-image"));
+    storageMocks.getObjectMock.mockResolvedValue(imageFixture);
     const request = new Request("https://example.com/v1/images/generations");
 
     await expect(
       getImageBase64(
         request,
-        "https://example.com/api/storage/generations/user/absolute.jpg"
+        new URL(
+          generateSignedImageUrl("generations", "user/absolute.jpg"),
+          "https://example.com"
+        ).toString()
       )
-    ).resolves.toBe(Buffer.from("absolute-image").toString("base64"));
+    ).resolves.toBe(imageFixture.toString("base64"));
 
     expect(storageMocks.getObjectMock).toHaveBeenCalledWith(
       "user/absolute.jpg",
-      "generations"
+      "generations",
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     );
   });
 
   it("does not forward external API authorization when fetching remote image URLs", async () => {
-    const fetchMock = vi.fn(async () => new Response("remote-image"));
+    const fetchMock = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response(new Uint8Array(imageFixture))
+    );
     vi.stubGlobal("fetch", fetchMock);
     const request = new Request("https://example.com/v1/images/generations", {
       headers: { Authorization: "Bearer external-key" },
@@ -355,9 +385,18 @@ describe("external image base64 loading", () => {
 
     await expect(
       getImageBase64(request, "https://cdn.example.test/out.png")
-    ).resolves.toBe(Buffer.from("remote-image").toString("base64"));
+    ).resolves.toBe(imageFixture.toString("base64"));
 
-    expect(fetchMock).toHaveBeenCalledWith("https://cdn.example.test/out.png");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://cdn.example.test/out.png",
+      expect.objectContaining({
+        method: "GET",
+        signal: expect.any(AbortSignal),
+      })
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty(
+      "headers.Authorization"
+    );
   });
 });
 
@@ -542,4 +581,75 @@ describe("external API error classification", () => {
       status: 503,
     });
   });
+});
+
+describe("不可信上游图片不能绕过存储授权", () => {
+  it("未签名私有对象在读取存储前拒绝", async () => {
+    storageMocks.getObjectMock.mockResolvedValue(Buffer.from("private-data"));
+    await expect(
+      getImageBase64(
+        new Request("https://example.com/v1/images"),
+        "/api/storage/generations/another-user/private.png"
+      )
+    ).rejects.toThrow(/signature|permission|access/i);
+    expect(storageMocks.getObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("签名过期的私有对象不读取也不重新签名", async () => {
+    const { generateSignedImageUrl } = await import(
+      "@repo/shared/storage/signed-url"
+    );
+    const expired = generateSignedImageUrl(
+      "generations",
+      "another-user/private.png",
+      -10
+    );
+    storageMocks.getObjectMock.mockResolvedValue(Buffer.from("private-data"));
+    await expect(
+      getImageBase64(new Request("https://example.com/v1/images"), expired)
+    ).rejects.toThrow(/signature|permission|access/i);
+    expect(() =>
+      getPublicImageUrl(new Request("https://example.com/v1/images"), expired)
+    ).toThrow(/signature|permission|access/i);
+    expect(storageMocks.getObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("即使持有签名也不允许读取未公开的存储桶", async () => {
+    const { generateSignedImageUrl } = await import(
+      "@repo/shared/storage/signed-url"
+    );
+    const signed = generateSignedImageUrl("database-backups", "private.sql");
+    storageMocks.getObjectMock.mockResolvedValue(Buffer.from("private-data"));
+    await expect(
+      getImageBase64(new Request("https://example.com/v1/images"), signed)
+    ).rejects.toThrow(/bucket|access/i);
+    expect(storageMocks.getObjectMock).not.toHaveBeenCalled();
+  });
+});
+
+it("重复任务ID是409冲突，不应让客户端按上游502重试", () => {
+  expect(
+    toOpenAIErrorPayload(
+      "Generation task ID is already in use. Please start a new task."
+    ).error
+  ).toMatchObject({
+    type: "invalid_request_error",
+    code: "idempotency_conflict",
+    status: 409,
+  });
+});
+
+it.each([
+  [
+    "Image generation input exceeds the request memory budget.",
+    413,
+    "image_generation_input_too_large",
+  ],
+  [
+    "Image generation queue request cancelled.",
+    499,
+    "image_generation_cancelled",
+  ],
+])("本地队列错误保留客户端可处理的状态: %s", (message, status, code) => {
+  expect(toOpenAIErrorPayload(message).error).toMatchObject({ status, code });
 });

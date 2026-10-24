@@ -53,14 +53,14 @@ describe("thumbnail retention", () => {
   it("默认配额为256MiB tmpfs保留余量，不缓存超过512KiB的单项", async () => {
     const defaults = new ThumbnailCache({ directory });
     const data = Buffer.alloc(1024 * 1024);
-    expect(
-      await defaults.getOrCreate(
-        "generations",
-        "u/large.png",
-        1280,
-        async () => data
-      )
-    ).toEqual(data);
+    const created = await defaults.getOrCreate(
+      "generations",
+      "u/large.png",
+      1280,
+      async () => data
+    );
+    // 1MiB 用字节比较；toEqual 逐元素深比较在并行全量门里会超时。
+    expect(Buffer.compare(created, data)).toBe(0);
     expect(
       Boolean(await defaults.read("generations", "u/large.png", 1280))
     ).toBe(false);

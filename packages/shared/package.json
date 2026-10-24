@@ -19,6 +19,7 @@
     "./auth/registration-verification": "./src/auth/registration-verification.ts",
     "./safe-action": "./src/safe-action.ts",
     "./logger": "./src/logger/index.ts",
+    "./db/error-summary": "./src/db/error-summary.ts",
     "./rate-limit": "./src/rate-limit/index.ts",
     "./api-logger": "./src/api-logger.ts",
     "./announcements": "./src/announcements/index.ts",

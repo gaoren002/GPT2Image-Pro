@@ -19,6 +19,11 @@ import {
   normalizeSubscriptionPlan,
   type SubscriptionPlan,
 } from "@repo/shared/config/subscription-plan";
+import {
+  describeErrorForLog,
+  hasDatabaseErrorCode,
+  PG_UNDEFINED_TABLE,
+} from "@repo/shared/db/error-summary";
 import { validateNestedGroupConfig } from "@repo/shared/image-backend/nested-groups";
 import { logWarn } from "@repo/shared/logger";
 import { canUsePlanCapability } from "@repo/shared/subscription/services/plan-capabilities";
@@ -376,31 +381,15 @@ export function resetImageBackendInflightForTests() {
   }
 }
 
-function isMissingBackendLeaseTableError(error: unknown) {
-  const code =
-    typeof error === "object" && error && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : "";
-  const message = error instanceof Error ? error.message : String(error);
-  return code === "42P01" || message.includes("image_backend_inflight_lease");
-}
-
-function isMissingBackendStickyTableError(error: unknown) {
-  const code =
-    typeof error === "object" && error && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : "";
-  const message = error instanceof Error ? error.message : String(error);
-  return code === "42P01" || message.includes("image_backend_sticky_binding");
-}
-
-function isMissingBackendSchedulerMetricTableError(error: unknown) {
-  const code =
-    typeof error === "object" && error && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : "";
-  const message = error instanceof Error ? error.message : String(error);
-  return code === "42P01" || message.includes("image_backend_scheduler_metric");
+/**
+ * 判断错误是否为"表不存在"（迁移未执行）。
+ *
+ * WHY 只认驱动错误码：drizzle 把错误包装成含完整 SQL 的消息，而 SQL 文本里必然
+ * 出现表名，按消息子串判断会把语句超时、锁超时、连接中断一并误判成缺表。租约路径
+ * 命中该判定即放弃跨实例并发控制，数据库压力最大时恰好最需要它生效。
+ */
+function isMissingTableError(error: unknown) {
+  return hasDatabaseErrorCode(error, PG_UNDEFINED_TABLE);
 }
 
 function normalizeAccountBackend(
@@ -716,12 +705,12 @@ export async function bindImageBackendStickyMember(input: {
         },
       });
   } catch (error) {
-    if (isMissingBackendStickyTableError(error)) return;
+    if (isMissingTableError(error)) return;
     logWarn("写入生图后端粘性映射失败", {
       layer: input.layer,
       memberType: member.type,
       memberId: member.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeErrorForLog(error),
     });
   }
 }
@@ -776,10 +765,10 @@ async function resolveStickyBinding(input: {
       );
     return member;
   } catch (error) {
-    if (isMissingBackendStickyTableError(error)) return null;
+    if (isMissingTableError(error)) return null;
     logWarn("读取生图后端粘性映射失败", {
       layer: input.layer,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeErrorForLog(error),
     });
     return null;
   }
@@ -857,11 +846,11 @@ async function recordSchedulerMetric(input: {
         },
       });
   } catch (error) {
-    if (isMissingBackendSchedulerMetricTableError(error)) return;
+    if (isMissingTableError(error)) return;
     logWarn("记录生图后端调度指标失败", {
       requestKind,
       selectedLayer,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeErrorForLog(error),
     });
   }
 }
@@ -1139,7 +1128,7 @@ async function acquirePoolMemberInflightLease(
     }
     return acquired;
   } catch (error) {
-    if (isMissingBackendLeaseTableError(error)) {
+    if (isMissingTableError(error)) {
       logWarn("生图后端并发租约表不存在，退回进程内并发控制", {
         memberType: member.type,
         memberId: member.id,
@@ -1148,7 +1137,7 @@ async function acquirePoolMemberInflightLease(
       logWarn("生图后端并发租约获取失败", {
         memberType: member.type,
         memberId: member.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: describeErrorForLog(error),
       });
       throw error;
     }
@@ -1228,7 +1217,7 @@ export async function releaseImageBackendInflightLease(input: {
       memberType: input.memberType,
       memberId: input.memberId,
       leaseId: input.leaseId,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeErrorForLog(error),
     });
   }
 }
@@ -4470,7 +4459,7 @@ export async function bulkUpdateImageBackendAccounts(
       failedCount++;
       logWarn("批量更新生图账号失败，已跳过", {
         accountId,
-        error: error instanceof Error ? error.message : String(error),
+        error: describeErrorForLog(error),
       });
     }
   }
@@ -4526,7 +4515,7 @@ async function importAccessTokens(
       counters.syncedByMode.web++;
     } catch (error) {
       counters.failedByMode.web++;
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = describeErrorForLog(error);
       if (!counters.firstError) counters.firstError = reason;
       logWarn("手工 Web AT 导入生图账号失败，已跳过", {
         index: index + 1,
@@ -4790,7 +4779,7 @@ export async function importImageBackendAccountsFromRefreshTokens(input: {
         for (const mode of modes) failedByMode[mode]++;
         logWarn("手工 Mobile RT 导入生图账号失败，已跳过", {
           index: importIndex,
-          error: error instanceof Error ? error.message : String(error),
+          error: describeErrorForLog(error),
         });
       }
       continue;
@@ -4850,7 +4839,7 @@ export async function importImageBackendAccountsFromRefreshTokens(input: {
         logWarn("手工 RT 导入生图账号失败，已跳过", {
           mode,
           index: importIndex,
-          error: error instanceof Error ? error.message : String(error),
+          error: describeErrorForLog(error),
         });
       }
     }
@@ -6584,7 +6573,7 @@ export async function syncImageBackendAccountsFromSub2Api(input: {
           logWarn("Sub2API 账号 AT 同步失败，已跳过", {
             sourceAccountId: account.sourceId,
             mode,
-            error: error instanceof Error ? error.message : String(error),
+            error: describeErrorForLog(error),
           });
         }
       }

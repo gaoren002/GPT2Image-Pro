@@ -13,6 +13,7 @@
     "./auth/roles": "./src/auth/roles.ts",
     "./auth/role-server": "./src/auth/role-server.ts",
     "./auth/self-use-mode": "./src/auth/self-use-mode.ts",
+    "./auth/origin-compat": "./src/auth/origin-compat.ts",
     "./auth/bootstrap-super-admin": "./src/auth/bootstrap-super-admin.ts",
     "./auth/registration-fixed-code": "./src/auth/registration-fixed-code.ts",
     "./auth/registration-verification": "./src/auth/registration-verification.ts",

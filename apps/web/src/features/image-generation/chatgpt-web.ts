@@ -3386,6 +3386,7 @@ async function pollAndDownloadEditableFile(
  * 流程:上传输入图 → bootstrap → prepareFileConversation → getChatRequirements →
  *   startFileConversation → 读 SSE 取
  *   conversationId → 轮询取主文件+zip → 下载二进制。主文件缺失则抛错;zip 可缺。
+ * config.signal 与内部超时共同中止传输；结束后解绑父监听器，避免保留已完成任务。
  */
 export async function generateFileWithChatGptWeb(params: {
   config: ApiConfig;
@@ -3398,7 +3399,15 @@ export async function generateFileWithChatGptWeb(params: {
     () => abortController.abort(),
     EDITABLE_FILE_POLL_TIMEOUT_MS + 60_000
   );
+  const parentSignal = params.config.signal;
+  const abortFromParent = () => abortController.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  }
   try {
+    abortController.signal.throwIfAborted();
     const config = { ...params.config, signal: abortController.signal };
     const requestMessageId = randomUUID();
     const prompt = editableFilePrompt(params.kind, params.prompt);
@@ -3448,6 +3457,7 @@ export async function generateFileWithChatGptWeb(params: {
     return { conversationId, primary: primaryBinary, zip: zipBinary };
   } finally {
     clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", abortFromParent);
   }
 }
 

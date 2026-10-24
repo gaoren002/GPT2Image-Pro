@@ -11,7 +11,7 @@
  * - 异步(async:true 或 ?async=true):立即返回 task_<uuid>,后台跑完更新任务;可轮询
  *   GET /v1/editable-file-tasks/{task_id} 或用 callback_url 完成回调。任务为进程内内存态、
  *   完成后 30 分钟 TTL、多实例不共享(可编辑文件无 DB generation 行,故不作持久回退)。
- * client_task_id 作计费 sourceRef 幂等键(防重复扣;任务级幂等为后续迭代)。
+ * client_task_id 在编排层按用户/文件类型认领；已消费的任务拒绝重复执行，结果恢复尚无持久任务层。
  */
 import { randomUUID } from "node:crypto";
 import { withApiLogging } from "@repo/shared/api-logger";
@@ -24,8 +24,8 @@ import {
   completeAsyncImageTask,
   createAsyncEditableFileTask,
   postAsyncImageCallback,
-  toAsyncImageTaskResponse,
   toAsyncImageTaskCapacityResponse,
+  toAsyncImageTaskResponse,
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
@@ -45,6 +45,40 @@ const editableFileSchema = z.object({
   callback_url: z.string().url().optional(),
 });
 
+/** 文件编排的本地结算/重放错误保留稳定 code，避免被保活适配统一改写成上游错误。 */
+function toEditableFileErrorPayload(error: unknown, label: string) {
+  const message =
+    error instanceof Error ? error.message : `${label} generation failed`;
+  const code =
+    error instanceof Error && "code" in error ? error.code : undefined;
+  if (code === "editable_file_task_already_consumed") {
+    return toOpenAIErrorPayload(message, {
+      status: 409,
+      type: "invalid_request_error",
+      code,
+    });
+  }
+  if (
+    code === "editable_file_refund_pending" ||
+    code === "editable_file_quota_release_pending"
+  ) {
+    return toOpenAIErrorPayload(message, {
+      status: 503,
+      type: "server_error",
+      code,
+    });
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return toOpenAIErrorPayload(message, {
+      status: 499,
+      type: "invalid_request_error",
+      code: "editable_file_cancelled",
+    });
+  }
+  return toOpenAIErrorPayload(message);
+}
+
+/** 构造 PPT/PSD 薄适配：额度与钱包只由编排处理，异步接收后脱离 HTTP 取消信号。 */
 function makeEditableFileHandler(
   kind: EditableFileKind,
   capability: "export.ppt" | "export.psd",
@@ -112,6 +146,7 @@ function makeEditableFileHandler(
         prompt: parsed.data.prompt,
         base64Images: parsed.data.base64_images,
         taskId,
+        signal: useAsync ? undefined : request.signal,
       });
       return {
         object: "editable_file_task" as const,
@@ -160,11 +195,7 @@ function makeEditableFileHandler(
             await postAsyncImageCallback(callbackUrl, completed);
           }
         } catch (error) {
-          const errorPayload = toOpenAIErrorPayload(
-            error instanceof Error
-              ? error.message
-              : `${label} generation failed`
-          );
+          const errorPayload = toEditableFileErrorPayload(error, label);
           const completed = completeAsyncImageTask(task.id, {
             completedObject: "editable_file_task",
             error: errorPayload,
@@ -177,7 +208,11 @@ function makeEditableFileHandler(
       return Response.json(toAsyncImageTaskResponse(task));
     }
 
-    return createJsonKeepAliveResponse(runOnce);
+    return createJsonKeepAliveResponse(() =>
+      runOnce().catch((error: unknown) =>
+        toEditableFileErrorPayload(error, label)
+      )
+    );
   });
 }
 

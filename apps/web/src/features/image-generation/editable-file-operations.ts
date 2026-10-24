@@ -1,18 +1,14 @@
 /**
- * 可编辑文件(PPT/PSD)编排:租 web 账号 → generateFileWithChatGptWeb → 存 storage → 扣固定积分。
- *
- * 职责:把「对话式生成可编辑文件」串成一条同步链路(供 v1 handler / UOL / 前端调用):
- *   ① base64 输入图解码;② 从后端池租一个 web 账号(accountBackendPreference="web",失败换号,
- *   带 in-flight 租约 + 结果上报,保证不泄露租约、不误伤池健康);③ 调 generateFileWithChatGptWeb
- *   出 .pptx/.psd(+可选 zip);④ 二进制存进站内 storage(与生图同 bucket/签名 URL);
- *   ⑤ 成功后按固定价 consumeCredits(双重记账,幂等键 sourceRef=editable-file:{taskId},只成功才扣)。
- *
- * WHY:符合 CLAUDE.md 单一账号池/单一计费真相;不复用图片 batch-runner(产物非图片)。
- * 账号能力(plus/pro + 代码解释器 + gpt-5-5-thinking)由后续调度过滤保证(见设计文档 §8);
- * 本编排在无可用账号/生成失败时明确报错、不扣费。
- * 长任务态(queued→轮询)与账号 plus/pro 过滤见后续迭代(⑥),本文件先做同步打通。
+ * PPT/PSD 编排，供 v1 handler、UOL 与前端调用：同事务幂等扣固定费与 Key → 上游 → 存储。
+ * 财务真相使用 credits 账本；失败经 generation 专用退款原子退回钱包与原消费 Key。
+ * 只有上游生成失败可以换号，本地财务、存储与取消失败不进入重试循环。
+ * 无持久任务状态时，已消费的任务只拒绝重放；崩溃恢复与结果重取由后续任务层处理。
  */
+import { createHash } from "node:crypto";
+import { db } from "@repo/database";
+import { creditsTransaction } from "@repo/database/schema";
 import { consumeCredits } from "@repo/shared/credits/core";
+import { refundGenerationCredits } from "@repo/shared/generation-maintenance";
 import { logWarn } from "@repo/shared/logger";
 import { getStorageProvider } from "@repo/shared/storage/providers";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
@@ -20,6 +16,7 @@ import {
   getRuntimeSettingNumber,
   getRuntimeSettingString,
 } from "@repo/shared/system-settings";
+import { and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import {
   ImageBackendPoolUnavailableError,
@@ -30,6 +27,7 @@ import {
 import {
   type EditableFileBinary,
   type EditableFileKind,
+  type EditableFileResult,
   generateFileWithChatGptWeb,
 } from "./chatgpt-web";
 import {
@@ -38,6 +36,7 @@ import {
   editableFileServiceName,
   NO_WEB_ACCOUNT_ERROR,
 } from "./editable-file-util";
+import type { ImageInputFile } from "./types";
 
 const DEFAULT_EDITABLE_CREDITS = 25;
 const MAX_ACCOUNT_SWITCHES = 3;
@@ -49,28 +48,63 @@ export type EditableFileOutput = {
   creditsCharged: number;
 };
 
-/** pool-account/api → 租约/上报用的 memberType。web 账号为 pool-account → "account"。 */
-function poolMemberType(type?: string): "api" | "account" {
-  if (type === "pool-api") return "api";
-  return "account";
+type EditableFileInput = {
+  userId: string;
+  apiKeyId?: string;
+  kind: EditableFileKind;
+  prompt: string;
+  base64Images: string[];
+  taskId: string;
+  signal?: AbortSignal;
+};
+
+/** 已消费的 taskId 不代表允许再次执行；即使首次失败并已退款，也必须换新任务。 */
+export class EditableFileTaskAlreadyConsumedError extends Error {
+  readonly code = "editable_file_task_already_consumed";
+  readonly status = 409;
+
+  /** 返回可供传输层映射的冲突错误，不回放其他 Key 或历史任务的内容。 */
+  constructor() {
+    super("Editable file task ID is already in use. Please start a new task.");
+    this.name = "EditableFileTaskAlreadyConsumedError";
+  }
 }
 
-async function storageBucket(): Promise<string> {
-  return (
-    (await getRuntimeSettingString("NEXT_PUBLIC_GENERATIONS_BUCKET_NAME")) ||
-    "generations"
-  );
+/** 在产生下一项副作用前检查调用方取消，不把取消原因当账号故障。 */
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error("Editable file generation cancelled");
+  error.name = "AbortError";
+  throw error;
 }
 
-/** 把一个文件二进制存进站内 storage,返回签名下载 URL(与生图同 bucket/路由)。 */
+/** 租约释放失败只记录可定位标识，不能导致已成功的上游被重新执行。 */
+async function releaseLease(
+  params: Parameters<typeof releaseImageBackendInflightLease>[0]
+): Promise<void> {
+  try {
+    await releaseImageBackendInflightLease(params);
+  } catch {
+    logWarn("可编辑文件租约释放失败", {
+      memberId: params.memberId,
+      leaseId: params.leaseId,
+    });
+  }
+}
+
+/** 存二进制并返回非空签名地址；设置、签名或存储失败直接交给外层退款，不换号。 */
 async function storeEditableBinary(
   userId: string,
   kind: EditableFileKind,
   binary: EditableFileBinary,
   isZip: boolean
 ): Promise<string> {
-  const bucket = await storageBucket();
+  const bucket =
+    (await getRuntimeSettingString("NEXT_PUBLIC_GENERATIONS_BUCKET_NAME")) ||
+    "generations";
   const key = `${userId}/${nanoid(32)}.${editableFileExtension(kind, isZip)}`;
+  const url = buildSignedStorageImageUrl(key, bucket);
+  if (!url) throw new Error("Editable file storage URL could not be signed");
   const storage = await getStorageProvider();
   await storage.putObject(
     key,
@@ -78,152 +112,217 @@ async function storeEditableBinary(
     binary.buffer,
     binary.mimeType || "application/octet-stream"
   );
-  return buildSignedStorageImageUrl(key, bucket) ?? "";
+  return url;
+}
+
+/** 仅包围上游调用的换号循环；池查询、取消、存储和财务失败不能落入账号失败重试。 */
+async function generateEditableFile(
+  params: EditableFileInput,
+  images: ImageInputFile[]
+): Promise<EditableFileResult> {
+  const excluded: string[] = [];
+  let lastError = new Error(NO_WEB_ACCOUNT_ERROR);
+  for (let attempt = 0; attempt <= MAX_ACCOUNT_SWITCHES; attempt++) {
+    throwIfCancelled(params.signal);
+    let resolved: Awaited<ReturnType<typeof resolveImageBackendPoolConfig>> =
+      null;
+    try {
+      resolved = await resolveImageBackendPoolConfig({
+        userId: params.userId,
+        apiKeyId: params.apiKeyId,
+        requestKind: "image_generation",
+        accountBackendPreference: "web",
+        accountPlanFilter: "paid",
+        // 文件生成跨组选择付费 Web 账号；Key 已与钱包在同一消费事务 capture。
+        spanGroupsForWeb: true,
+        excludedMemberKeys: [...excluded],
+      });
+    } catch (error) {
+      if (!(error instanceof ImageBackendPoolUnavailableError)) throw error;
+    }
+    const backend = resolved?.config.backend;
+    if (!resolved || !backend) break;
+    const memberType = backend.type === "pool-api" ? "api" : "account";
+    let outcome: { success: boolean; error?: string } | undefined;
+    try {
+      throwIfCancelled(params.signal);
+      if (backend.accountBackend !== "web") {
+        if (backend.id) excluded.push(`${memberType}:${backend.id}`);
+        continue;
+      }
+      try {
+        const result = await generateFileWithChatGptWeb({
+          config: {
+            ...resolved.config,
+            signal: params.signal ?? resolved.config.signal,
+          },
+          kind: params.kind,
+          prompt: params.prompt,
+          images,
+        });
+        outcome = { success: true };
+        return result;
+      } catch (error) {
+        throwIfCancelled(params.signal);
+        lastError = error instanceof Error ? error : new Error(String(error));
+        outcome = { success: false, error: lastError.message };
+        if (backend.id) excluded.push(`${memberType}:${backend.id}`);
+        logWarn("可编辑文件上游失败，换号重试", {
+          taskId: params.taskId,
+          kind: params.kind,
+          attempt,
+          memberId: backend.id,
+        });
+      }
+    } finally {
+      await releaseLease({
+        memberType,
+        memberId: backend.id,
+        leaseId: backend.inflightLeaseId,
+        leasePersisted: backend.inflightLeasePersisted,
+      });
+      if (outcome) {
+        try {
+          await reportImageBackendResult({
+            memberType,
+            memberId: backend.id,
+            ...outcome,
+          });
+        } catch {
+          logWarn("可编辑文件上游结果上报失败", {
+            taskId: params.taskId,
+            memberId: backend.id,
+          });
+        }
+      }
+    }
+  }
+  throw lastError;
 }
 
 /**
- * 生成一份可编辑文件(PPT/PSD)。同步链路:租号→生成→存储→扣费。
- * @param taskId 幂等/审计标识(计费 sourceRef=editable-file:{taskId})。
- * @throws base64_images is empty(PSD 必须有输入图)/ no available web account / 生成失败信息。
+ * 生成一份 PPT/PSD：固定费认领成功才执行，失败按实际净扣费封顶退款。
+ * taskId 按用户、文件类型隔离；重复消费直接拒绝，不依赖进程内任务缓存。
+ * 底层消费和专用退款各自拥有事务，本编排不能再嵌套外层事务。
  */
-export async function runEditableFileForUser(params: {
-  userId: string;
-  apiKeyId?: string;
-  kind: EditableFileKind;
-  prompt: string;
-  base64Images: string[];
-  taskId: string;
-}): Promise<EditableFileOutput> {
-  const { userId, apiKeyId, kind, prompt, taskId } = params;
-  // PSD 强制要输入图(与 chatgpt2api 一致);PPT 可空。
+export async function runEditableFileForUser(
+  params: EditableFileInput
+): Promise<EditableFileOutput> {
+  const { userId, apiKeyId, kind } = params;
+  const taskId = params.taskId.trim();
+  if (!taskId || taskId.length > 200)
+    throw new Error("Invalid editable file task ID");
+  throwIfCancelled(params.signal);
   if (kind === "psd" && params.base64Images.length === 0) {
     throw new Error("base64_images is empty");
   }
   const images = params.base64Images.map((raw, index) =>
     decodeBase64DataUrl(raw, index + 1)
   );
-
-  const excluded: string[] = [];
-  let lastError = "";
-  for (let attempt = 0; attempt <= MAX_ACCOUNT_SWITCHES; attempt++) {
-    let resolved: Awaited<ReturnType<typeof resolveImageBackendPoolConfig>> =
-      null;
-    try {
-      resolved = await resolveImageBackendPoolConfig({
-        userId,
-        apiKeyId,
-        requestKind: "image_generation",
-        accountBackendPreference: "web",
-        // PPT/PSD 需代码解释器,限付费账号:池只在付费级 web 账号里选(见 planType 回填/导入 check)。
-        accountPlanFilter: "paid",
-        // 跨组直取付费 web,忽略 API key/偏好的分组作用域——PPT/PSD 像站内 UI 一样必须命中付费
-        // web 账号,不受外部 key 绑定的(可能是 api-only 的)分组限制。apiKeyId 仍用于计费归属。
-        spanGroupsForWeb: true,
-        excludedMemberKeys: excluded,
-      });
-    } catch (error) {
-      if (!(error instanceof ImageBackendPoolUnavailableError)) throw error;
-    }
-    const backend = resolved?.config.backend;
-    if (!backend) break; // 池已无候选,跳出走最终报错(NO_WEB_ACCOUNT_ERROR)
-    const memberType = poolMemberType(backend.type);
-
-    // 本功能必须用真正的 ChatGPT 网页会话账号(accountBackend==="web",与主图像管线分派 web
-    // 路径同一判据)。WHY:web 偏好只把"账号"候选滤成 web 实现,但池在 web 车道里仍可能返回
-    // web 分组内的 api/responses 后端;这些不是 ChatGPT 网页会话,跑不了 web 文件生成。有些
-    // 用户的池只有 api/codex 后端、无 web 账号——必须明确报错,绝不拿非 web 后端硬跑。
-    // 遇到非 web:仅释放租约(不上报失败——它没失败,只是不适配本功能)、排除后换下一个。
-    if (backend.accountBackend !== "web") {
-      if (backend.id) excluded.push(`${memberType}:${backend.id}`);
-      await releaseImageBackendInflightLease({
-        memberType,
-        memberId: backend.id,
-        leaseId: backend.inflightLeaseId,
-        leasePersisted: backend.inflightLeasePersisted,
-      }).catch(() => {});
-      lastError = NO_WEB_ACCOUNT_ERROR;
-      continue;
-    }
-
-    let success = false;
-    try {
-      const result = await generateFileWithChatGptWeb({
-        config: resolved!.config,
-        kind,
-        prompt,
-        images,
-      });
-      // 存 storage(先存后扣费:存失败不扣费)。
-      const primaryUrl = await storeEditableBinary(
-        userId,
-        kind,
-        result.primary,
-        false
-      );
-      const zipUrl = result.zip
-        ? await storeEditableBinary(userId, kind, result.zip, true)
-        : null;
-      // 按固定价扣费(仅成功;幂等键防重复扣;金额后台可配,默认 25)。
-      const amount = Math.max(
-        0,
-        Math.trunc(
-          await getRuntimeSettingNumber(
-            kind === "psd"
-              ? "EDITABLE_FILE_PSD_CREDITS"
-              : "EDITABLE_FILE_PPT_CREDITS",
-            DEFAULT_EDITABLE_CREDITS
-          )
-        )
-      );
-      let creditsCharged = 0;
-      if (amount > 0) {
-        await consumeCredits({
-          userId,
-          amount,
-          serviceName: editableFileServiceName(kind),
-          description: kind === "psd" ? "生成 PSD 文件" : "生成 PPT 文件",
-          sourceRef: `editable-file:${taskId}`,
-          metadata: {
-            kind,
-            taskId,
-            conversationId: result.conversationId,
-            apiKeyId: apiKeyId || null,
-          },
-        });
-        creditsCharged = amount;
-      }
-      success = true;
-      return {
-        conversationId: result.conversationId,
-        primaryUrl,
-        zipUrl,
-        creditsCharged,
-      };
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      if (backend.id) excluded.push(`${memberType}:${backend.id}`);
-      logWarn("可编辑文件生成失败,换号重试", {
-        taskId,
-        kind,
-        attempt,
-        memberId: backend.id,
-        error: lastError,
-      });
-    } finally {
-      // 无论成败都释放租约 + 上报池健康(不阻断主流程)。
-      await releaseImageBackendInflightLease({
-        memberType,
-        memberId: backend.id,
-        leaseId: backend.inflightLeaseId,
-        leasePersisted: backend.inflightLeasePersisted,
-      }).catch(() => {});
-      await reportImageBackendResult({
-        memberType,
-        memberId: backend.id,
-        success,
-        error: success ? undefined : lastError,
-      }).catch(() => {});
-    }
+  const configuredAmount = await getRuntimeSettingNumber(
+    kind === "psd" ? "EDITABLE_FILE_PSD_CREDITS" : "EDITABLE_FILE_PPT_CREDITS",
+    DEFAULT_EDITABLE_CREDITS
+  );
+  const amount = Math.trunc(configuredAmount);
+  // 零额消费无法在现有账本中认领；持久任务层就绪前，不能以零价绕过重放保护。
+  if (!Number.isFinite(configuredAmount) || amount <= 0) {
+    throw new Error(
+      "Editable file generation requires a positive fixed credit price"
+    );
   }
-  throw new Error(lastError || "editable file generation failed after retries");
+  // 哈希元组避免客户端分隔符碰撞，也避免全局退款唯一键在不同用户之间冲突。
+  const generationId = `editable-file:${createHash("sha256")
+    .update(JSON.stringify([userId, kind, taskId]))
+    .digest("hex")}`;
+  const metadata = {
+    generationId,
+    taskId,
+    kind,
+    billingVersion: 1,
+  };
+  // 历史版本只用 taskId，且没有可重取的持久结果。新键启用前先拒绝旧消费，
+  // 避免升级后的客户端重投被重新收费。旧版本跨类型共键，兼容检查也保守拒绝两种类型。
+  const [legacyConsumption] = await db
+    .select({ id: creditsTransaction.id })
+    .from(creditsTransaction)
+    .where(
+      and(
+        eq(creditsTransaction.userId, userId),
+        eq(creditsTransaction.type, "consumption"),
+        eq(creditsTransaction.sourceRef, `editable-file:${taskId}`)
+      )
+    )
+    .limit(1);
+  if (legacyConsumption) throw new EditableFileTaskAlreadyConsumedError();
+  throwIfCancelled(params.signal);
+  // Key capture、批次与钱包由底层单个事务提交；失败无独立预留需要补偿。
+  const consumption = await consumeCredits({
+    userId,
+    amount,
+    ...(apiKeyId !== undefined ? { externalApiKeyId: apiKeyId } : {}),
+    serviceName: editableFileServiceName(kind),
+    description: kind === "psd" ? "生成 PSD 文件" : "生成 PPT 文件",
+    sourceRef: generationId,
+    metadata,
+  });
+  // 回放不能执行，也不能退掉原消费所属的 Key 或钱包。
+  if (consumption.alreadyConsumed)
+    throw new EditableFileTaskAlreadyConsumedError();
+
+  try {
+    throwIfCancelled(params.signal);
+    const result = await generateEditableFile(params, images);
+    throwIfCancelled(params.signal);
+    const primaryUrl = await storeEditableBinary(
+      userId,
+      kind,
+      result.primary,
+      false
+    );
+    const zipUrl = result.zip
+      ? await storeEditableBinary(userId, kind, result.zip, true)
+      : null;
+    return {
+      conversationId: result.conversationId,
+      primaryUrl,
+      zipUrl,
+      creditsCharged: amount,
+    };
+  } catch (error) {
+    try {
+      const refund = await refundGenerationCredits({
+        userId,
+        generationId,
+        amount,
+        targetCredits: 0,
+        sourceRef: `${generationId}:failure-refund`,
+        description:
+          kind === "psd" ? "PSD 文件生成失败退还" : "PPT 文件生成失败退还",
+        metadata: {
+          ...metadata,
+          reason: params.signal?.aborted ? "cancelled" : "editable_file_failed",
+        },
+      });
+      if (refund.remainingDebited !== 0)
+        throw new Error("Editable file refund has an unsettled debit");
+    } catch (refundError) {
+      logWarn("可编辑文件退款待处理", {
+        userId,
+        taskId,
+        generationId,
+        apiKeyId,
+        amount,
+      });
+      throw Object.assign(
+        new Error(
+          "Editable file refund is pending. Reference this task ID for support.",
+          {
+            cause: new AggregateError([error, refundError]),
+          }
+        ),
+        { code: "editable_file_refund_pending", generationId, taskId }
+      );
+    }
+    throw error;
+  }
 }

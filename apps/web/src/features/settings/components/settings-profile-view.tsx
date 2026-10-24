@@ -1,14 +1,12 @@
 "use client";
 
-import { zodResolver } from "@hookform/resolvers/zod";
 import { Camera, Loader2 } from "lucide-react";
 import { useParams, useSearchParams } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useAction } from "next-safe-action/hooks";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
-import { useForm } from "react-hook-form";
+import { type FieldErrors, type Resolver, useForm } from "react-hook-form";
 import { toast } from "sonner";
-import type { z } from "zod";
 
 import {
   AlertDialog,
@@ -52,7 +50,10 @@ import {
   deleteAccountAction,
   updateProfileAction,
 } from "@/features/settings/actions";
-import { updateProfileSchema } from "@/features/settings/schemas";
+import {
+  getProfileFieldErrors,
+  type ProfileFields,
+} from "@/features/settings/schemas/profile-rules";
 import {
   ALLOWED_IMAGE_TYPES,
   generateAvatarKey,
@@ -77,7 +78,22 @@ interface SettingsProfileViewProps {
   };
 }
 
-type FormValues = z.infer<typeof updateProfileSchema>;
+type FormValues = ProfileFields;
+
+/**
+ * 资料表单的客户端即时校验。与服务端 updateProfileSchema 共用 profile-rules，
+ * 设置页因此不必把完整 Zod 打进首屏；Server Action 仍以 Zod 做权威校验。
+ */
+const profileResolver: Resolver<FormValues> = async (values) => {
+  const entries = Object.entries(getProfileFieldErrors(values));
+  if (entries.length === 0) return { values, errors: {} };
+  return {
+    values: {},
+    errors: Object.fromEntries(
+      entries.map(([field, message]) => [field, { type: "validate", message }])
+    ) as FieldErrors<FormValues>,
+  };
+};
 
 /** 设置分区节标题：uppercase 小标签 + 下边框分隔（对齐参考项目排版语言） */
 const sectionTitleClass =
@@ -159,7 +175,7 @@ export function SettingsProfileView({ user }: SettingsProfileViewProps) {
   const currentAvatarUrl = avatarPreview ?? getAvatarUrl(user.image);
 
   const form = useForm<FormValues>({
-    resolver: zodResolver(updateProfileSchema),
+    resolver: profileResolver,
     defaultValues: {
       name: user.name,
       moderationBlockRiskLevel: user.moderationBlockRiskLevel,

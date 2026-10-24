@@ -5,7 +5,7 @@ import { CheckCircle2, Megaphone, Pin } from "lucide-react";
 import {
   listActiveAnnouncementsForUser,
   markAnnouncementIdsReadForUser,
-} from "@repo/shared/announcements";
+} from "@repo/shared/announcements/service";
 import { getServerSession } from "@repo/shared/auth/server";
 import { formatDateInTimeZone } from "@repo/shared/time-zone";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";

@@ -1,6 +1,6 @@
 "use server";
 
-import { and, desc, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@repo/database";
@@ -11,53 +11,23 @@ import {
 } from "@repo/database/schema";
 import { adminAction, protectedAction } from "../safe-action";
 import {
+  activeAnnouncementFilter,
+  countUnreadAnnouncementsForUser,
+  listAnnouncementsForAdmin,
+  markAnnouncementIdsReadForUser,
+  serializeAdminAnnouncement,
+  unreadAnnouncementFilter,
+} from "./service";
+import {
   announcementIdSchema,
   createAnnouncementSchema,
   updateAnnouncementSchema,
 } from "./schemas";
 
-export type AdminAnnouncementItem = {
-  id: string;
-  title: string;
-  content: string;
-  severity: string;
-  isPublished: boolean;
-  isPinned: boolean;
-  priority: number;
-  publishedAt: string | null;
-  expiresAt: string | null;
-  createdByUserId: string | null;
-  updatedByUserId: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
 const withAnnouncementAction = (name: string) =>
   protectedAction.metadata({ action: `announcements.${name}` });
 const withAdminAnnouncementAction = (name: string) =>
   adminAction.metadata({ action: `announcements.admin.${name}` });
-
-const activeAnnouncementFilter = () => {
-  const now = new Date();
-  return and(
-    eq(announcement.isPublished, true),
-    or(isNull(announcement.publishedAt), lte(announcement.publishedAt, now)),
-    or(isNull(announcement.expiresAt), sql`${announcement.expiresAt} > ${now}`)
-  );
-};
-
-const announcementOrder = [
-  desc(announcement.isPinned),
-  desc(announcement.priority),
-  desc(announcement.publishedAt),
-  desc(announcement.createdAt),
-];
-
-const unreadAnnouncementFilter = () =>
-  or(
-    isNull(announcementRead.id),
-    lt(announcementRead.readAt, announcement.updatedAt)
-  );
 
 function parseOptionalDate(value: string | null | undefined) {
   if (!value) {
@@ -92,95 +62,6 @@ async function writeAnnouncementAuditLog(params: {
     after: sanitizeSnapshot(params.after),
     metadata: params.metadata,
   });
-}
-
-function serializeAdminAnnouncement(
-  row: typeof announcement.$inferSelect
-): AdminAnnouncementItem {
-  return {
-    id: row.id,
-    title: row.title,
-    content: row.content,
-    severity: row.severity,
-    isPublished: row.isPublished,
-    isPinned: row.isPinned,
-    priority: row.priority,
-    publishedAt: row.publishedAt?.toISOString() ?? null,
-    expiresAt: row.expiresAt?.toISOString() ?? null,
-    createdByUserId: row.createdByUserId,
-    updatedByUserId: row.updatedByUserId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-export async function listActiveAnnouncementsForUser(userId: string) {
-  return db
-    .select({
-      id: announcement.id,
-      title: announcement.title,
-      content: announcement.content,
-      severity: announcement.severity,
-      isPinned: announcement.isPinned,
-      priority: announcement.priority,
-      publishedAt: announcement.publishedAt,
-      expiresAt: announcement.expiresAt,
-      createdAt: announcement.createdAt,
-      updatedAt: announcement.updatedAt,
-      readAt: announcementRead.readAt,
-    })
-    .from(announcement)
-    .leftJoin(
-      announcementRead,
-      and(
-        eq(announcementRead.announcementId, announcement.id),
-        eq(announcementRead.userId, userId)
-      )
-    )
-    .where(activeAnnouncementFilter())
-    .orderBy(...announcementOrder);
-}
-
-export async function countUnreadAnnouncementsForUser(userId: string) {
-  const [row] = await db
-    .select({ count: sql<number>`count(*)`.mapWith(Number) })
-    .from(announcement)
-    .leftJoin(
-      announcementRead,
-      and(
-        eq(announcementRead.announcementId, announcement.id),
-        eq(announcementRead.userId, userId)
-      )
-    )
-    .where(and(activeAnnouncementFilter(), unreadAnnouncementFilter()));
-
-  return row?.count ?? 0;
-}
-
-export async function markAnnouncementIdsReadForUser(
-  userId: string,
-  announcementIds: string[]
-) {
-  const uniqueIds = Array.from(new Set(announcementIds)).filter(Boolean);
-  if (uniqueIds.length === 0) {
-    return 0;
-  }
-
-  await db
-    .insert(announcementRead)
-    .values(
-      uniqueIds.map((announcementId) => ({
-        id: crypto.randomUUID(),
-        announcementId,
-        userId,
-      }))
-    )
-    .onConflictDoUpdate({
-      target: [announcementRead.userId, announcementRead.announcementId],
-      set: { readAt: new Date() },
-    });
-
-  return uniqueIds.length;
 }
 
 export const getMyUnreadAnnouncementCountAction = withAnnouncementAction(
@@ -232,13 +113,6 @@ export const markAnnouncementReadAction = withAnnouncementAction("markRead")
     revalidatePath("/dashboard/announcements");
     return { message: "已标记为已读" };
   });
-
-export async function listAnnouncementsForAdmin() {
-  return db
-    .select()
-    .from(announcement)
-    .orderBy(desc(announcement.isPinned), desc(announcement.updatedAt));
-}
 
 export const getAdminAnnouncementsAction = withAdminAnnouncementAction("list")
   .action(async () => {

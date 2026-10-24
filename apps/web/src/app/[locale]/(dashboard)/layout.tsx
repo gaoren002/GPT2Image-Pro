@@ -1,12 +1,12 @@
 // 直接从各模块导入(不经 barrel index.ts):barrel re-export 多个卡片组件,经它导入会把
 // 这些组件及其依赖一并拖进每页必载的公共 bundle(tree-shaking 被 barrel 破坏)。
 
-import { countUnreadAnnouncementsForUser } from "@repo/shared/announcements";
+import { countUnreadAnnouncementsForUser } from "@repo/shared/announcements/service";
 import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { getServerSession } from "@repo/shared/auth/server";
 import { getSidebarCreditsBalance } from "@repo/shared/credits/core";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
-import { countUnreadTicketsForUser } from "@repo/shared/support/actions/ticket";
+import { countUnreadTicketsForUser } from "@repo/shared/support/services/ticket-unread";
 import { DashboardMainWrapper } from "@/features/dashboard/components/main-wrapper";
 import { DashboardSidebar } from "@/features/dashboard/components/sidebar";
 import { SidebarProvider } from "@/features/dashboard/context";

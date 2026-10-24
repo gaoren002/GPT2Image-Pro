@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { getLocale } from "next-intl/server";
 
-import { listAnnouncementsForAdmin } from "@repo/shared/announcements";
+import { listAnnouncementsForAdmin } from "@repo/shared/announcements/service";
 import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { canAccessAdminArea } from "@repo/shared/auth/roles";
 import { getServerSession } from "@repo/shared/auth/server";

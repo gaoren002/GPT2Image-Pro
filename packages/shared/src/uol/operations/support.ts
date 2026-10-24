@@ -6,7 +6,7 @@
  * 关键依赖：registry.ts (defineOperation)、zod (schema 校验)
  *
  * 接线状态：
- * - 公告查询类（list/count/mark）：已接线至 announcements/actions 导出的纯函数
+ * - 公告查询类（list/count/mark）：已接线至 announcements/service 的服务函数
  * - 公告管理类（create/update/delete/toggle）：Bound at app level（逻辑内联于 server-action 闭包，含 revalidatePath/auditLog）
  * - 工单类（全部）：Bound at app level（逻辑内联于 server-action 闭包）
  */
@@ -17,7 +17,7 @@ import {
   listActiveAnnouncementsForUser,
   listAnnouncementsForAdmin,
   markAnnouncementIdsReadForUser,
-} from "../../announcements/actions";
+} from "../../announcements/service";
 import { getPrincipalUserId } from "../principal";
 import { defineOperation } from "../registry";
 

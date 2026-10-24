@@ -9,10 +9,12 @@ import {
 } from "@repo/database/schema";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { getUserRoleById } from "../../auth/role-server";
-import { isAdminRole } from "../../auth/roles";
 import { adminAction, protectedAction } from "../../safe-action";
 import { sendTicketAdminNotification } from "../notifications";
+import {
+  adminUnreadTicketCountSql,
+  countUnreadTicketsForUser,
+} from "../services/ticket-unread";
 import {
   addTicketMessageSchema,
   createTicketSchema,
@@ -28,17 +30,9 @@ const unreadTicketSql =
   sql<boolean>`${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt}`.mapWith(
     Boolean
   );
-const unreadTicketCountSql =
-  sql<number>`count(*) filter (where ${ticket.lastAdminActivityAt} > ${ticket.userLastSeenAt})`.mapWith(
-    Number
-  );
 const adminUnreadTicketSql =
   sql<boolean>`${ticket.lastUserActivityAt} is not null and (${ticket.adminLastSeenAt} is null or ${ticket.lastUserActivityAt} > ${ticket.adminLastSeenAt})`.mapWith(
     Boolean
-  );
-const adminUnreadTicketCountSql =
-  sql<number>`count(*) filter (where ${ticket.lastUserActivityAt} is not null and (${ticket.adminLastSeenAt} is null or ${ticket.lastUserActivityAt} > ${ticket.adminLastSeenAt}))`.mapWith(
-    Number
   );
 
 async function assertPendingAttachments(
@@ -379,35 +373,6 @@ export const getAdminUnreadTicketCountAction = withAdminTicketAction(
 
   return { count: rows[0]?.count ?? 0 };
 });
-
-/**
- * 获取当前用户未读工单动态数量
- */
-/**
- * 未读工单数(服务端直调,供 dashboard layout 预取;action 层薄封装)。
- * 管理员看全站未读,普通用户看本人未读。
- */
-export async function countUnreadTicketsForUser(userId: string) {
-  const role = await getUserRoleById(userId);
-  if (isAdminRole(role)) {
-    const rows = await db
-      .select({
-        count: adminUnreadTicketCountSql,
-      })
-      .from(ticket);
-
-    return rows[0]?.count ?? 0;
-  }
-
-  const rows = await db
-    .select({
-      count: unreadTicketCountSql,
-    })
-    .from(ticket)
-    .where(eq(ticket.userId, userId));
-
-  return rows[0]?.count ?? 0;
-}
 
 export const getMyUnreadTicketCountAction = withTicketAction(
   "getMyUnreadTicketCount"

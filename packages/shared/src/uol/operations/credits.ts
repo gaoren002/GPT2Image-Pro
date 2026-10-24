@@ -687,42 +687,9 @@ export const setStatus = defineOperation({
 });
 
 // ---------------------------------------------------------------------------
-// 18. credits.adminGrant - 管理员手动发放积分（非幂等）
+// 18. credits.adminGrant - 管理员充值的独立 UOL 契约与原子事务服务
 // ---------------------------------------------------------------------------
-export const adminGrant = defineOperation({
-  name: "credits.adminGrant",
-  domain: "credits",
-  title: "Admin Grant Credits",
-  description:
-    "管理员手动向用户发放积分。注意：此操作未传 sourceRef，" +
-    "重复提交会重复发放（非幂等）。禁止管理员给自己发放。" +
-    "含审计日志 + revalidate 缓存。",
-  input: z.object({
-    userId: z.string().describe("目标用户 ID"),
-    amount: z.number().int().positive().describe("发放积分数量"),
-    reason: z.string().optional().describe("发放原因"),
-    expiresAt: z
-      .string()
-      .datetime()
-      .optional()
-      .describe("批次过期时间（ISO8601）"),
-  }),
-  output: z.object({
-    batchId: z.string().describe("新建积分批次 ID"),
-    balance: z.number().describe("发放后最新余额"),
-  }),
-  access: { kind: "admin" },
-  readOnly: false,
-  destructive: false,
-  idempotency: { kind: "none" },
-  sideEffects: ["billing", "audit", "cache"],
-  // Bound at app level - see apps/web/src/server/uol-bindings.ts
-  execute: async () => {
-    throw new Error(
-      "credits.adminGrant must be bound at app level",
-    );
-  },
-});
+export { adminGrant } from "./credits-admin-grant";
 
 // ---------------------------------------------------------------------------
 // 19. credits.adminAdjust - 管理员调整积分（set/deduct，非幂等）
@@ -806,6 +773,7 @@ export const refund = defineOperation({
       generationId,
       userId: input.userId,
       amount: input.amount,
+      targetCredits: 0,
       sourceRef: input.sourceRef,
       description: input.reason ?? "Generation refund",
     });

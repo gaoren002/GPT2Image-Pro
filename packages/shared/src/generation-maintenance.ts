@@ -1,13 +1,25 @@
+/** 图片维护与专用退款入口；退款意图由持久 outbox 恢复，金额真相仍在 credits 账本。 */
 import { db } from "@repo/database";
-import { generation } from "@repo/database/schema";
-import { and, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
-import { grantCredits } from "./credits/core";
+import { generation, generationRefundOutbox } from "@repo/database/schema";
+import { and, asc, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import {
+  enqueueGenerationRefund,
+  processGenerationRefundOutbox,
+  submitGenerationRefund,
+} from "./generation-refund-outbox";
 import { getFailedGenerationTargetCreditsFromMetadata } from "./generation-settlement";
-import { logError } from "./logger";
+import { logError, logWarn } from "./logger";
+import { describeErrorForLog, isDatabaseError } from "./db/error-summary";
+import { z } from "zod";
+import { defineOperation } from "./uol/registry";
 import { getStorageProvider } from "./storage/providers";
 import { getRuntimeSettingNumber } from "./system-settings";
 
+// PG 验收及内部维护从既有公开包入口访问，无需改共享 package.json 的 exports。
+export { enqueueGenerationRefund, processGenerationRefundOutbox };
+
 export const IMAGE_GENERATION_PENDING_TIMEOUT_MS = 20 * 60 * 1000;
+const FAILED_GENERATION_REFUND_SOURCE_SUFFIX = ":failed-recovery-refund";
 
 // 超时文案/选择器抽到 db-free 的 ./generation-timeout（纯分类器 sla-classification
 // 也要用，不能经本模块的 `import { db }` 把数据库连接拖进纯路径）。本模块 pending 清扫
@@ -261,8 +273,10 @@ export function stripDestroyedGenerationImageReferences(
   return nextMetadata;
 }
 
-/** 专用生成退款：同事务完成封顶及 Key 退额，并返回锁内账本所见的退后净额。
- * remainingDebited 是本次事务快照，不包含此后提交的其他扣费或退款。 */
+/**
+ * 专用生成退款：先持久化财务意图，再同事务封顶/退 Key。兼容调用方描述和元数据参数，
+ * 但不向 outbox 或账本转存任意私密内容。targetCredits 由明确结算目标传入。
+ */
 export async function refundGenerationCredits(params: {
   generationId: string;
   userId: string;
@@ -270,39 +284,153 @@ export async function refundGenerationCredits(params: {
   sourceRef: string;
   description: string;
   metadata?: Record<string, unknown>;
+  targetCredits?: number;
 }) {
-  const granted = await grantCredits({
+  return submitGenerationRefund({
+    generationId: params.generationId,
     userId: params.userId,
-    // 零请求也只读核对净额，供已有其他路径退款的投影收敛；不新建退款流水。
-    amount: Math.max(0, params.amount),
-    sourceType: "refund",
-    debitAccount: "SYSTEM:generation_refund",
-    transactionType: "refund",
+    amount: params.amount,
     sourceRef: params.sourceRef,
-    description: params.description,
-    generationRefund: { generationId: params.generationId },
-    metadata: {
-      ...params.metadata,
-      generationId: params.generationId,
-    },
+    targetCredits:
+      params.targetCredits ??
+      (typeof params.metadata?.targetCredits === "number"
+        ? params.metadata.targetCredits
+        : undefined),
   });
-
-  const refunded = !granted.alreadyGranted && granted.amount > 0;
-  if (
-    typeof granted.remainingDebited !== "number" ||
-    !Number.isFinite(granted.remainingDebited) ||
-    granted.remainingDebited < 0
-  ) {
-    throw new Error(
-      "Generation refund did not return an authoritative remaining debit"
-    );
-  }
-  return {
-    refunded,
-    amount: refunded ? granted.amount : 0,
-    remainingDebited: granted.remainingDebited,
-  };
 }
+
+/**
+ * 补偿旧版或终态→enqueue 间退出的 failed 任务，只按终态恢复意图是否缺失筛选。
+ * 旧 phase 的意图不代表本次终态已结算；终态意图存在后由 worker 重试，避免反复回填。
+ * 只投影结算所需财务标量，最终仍由 R10 在锁内按净扣费与目标费用封顶。
+ */
+export async function recoverFailedGenerationRefunds(
+  options: { limit?: number } = {}
+) {
+  const limit = z
+    .number()
+    .int()
+    .min(1)
+    .max(500)
+    .parse(options.limit ?? 100);
+  const rows = await db
+    .select({
+      id: generation.id,
+      userId: generation.userId,
+      creditsConsumed: generation.creditsConsumed,
+      metadata: sql<Record<string, unknown>>`jsonb_build_object(
+      'moderationFailureCredits', ${generation.metadata}::jsonb->'moderationFailureCredits',
+      'billingMultiplier', ${generation.metadata}::jsonb->'billingMultiplier',
+      'creditCost', jsonb_build_object(
+        'moderationOnlyCredits', ${generation.metadata}::jsonb->'creditCost'->'moderationOnlyCredits',
+        'moderationCredits', ${generation.metadata}::jsonb->'creditCost'->'moderationCredits'),
+      'targetCredits', COALESCE(${generation.metadata}::jsonb->'timeout'->'targetCredits', ${generation.metadata}::jsonb->'settlement'->'targetCredits'))`,
+    })
+    .from(generation)
+    .where(
+      and(
+        eq(generation.status, "failed"),
+        // 无法证明费用目标的旧行继续留在 failed/账本待审计，不创建虚假的已结算意图。
+        sql`(jsonb_typeof(COALESCE(${generation.metadata}::jsonb->'timeout'->'targetCredits',
+          ${generation.metadata}::jsonb->'settlement'->'targetCredits')) = 'number'
+          OR jsonb_typeof(${generation.metadata}::jsonb->'moderationFailureCredits') = 'number')`,
+        sql`NOT EXISTS (SELECT 1 FROM ${generationRefundOutbox}
+      WHERE ${generationRefundOutbox.userId} = ${generation.userId}
+        AND ${generationRefundOutbox.generationId} = ${generation.id}
+        AND ${generationRefundOutbox.sourceRef} = (${generation.id} || ${FAILED_GENERATION_REFUND_SOURCE_SUFFIX}))`
+      )
+    )
+    .orderBy(asc(generation.createdAt), asc(generation.id))
+    .limit(limit);
+  let enqueued = 0;
+  let recoveryFailed = 0;
+  for (const row of rows) {
+    try {
+      const chargedCredits = Math.max(0, Number(row.creditsConsumed) || 0);
+      const target = row.metadata?.targetCredits;
+      const explicitTarget =
+        typeof target === "number" && Number.isFinite(target) && target >= 0;
+      // 历史 failed 未记录具体失败原因，审核拦截与生成失败可能收费不同。
+      // 不能把较高的合法审核费退掉；没有明确目标时先按保守上界补偿，差额留待账本审计。
+      // 不用已降低的 creditsConsumed 裁剪策略目标，否则自己的投影更新会改变 phase 参数。
+      const metadata = row.metadata;
+      const policyCharge = Number.MAX_SAFE_INTEGER;
+      const targetCredits = explicitTarget
+        ? target
+        : Math.max(
+            getFailedGenerationTargetCreditsFromMetadata({
+              reason: "generation_error",
+              chargedCredits: policyCharge,
+              metadata,
+            }),
+            getFailedGenerationTargetCreditsFromMetadata({
+              reason: "moderation_block",
+              chargedCredits: policyCharge,
+              metadata,
+            })
+          );
+      await enqueueGenerationRefund({
+        userId: row.userId,
+        generationId: row.id,
+        sourceRef: `${row.id}${FAILED_GENERATION_REFUND_SOURCE_SUFFIX}`,
+        amount: chargedCredits,
+        targetCredits,
+      });
+      enqueued += 1;
+    } catch (error) {
+      recoveryFailed += 1;
+      logWarn("Failed generation refund recovery requires retry", {
+        generationId: row.id,
+        errorSummary: isDatabaseError(error)
+          ? describeErrorForLog(error)
+          : "refund_recovery_failed",
+      });
+    }
+  }
+  return { enqueued, recoveryFailed };
+}
+
+/** 图片维护复用的退款恢复入口；先补偿无意图终态，再投递到期意图。 */
+export async function retryGenerationRefunds(
+  options: { now?: Date; limit?: number } = {}
+) {
+  let recovered = { enqueued: 0, recoveryFailed: 0 };
+  try {
+    recovered = await recoverFailedGenerationRefunds(options);
+  } catch (error) {
+    // 存量扫描故障也不能阻断独立的已持久意图；1 表示整批回填失败，金额不丢弃。
+    recovered.recoveryFailed = 1;
+    logWarn("Failed generation refund recovery scan failed", {
+      errorSummary: isDatabaseError(error)
+        ? describeErrorForLog(error)
+        : "refund_recovery_failed",
+    });
+  }
+  return { ...recovered, ...(await processGenerationRefundOutbox(options)) };
+}
+
+/** cron 专用退款恢复操作；自然幂等，单个资金事务在 R10 内完成。 */
+export const retryGenerationRefundsOperation = defineOperation({
+  name: "image-generation.retryRefunds",
+  domain: "credits",
+  title: "Retry Generation Refunds",
+  description: "补偿失败生成并恢复持久退款意图",
+  input: z.object({ limit: z.number().int().min(1).max(500).default(100) }),
+  output: z.object({
+    enqueued: z.number(),
+    recoveryFailed: z.number(),
+    attempted: z.number(),
+    settled: z.number(),
+    failed: z.number(),
+    creditsRefunded: z.number(),
+  }),
+  access: { kind: "cron" },
+  readOnly: false,
+  destructive: false,
+  idempotency: { kind: "natural" },
+  sideEffects: ["billing"],
+  execute: (input) => retryGenerationRefunds(input),
+});
 
 export async function expireStalePendingGenerations(
   options: ExpireStalePendingGenerationsOptions = {}
@@ -323,7 +451,6 @@ export async function expireStalePendingGenerations(
     .select({
       id: generation.id,
       userId: generation.userId,
-      prompt: generation.prompt,
       creditsConsumed: generation.creditsConsumed,
       metadata: generation.metadata,
       createdAt: generation.createdAt,
@@ -406,10 +533,8 @@ export async function expireStalePendingGenerations(
         userId: row.userId,
         amount: creditsToRefund,
         sourceRef,
-        description: `Refund timed out image generation charge: ${row.prompt.slice(
-          0,
-          50
-        )}`,
+        description: "Refund timed out image generation charge",
+        targetCredits,
         metadata: {
           reason: "pending_timeout",
           createdAt: row.createdAt.toISOString(),
@@ -424,7 +549,7 @@ export async function expireStalePendingGenerations(
       await db
         .update(generation)
         .set({
-          creditsConsumed: refund.remainingDebited,
+          creditsConsumed: sql`LEAST(${generation.creditsConsumed}, ${refund.remainingDebited})`,
           metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
             {
               timeoutRefund: {
@@ -440,7 +565,10 @@ export async function expireStalePendingGenerations(
         })
         .where(eq(generation.id, row.id));
     } catch (error) {
-      logError(error, {
+      logWarn("Image generation timeout refund pending retry", {
+        errorSummary: isDatabaseError(error)
+          ? describeErrorForLog(error)
+          : "refund_pending_retry",
         source: "image-generation-timeout-refund",
         generationId: row.id,
         userId: row.userId,

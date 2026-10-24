@@ -110,7 +110,7 @@ export interface GrantCreditsParams {
   /** 元数据 */
   metadata?: Record<string, unknown>;
   /** 仅供 generation 专用退款调用；封顶、幂等及 Key 退额必须在本函数事务内完成。 */
-  generationRefund?: { generationId: string };
+  generationRefund?: { generationId: string; targetCredits?: number };
 }
 
 type GenerationRefundLedgerRow = {
@@ -219,6 +219,8 @@ export interface ConsumeCreditsParams {
    * 不传则行为与历史一致（不幂等）。
    */
   sourceRef?: string;
+  /** 显式传入时与钱包同事务 capture；不能再由调用方独立预留同一笔 Key 额度。 */
+  externalApiKeyId?: string;
   /** 元数据 */
   metadata?: Record<string, unknown>;
 }
@@ -528,6 +530,14 @@ export async function grantCredits(params: GrantCreditsParams) {
     throw new Error("generationRefund 只能用于带任务和幂等键的专用退款");
   }
 
+  if (
+    generationRefund?.targetCredits !== undefined &&
+    (!Number.isFinite(generationRefund.targetCredits) ||
+      generationRefund.targetCredits < 0)
+  ) {
+    throw new Error("generationRefund 目标净扣费必须是非负有效数字");
+  }
+
   // 到期日必须在开启事务之前算好。设置读取走全局 db 连接(缓存过期时查
   // system_setting):若放在事务回调内,就会在持有一条池连接的同时再借一条;
   // 并发发放占满连接池时,所有事务都在等那条借不到的连接,全站数据库访问
@@ -589,7 +599,14 @@ export async function grantCredits(params: GrantCreditsParams) {
           ledgerRows,
           generationRefund.generationId
         );
-        amount = duplicateRefund ? 0 : Math.min(amount, refundPlan.netDebited);
+        // phase 的旧请求额不能覆盖别处已退的金额，目标保留额也必须在同一锁内裁剪。
+        const refundable = normalizeCreditAmount(
+          Math.max(
+            0,
+            refundPlan.netDebited - (generationRefund.targetCredits ?? 0)
+          )
+        );
+        amount = duplicateRefund ? 0 : Math.min(amount, refundable);
       }
       const [balanceRecord] = await tx
         .select()
@@ -851,7 +868,14 @@ export async function grantCredits(params: GrantCreditsParams) {
 export async function consumeCredits(
   params: ConsumeCreditsParams
 ): Promise<ConsumeCreditsResult> {
-  const { userId, serviceName, description, metadata, sourceRef } = params;
+  const {
+    userId,
+    serviceName,
+    description,
+    metadata,
+    sourceRef,
+    externalApiKeyId,
+  } = params;
   const amount = normalizeCreditAmount(params.amount);
 
   if (amount <= 0) {
@@ -1021,10 +1045,44 @@ export async function consumeCredits(
         sourceRef,
         metadata: {
           ...metadata,
+          // 新 capture 归属必须取服务端参数；缺省保持旧独立预留调用的退款归属。
+          ...(externalApiKeyId !== undefined ? { externalApiKeyId } : {}),
           serviceName,
           consumedBatches,
         },
       });
+
+      if (externalApiKeyId !== undefined) {
+        // 与专用退款保持 batch→key→wallet 锁顺序。条件 UPDATE 在拿到 Key 行锁后
+        // 复核归属、启用状态与剩余额度；失败会回滚本事务已扣的批次，而非另做退额补偿。
+        const [capturedKey] = await tx
+          .update(externalApiKey)
+          .set({
+            creditsUsed: sql`${externalApiKey.creditsUsed} + ${amount}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(externalApiKey.id, externalApiKeyId),
+              eq(externalApiKey.userId, userId),
+              eq(externalApiKey.isActive, true),
+              or(
+                isNull(externalApiKey.creditLimit),
+                gte(
+                  sql`${externalApiKey.creditLimit} - ${externalApiKey.creditsUsed}`,
+                  amount
+                )
+              )
+            )
+          )
+          .returning({ id: externalApiKey.id });
+        if (!capturedKey) {
+          throw Object.assign(
+            new Error("API key quota exceeded or key is unavailable"),
+            { code: "api_key_quota_exceeded" }
+          );
+        }
+      }
 
       const [updatedBalance] = await tx
         .update(creditsBalance)
@@ -1059,7 +1117,16 @@ export async function consumeCredits(
     // WHY 同样按 userId 归属：0029 后偏唯一索引为 (user_id, type, source_ref)，冲突
     // 必来自同一用户的并发重复请求，重查须限定本人交易，否则在跨用户碰撞时会回放他人
     // 金额/批次明细（越权）。与上方快路保持一致。
-    if (sourceRef && isUniqueConstraintViolation(error)) {
+    // 真实 Drizzle 将驱动 SQLSTATE 包装在 cause；唯一冲突仍须整笔回滚后回放。
+    const databaseError =
+      error && typeof error === "object" && "cause" in error
+        ? error.cause
+        : error;
+    if (
+      sourceRef &&
+      (isUniqueConstraintViolation(error) ||
+        isUniqueConstraintViolation(databaseError))
+    ) {
       const [existing] = await db
         .select({
           id: creditsTransaction.id,

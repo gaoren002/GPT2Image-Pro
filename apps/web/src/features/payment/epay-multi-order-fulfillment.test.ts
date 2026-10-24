@@ -379,15 +379,6 @@ describe("同用户年/月普通订单周期不缩短", () => {
     expect(state.orders.get("yearly-order")?.paidAt).toEqual(
       new Date("2026-08-01T12:00:00Z")
     );
-    console.log(
-      "EARLIER_ANNUAL_RECOVERY",
-      JSON.stringify({
-        projection: state.sub,
-        annualPlan: frozenAnnual,
-        bothFulfilled: true,
-        grants: mocks.grant.mock.calls.length,
-      })
-    );
     expect(state.sub?.currentPeriodEnd).toEqual(
       new Date("2027-08-01T12:00:00Z")
     );

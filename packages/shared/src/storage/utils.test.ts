@@ -2,7 +2,8 @@
  * 存储 URL 与归属工具的 DB-free 单测
  *
  * 覆盖 isExternalUrl / getAvatarUrl / generateAvatarKey（C-L16）以及
- * keyBelongsToUser / isBucketAllowed（C-M19，归属与白名单的纯逻辑）。
+ * keyBelongsToUser / storageKeyBelongsToUser / isBucketAllowed
+ * （归属与白名单的纯逻辑；存储读取路由的会话回退鉴权依赖前者）。
  */
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +14,7 @@ import {
   isBucketAllowed,
   isExternalUrl,
   keyBelongsToUser,
+  storageKeyBelongsToUser,
 } from "./utils";
 
 describe("isExternalUrl", () => {
@@ -135,5 +137,38 @@ describe("isBucketAllowed", () => {
 
   it("空白名单一律返回 false", () => {
     expect(isBucketAllowed("avatars", [])).toBe(false);
+  });
+});
+
+describe("storageKeyBelongsToUser", () => {
+  const owner = "user-123";
+
+  it("接受 generations 桶各写入方的本人键布局", () => {
+    for (const key of [
+      `${owner}/abc123.png`,
+      `${owner}/rehost/gen-1-0.png`,
+      `${owner}/requests/gen-2-1.webp`,
+      `${owner}/deck.psd`,
+      `support/${owner}/att-1.png`,
+    ]) {
+      expect(storageKeyBelongsToUser(key, owner), key).toBe(true);
+    }
+  });
+
+  it("拒绝他人键，包括前缀相近与工单附件", () => {
+    for (const key of [
+      "user-1234/abc.png",
+      "other-user/abc.png",
+      `support/other-user/att-1.png`,
+      `prefix-${owner}/abc.png`,
+      `nested/${owner}/abc.png`,
+    ]) {
+      expect(storageKeyBelongsToUser(key, owner), key).toBe(false);
+    }
+  });
+
+  it("空键或空用户一律拒绝", () => {
+    expect(storageKeyBelongsToUser("", owner)).toBe(false);
+    expect(storageKeyBelongsToUser(`${owner}/a.png`, "")).toBe(false);
   });
 });

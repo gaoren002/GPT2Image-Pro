@@ -2,14 +2,17 @@
  * 存储对象读取 API 路由
  *
  * 提供本地/S3 存储桶中图像的 HTTP 读取。
- * - avatars 桶：公开访问，无需鉴权。
+ * - avatars 桶：公开访问，无需鉴权，长期公共缓存。
  * - generations 桶：需要有效的短时签名 URL（sig + exp 查询参数）。
  *   签名验证使用 HMAC-SHA256 + 常量时间比较，防止时序攻击。
  *   v1 API 消费者通过签名 URL 参数获取授权（无 cookie）。
+ *   签名未通过时回退第一方会话归属鉴权（按存储键前缀判定，见 isOwnerViaSession）。
+ *
+ * 缓存与授权绑定（见 cacheControlForAuthorization）：签名授权的响应最多缓存到签名
+ * 到期为止，Cookie 授权的响应 private/no-store，避免私有图进入共享缓存或在授权
+ * 过期后仍被缓存命中。
  */
 
-import { db } from "@repo/database";
-import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
 import { logError } from "@repo/shared/logger";
 import { getStorageProvider } from "@repo/shared/storage/providers";
@@ -17,7 +20,7 @@ import {
   isPublicBucket,
   verifySignedImageUrl,
 } from "@repo/shared/storage/signed-url";
-import { eq } from "drizzle-orm";
+import { storageKeyBelongsToUser } from "@repo/shared/storage/utils";
 import { type NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -40,10 +43,41 @@ const CONTENT_TYPES: Record<string, string> = {
   ".webp": "image/webp",
 };
 
-const GENERATION_CACHE_CONTROL =
-  "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800, immutable";
 const PUBLIC_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const NO_STORE_CACHE_CONTROL = "no-store";
+/** 仅凭会话 Cookie 放行的响应与调用者绑定，任何缓存都不得保存。 */
+const PRIVATE_NO_STORE_CACHE_CONTROL = "private, no-store";
+/** 签名授权响应的缓存上限：再长也不超过签名默认寿命（1 小时）。 */
+const MAX_SIGNED_CACHE_SECONDS = 3600;
+
+/**
+ * 按授权方式计算缓存策略。
+ *
+ * WHY 不再对 generations 一律使用长公共缓存：此前成功响应声明
+ * `public, max-age=86400, s-maxage=2592000, immutable`，于是
+ * - 仅凭本人 Cookie 放行的私有图可被共享缓存保存，再按同一 URL 回给其他请求；
+ * - 1 小时签名的响应在共享缓存里可留存 30 天，远超授权期限。
+ * 现改为：签名授权的响应只缓存到该签名到期为止（边缘仍能吸收同一小时内的重复
+ * 读取，保留缩略图的带宽优化）；Cookie 授权的响应 private/no-store。
+ */
+function cacheControlForAuthorization(
+  authorization: StorageAuthorization
+): string {
+  if (authorization.kind === "public") {
+    return PUBLIC_ASSET_CACHE_CONTROL;
+  }
+  if (authorization.kind === "session") {
+    return PRIVATE_NO_STORE_CACHE_CONTROL;
+  }
+  const maxAge = Math.min(
+    MAX_SIGNED_CACHE_SECONDS,
+    Math.max(0, authorization.remainingSeconds)
+  );
+  if (maxAge <= 0) {
+    return PRIVATE_NO_STORE_CACHE_CONTROL;
+  }
+  return `public, max-age=${maxAge}, s-maxage=${maxAge}`;
+}
 
 // ============================================
 // 缩略图按需缩放（?w=<width>）
@@ -202,44 +236,46 @@ function isObjectNotFoundError(error: unknown): boolean {
 }
 
 /**
- * 验证 generations 桶的签名 URL。
- * 公开桶跳过验证；非公开桶需要有效的 sig + exp 查询参数。
- *
- * @returns null 表示验证通过，否则返回错误 Response
- */
-/**
  * 第一方登录态回退鉴权(非公开桶):签名 URL 校验未通过时,若请求带有效会话且
- * 当前用户拥有该图(按 storage_key 归属),允许访问。
+ * 该存储键归属当前用户,允许访问。
  *
  * WHY:签名 URL 本是给「无 cookie 的 v1 API 消费方」设计的短时凭证(默认 1 小时)。
  * 浏览器同源请求本就自动带 session cookie,不该因签名过期而看不到自己的图——典型是
  * 创作页把带签名的图片 URL 存进 localStorage,旧会话重新打开时签名已过期。让浏览器走
  * 会话鉴权即可彻底解决,且不削弱签名有效期这一安全策略。
- * 仅在「签名校验未通过」时才走此回退(带一次会话校验+一次归属查库),正常签名流量
- * 校验通过即返回、不触达 DB,热路径不受影响。归属校验(storage_key 属于当前用户)
- * 杜绝越权(IDOR):他人即便拿到 key 也无法越权读取。
+ * 仅在「签名校验未通过」时才走此回退(一次会话校验),正常签名流量校验通过即返回。
+ * 归属按存储键前缀判定(见 storageKeyBelongsToUser):键在写入时就带用户 ID,判定严格
+ * 且无需查库——此前按 generation.storage_key 查库,该列无索引,每次回退都全表扫描最大
+ * 的表,且只覆盖主图,草稿/输入图/可编辑文件/工单附件签名过期后一律 403。
  */
 async function isOwnerViaSession(fileKey: string): Promise<boolean> {
   const user = await getCurrentUser();
   if (!user) {
     return false;
   }
-  const rows = await db
-    .select({ userId: generation.userId })
-    .from(generation)
-    .where(eq(generation.storageKey, fileKey))
-    .limit(1);
-  return rows.length > 0 && rows[0]?.userId === user.id;
+  return storageKeyBelongsToUser(fileKey, user.id);
 }
+
+/**
+ * 本次请求的授权方式，决定响应可被缓存到什么程度。
+ *
+ * - public：公开桶（头像），可长期公共缓存；
+ * - signature：有效签名 URL，缓存期不得超过该签名的剩余寿命；
+ * - session：仅凭会话 Cookie 的归属放行，响应与调用者身份绑定，不可进入任何缓存。
+ */
+type StorageAuthorization =
+  | { kind: "public" }
+  | { kind: "signature"; remainingSeconds: number }
+  | { kind: "session" };
 
 async function verifyBucketAccess(
   request: NextRequest,
   bucket: string,
   fileKey: string
-): Promise<NextResponse | null> {
+): Promise<{ authorization: StorageAuthorization } | { denial: NextResponse }> {
   // 公开桶无需签名
   if (isPublicBucket(bucket)) {
-    return null;
+    return { authorization: { kind: "public" } };
   }
 
   const sig = request.nextUrl.searchParams.get("sig");
@@ -248,6 +284,7 @@ async function verifyBucketAccess(
   // 先按签名 URL 校验,失败时记下对应的拒绝响应(denial)再回退会话鉴权,
   // 而非立刻返回——让带 cookie 的第一方浏览器即便签名过期也能读自己的图。
   let denial: NextResponse | null = null;
+  let signatureRemainingSeconds = 0;
 
   if (!sig || !expParam) {
     denial = NextResponse.json(
@@ -273,21 +310,31 @@ async function verifyBucketAccess(
           { error: "Invalid signature" },
           { status: 403, headers: { "Cache-Control": NO_STORE_CACHE_CONTROL } }
         );
+      } else {
+        signatureRemainingSeconds = Math.max(
+          0,
+          exp - Math.floor(Date.now() / 1000)
+        );
       }
     }
   }
 
   // 签名校验通过
   if (!denial) {
-    return null;
+    return {
+      authorization: {
+        kind: "signature",
+        remainingSeconds: signatureRemainingSeconds,
+      },
+    };
   }
 
-  // 签名缺失/过期/无效:回退第一方会话归属鉴权(仅此路径触达 DB)。
+  // 签名缺失/过期/无效:回退第一方会话归属鉴权(按键前缀判定,不触达 DB)。
   if (await isOwnerViaSession(fileKey)) {
-    return null;
+    return { authorization: { kind: "session" } };
   }
 
-  return denial;
+  return { denial };
 }
 
 export async function GET(
@@ -322,18 +369,15 @@ export async function GET(
   }
 
   // 签名验证：generations 桶需要有效签名(或第一方会话归属),avatars 桶公开访问。
-  const accessError = await verifyBucketAccess(request, bucket, fileKey);
-  if (accessError) {
-    return accessError;
+  const access = await verifyBucketAccess(request, bucket, fileKey);
+  if ("denial" in access) {
+    return access.denial;
   }
 
   const ext = path.extname(fileKey).toLowerCase();
   const mappedContentType = CONTENT_TYPES[ext];
   const contentType = mappedContentType || "application/octet-stream";
-  const cacheControl =
-    bucket === GENERATIONS_BUCKET
-      ? GENERATION_CACHE_CONTROL
-      : PUBLIC_ASSET_CACHE_CONTROL;
+  const cacheControl = cacheControlForAuthorization(access.authorization);
 
   const thumbWidth = THUMB_RESIZABLE_TYPES.has(ext)
     ? parseThumbWidth(pathWidth ?? request.nextUrl.searchParams.get("w"))

@@ -37,6 +37,7 @@
     "./image-backend/nested-groups": "./src/image-backend/nested-groups.ts",
     "./storage": "./src/storage/index.ts",
     "./storage/image-url": "./src/storage/image-url.ts",
+    "./storage/utils": "./src/storage/utils.ts",
     "./storage/signed-url": "./src/storage/signed-url.ts",
     "./storage/providers": "./src/storage/providers/index.ts",
     "./system-settings": "./src/system-settings/index.ts",

@@ -108,6 +108,38 @@ export function keyBelongsToUser(key: string, userId: string): boolean {
 }
 
 /**
+ * 判断 generations 桶的存储键是否归属指定用户（不查库）。
+ *
+ * 该桶所有写入方都把用户 ID 编进键里，共两种布局：
+ * - `${userId}/...`：生成图、可编辑文件、PSD、输入图转存、请求上传
+ *   （operations.ts、editable-file-operations.ts、psd-export/orchestrator.ts、
+ *   rehost-input-images.ts、request-utils.ts）；
+ * - `support/${userId}/...`：工单附件（api/support/attachments）。
+ *
+ * WHY 不按 generation.storage_key 查库：该列无索引，每次回退鉴权都要全表扫描最大的表，
+ * 且只覆盖主图，派生对象（草稿、输入图、可编辑文件、工单附件）签名过期后一律 403。
+ * 键前缀是写入时就确定的归属事实，判定同样严格且无需查询。
+ *
+ * @param key - 存储键（已剥离缩略图宽度段）
+ * @param userId - 当前会话用户 ID
+ * @returns 该键是否由此用户写入
+ * @remarks 仅用于"本人读自己的对象"；工单附件的管理员/工单归属等更宽的授权仍由
+ *   工单附件接口自行校验并下发签名 URL，不走本判定。
+ */
+export function storageKeyBelongsToUser(
+  key: string,
+  userId: string
+): boolean {
+  if (!userId || !key) {
+    return false;
+  }
+  if (keyBelongsToUser(key, userId)) {
+    return true;
+  }
+  return key.startsWith(`support/${userId}/`);
+}
+
+/**
  * 判断存储桶是否在白名单内
  *
  * 安全措施：只允许访问预定义的存储桶，避免跨桶越权。

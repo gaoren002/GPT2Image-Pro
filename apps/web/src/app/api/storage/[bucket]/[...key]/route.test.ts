@@ -1,8 +1,9 @@
 /**
  * 存储对象读取路由的 DB-free 单测
  *
- * 覆盖：桶白名单、路径穿越拒绝、正常读取、404/502 错误映���、
- * 签名验证（generations 桶需要 sig+exp，avatars 桶公开访问）。
+ * 覆盖：桶白名单、路径穿越拒绝、正常读取、404/502 错误映射、
+ * 签名验证（generations 桶需要 sig+exp，avatars 桶公开访问）、
+ * 会话回退鉴权按存储键前缀判定（不查库），以及缓存策略与授权方式绑定。
  */
 
 import type { NextRequest } from "next/server";
@@ -18,25 +19,9 @@ vi.mock("@repo/shared/storage/providers", () => ({
 const logError = vi.hoisted(() => vi.fn());
 vi.mock("@repo/shared/logger", () => ({ logError }));
 
-// 第一方会话回退鉴权的依赖:getCurrentUser(会话)与 db(按 storage_key 查归属)。
-// 保持 DB-free:getCurrentUser/db 均被 mock;正常签名校验通过的用例不会触达它们。
-const { getCurrentUser, dbState } = vi.hoisted(() => ({
-  getCurrentUser: vi.fn(),
-  dbState: { rows: [] as Array<{ userId: string | null }> },
-}));
+// 第一方会话回退鉴权只依赖 getCurrentUser:归属按存储键前缀判定,不查库。
+const { getCurrentUser } = vi.hoisted(() => ({ getCurrentUser: vi.fn() }));
 vi.mock("@repo/shared/auth/server", () => ({ getCurrentUser }));
-vi.mock("@repo/database", () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        where: () => ({ limit: async () => dbState.rows }),
-      }),
-    }),
-  },
-}));
-vi.mock("@repo/database/schema", () => ({
-  generation: { userId: "userId", storageKey: "storageKey" },
-}));
 
 import { generateSignedImageParams } from "@repo/shared/storage/signed-url";
 import { GET } from "./route";
@@ -81,10 +66,9 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
     process.env.BETTER_AUTH_SECRET = TEST_SECRET;
     getObject.mockReset();
     logError.mockReset();
-    // 默认:无会话(签名失败即 403),归属查询返回空。各用例按需覆盖。
+    // 默认:无会话(签名失败即 403)。各用例按需覆盖。
     getCurrentUser.mockReset();
     getCurrentUser.mockResolvedValue(null);
-    dbState.rows = [];
   });
 
   afterAll(() => {
@@ -179,7 +163,7 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
     expect(getObject).not.toHaveBeenCalled();
   });
 
-  it("generations 桶有效签名返回图片字节、正确 content-type 与长缓存", async () => {
+  it("generations 桶有效签名返回图片字节、正确 content-type,缓存不超过签名寿命", async () => {
     getObject.mockResolvedValue(Buffer.from("png-bytes"));
     const res = await GET(
       makeSignedRequest("generations", "user-123/abc.png"),
@@ -191,7 +175,14 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
     });
     expect(res.headers.get("Content-Type")).toBe("image/png");
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
-    expect(res.headers.get("Cache-Control")).toContain("immutable");
+    // 缓存期不得超过签名剩余寿命(默认 1 小时),且不得声明 immutable:
+    // 否则 1 小时的授权会被共享缓存保留到远超到期时间。
+    const cacheControl = res.headers.get("Cache-Control") ?? "";
+    expect(cacheControl).not.toContain("immutable");
+    const maxAge = Number(/max-age=(\d+)/.exec(cacheControl)?.[1]);
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(3600);
+    expect(cacheControl).toContain(`s-maxage=${maxAge}`);
     expect(res.headers.get("Content-Length")).toBe("9");
     // 图片白名单扩展不应被强制下载。
     expect(res.headers.get("Content-Disposition")).toBeNull();
@@ -201,7 +192,6 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
   it("签名缺失但第一方会话且归属本人 → 放行(回退鉴权,200)", async () => {
     // 浏览器同源请求带 cookie:即便没有/过期签名,拥有该图的登录用户也能读自己的图。
     getCurrentUser.mockResolvedValue({ id: "user-123" });
-    dbState.rows = [{ userId: "user-123" }];
     getObject.mockResolvedValue(Buffer.from("png-bytes"));
     const res = await GET(
       makeRequest(),
@@ -211,17 +201,60 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
     expect(getObject).toHaveBeenCalledWith("user-123/abc.png", "generations", {
       signal: expect.anything(),
     });
+    // 仅凭 Cookie 放行的响应与调用者绑定,不得进入任何缓存。
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("签名缺失且会话用户非归属人 → 403(杜绝越权 IDOR)", async () => {
     getCurrentUser.mockResolvedValue({ id: "intruder" });
-    dbState.rows = [{ userId: "owner-1" }];
     const res = await GET(
       makeRequest(),
       makeParams("generations", ["owner-1", "abc.png"])
     );
     expect(res.status).toBe(403);
     expect(getObject).not.toHaveBeenCalled();
+  });
+
+  it("会话回退覆盖派生对象与工单附件(签名过期也能读自己的对象)", async () => {
+    getCurrentUser.mockResolvedValue({ id: "user-123" });
+    for (const key of [
+      ["user-123", "rehost", "gen-1-0.png"],
+      ["support", "user-123", "att-1.png"],
+    ]) {
+      getObject.mockResolvedValue(Buffer.from("png-bytes"));
+      const res = await GET(makeRequest(), makeParams("generations", key));
+      expect(res.status, key.join("/")).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    }
+  });
+
+  it("他人工单附件即便登录也拒绝", async () => {
+    getCurrentUser.mockResolvedValue({ id: "intruder" });
+    const res = await GET(
+      makeRequest(),
+      makeParams("generations", ["support", "owner-1", "att-1.png"])
+    );
+    expect(res.status).toBe(403);
+    expect(getObject).not.toHaveBeenCalled();
+  });
+
+  it("签名剩余寿命很短时缓存期随之缩短", async () => {
+    getObject.mockResolvedValue(Buffer.from("png-bytes"));
+    const { sig, exp } = generateSignedImageParams(
+      "generations",
+      "user-123/abc.png",
+      30
+    );
+    const res = await GET(
+      makeRequest({ sig, exp: String(exp) }),
+      makeParams("generations", ["user-123", "abc.png"])
+    );
+    expect(res.status).toBe(200);
+    const maxAge = Number(
+      /max-age=(\d+)/.exec(res.headers.get("Cache-Control") ?? "")?.[1]
+    );
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(30);
   });
 
   it("avatars 桶无需签名即可公开访问", async () => {

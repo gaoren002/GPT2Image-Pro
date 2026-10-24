@@ -1,23 +1,22 @@
 "use server";
 
-import { eq } from "drizzle-orm";
-import { z } from "zod";
-
-import {
-  getBaseUrl,
-  paymentConfig,
-} from "@repo/shared/config/payment";
-import { findRuntimePlanByPriceId } from "@repo/shared/config/payment-runtime";
+/** 支付动作薄适配；升级下单及取消通过 UOL 事务预留接口。 */
+import "@repo/shared/payment/upgrade-reservation-operations";
 import { db } from "@repo/database";
 import { subscription } from "@repo/database/schema";
-import { PaymentType } from "@/features/payment/types";
+import { getBaseUrl, paymentConfig } from "@repo/shared/config/payment";
+import { findRuntimePlanByPriceId } from "@repo/shared/config/payment-runtime";
 import { logEvent } from "@repo/shared/logger";
-import { protectedAction } from "@repo/shared/safe-action";
 import {
   createRuntimeEpayPurchase,
   isRuntimeEpayPaymentProvider,
   saveEpayOrder,
 } from "@repo/shared/payment/epay";
+import { protectedAction } from "@repo/shared/safe-action";
+import { invokeOperation } from "@repo/shared/uol";
+import { eq } from "drizzle-orm";
+import { z } from "zod";
+import { PaymentType } from "@/features/payment/types";
 
 import { creem } from "./creem";
 import {
@@ -35,6 +34,7 @@ export const createCheckoutSession = protectedAction
   .schema(
     z.object({
       priceId: z.string().min(1, "价格 ID 不能为空"),
+      clientRequestId: z.string().min(1).max(128).optional(),
       type: z.nativeEnum(PaymentType).optional(),
       successUrl: z.string().optional(),
       cancelUrl: z.string().optional(),
@@ -75,6 +75,23 @@ export const createCheckoutSession = protectedAction
       priceId,
       useEpay
     );
+    if (useEpay && activeSubscription && !isRenewal) {
+      return invokeOperation<{
+        url: string;
+        params: Record<string, string>;
+        method: "POST";
+        outTradeNo: string;
+        amountDue: number;
+        expiresAt: string;
+      }>(
+        "subscription.reserveUpgrade",
+        {
+          targetPriceId: priceId,
+          clientRequestId: parsedInput.clientRequestId ?? crypto.randomUUID(),
+        },
+        { type: "user", userId, role: "user" }
+      );
+    }
     const upgradeQuote =
       activeSubscription && !isRenewal
         ? await createSubscriptionCheckoutQuote(activeSubscription, priceId)
@@ -330,3 +347,15 @@ function isCanceledSubscriptionWithinPeriod(sub: {
     isSubscriptionWithinPeriod(sub)
   );
 }
+
+/** 取消本人升级订单；已经付款或释放的订单返回原终态，不重复返还。 */
+export const cancelUpgradeCheckout = protectedAction
+  .metadata({ action: "payment.cancelUpgradeCheckout" })
+  .schema(z.object({ outTradeNo: z.string().min(1) }))
+  .action(({ parsedInput, ctx }) =>
+    invokeOperation<{ state: string }>(
+      "subscription.cancelUpgrade",
+      parsedInput,
+      { type: "user", userId: ctx.userId, role: "user" }
+    )
+  );

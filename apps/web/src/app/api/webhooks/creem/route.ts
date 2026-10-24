@@ -1,13 +1,22 @@
-import { and, eq } from "drizzle-orm";
-import { headers } from "next/headers";
-import { NextResponse } from "next/server";
-import { getSubscriptionMonthlyCredits } from "@repo/shared/config/payment-runtime";
+/** Creem 支付通知；续费重投分开补全积分发放和有效期顺延。 */
+
+import { db } from "@repo/database";
+import {
+  creditsBatch,
+  creditsTransaction,
+  subscription,
+  user,
+} from "@repo/database/schema";
+import { withApiLogging } from "@repo/shared/api-logger";
+import { paymentConfig } from "@repo/shared/config/payment";
+import {
+  findRuntimePlanByPriceId,
+  getSubscriptionMonthlyCredits,
+} from "@repo/shared/config/payment-runtime";
 import {
   getPlanFromPriceId,
   isSubscriptionPlan,
 } from "@repo/shared/config/subscription-plan";
-import { db } from "@repo/database";
-import { creditsBatch, subscription, user } from "@repo/database/schema";
 import { CREDIT_CONFIG_DEFAULTS } from "@repo/shared/credits/config";
 import {
   extendActiveSubscriptionBatchesExpiry,
@@ -17,15 +26,12 @@ import {
   getCreditPackagePriceForPlan,
   getRuntimeCreditPackageById,
 } from "@repo/shared/credits/packages";
+import { logError, logEvent, logger } from "@repo/shared/logger";
 import {
-  getRuntimeSettingBoolean,
-  getRuntimeSettingNumber,
-} from "@repo/shared/system-settings";
-import {
+  buildSubscriptionPeriodKey,
   type CreemCheckoutCompletedData,
   type CreemSubscription,
   type CreemWebhookEvent,
-  buildSubscriptionPeriodKey,
   computeSubscriptionCreditsToGrant,
   constructRuntimeCreemEvent,
   getCreemPeriodDays,
@@ -35,10 +41,13 @@ import {
   evaluateCreemAmountMatch,
   shouldGrantAfterAmountCheck,
 } from "@repo/shared/payment/creem-amount";
-import { findRuntimePlanByPriceId } from "@repo/shared/config/payment-runtime";
-import { paymentConfig } from "@repo/shared/config/payment";
-import { withApiLogging } from "@repo/shared/api-logger";
-import { logger, logError, logEvent } from "@repo/shared/logger";
+import {
+  getRuntimeSettingBoolean,
+  getRuntimeSettingNumber,
+} from "@repo/shared/system-settings";
+import { and, eq, sql } from "drizzle-orm";
+import { headers } from "next/headers";
+import { NextResponse } from "next/server";
 
 /** 从 CreemSubscription 中安全提取产品 ID */
 function getProductId(sub: CreemSubscription): string {
@@ -78,12 +87,18 @@ function shouldGrantWithLogging(
     isCreemAmountEnforced()
   );
 
-  if (decision.grant && decision.reason === "not-comparable-grant-with-warning") {
+  if (
+    decision.grant &&
+    decision.reason === "not-comparable-grant-with-warning"
+  ) {
     logger.warn(
       { ...context, source: "creem-webhook", amountMatch, decision },
       "Creem amount check skipped (not comparable); granting credits"
     );
-  } else if (decision.grant && decision.reason === "mismatch-soft-gate-grant-with-warning") {
+  } else if (
+    decision.grant &&
+    decision.reason === "mismatch-soft-gate-grant-with-warning"
+  ) {
     logger.warn(
       { ...context, source: "creem-webhook", amountMatch, decision },
       "Creem amount mismatch detected (soft gate, not enforced); granting credits"
@@ -239,7 +254,11 @@ async function handleCheckoutCompleted(data: CreemCheckoutCompletedData) {
     // handleSubscriptionActive 因找不到订阅记录而跳过积分发放。
     // 此处也调用 grantSubscriptionCredits 确保至少一条路径成功发放。
     // grantCredits 的 sourceRef 幂等机制防止重复发放。
-    await grantSubscriptionCredits(userId, data.subscription, "subscription_create");
+    await grantSubscriptionCredits(
+      userId,
+      data.subscription,
+      "subscription_create"
+    );
   }
 
   logEvent("payment.checkout.completed", {
@@ -638,10 +657,8 @@ async function grantSubscriptionCredits(
     .limit(1);
 
   if (existingBatch) {
-    logger.info(
-      { periodKey },
-      "Credits already granted for subscription period, skipping"
-    );
+    // 批次仅证明 grant 完成；重投仍须补尚未完成的顺延。
+    await extendGrantedSubscriptionPeriod(userId, sub, existingBatch.id);
     return;
   }
 
@@ -710,6 +727,10 @@ async function grantSubscriptionCredits(
     ? fallbackExpiresAt
     : periodEnd;
 
+  // 在 grant 的账本 metadata 中冻结开关；之后重投不随配置变化漏掉已承诺顺延。
+  const renewalExtendsExpiry = await getRuntimeSettingBoolean(
+    "CREDITS_RENEWAL_EXTENDS_EXPIRY"
+  );
   // 发放积分
   try {
     const result = await grantCredits({
@@ -732,6 +753,7 @@ async function grantSubscriptionCredits(
         interval: isYearly ? "year" : "month",
         periodStart: sub.current_period_start_date,
         periodEnd: sub.current_period_end_date,
+        renewalExtendsExpiry,
       },
     });
 
@@ -746,21 +768,20 @@ async function grantSubscriptionCredits(
       "Subscription credits granted"
     );
 
-    // 系统设置开启时：把该订阅名下未到期的存量批次有效期顺延到新周期末。
-    // 语义见 extendActiveSubscriptionBatchesExpiry（只延长不缩短，幂等）。
-    if (await getRuntimeSettingBoolean("CREDITS_RENEWAL_EXTENDS_EXPIRY")) {
-      const extendedCount = await extendActiveSubscriptionBatchesExpiry({
-        userId,
-        subscriptionId: sub.id,
-        newExpiresAt: periodEnd,
-      });
-      if (extendedCount > 0) {
-        logger.info(
-          { userId, subscriptionId: sub.id, extendedCount, periodEnd },
-          "Subscription renewal extended existing credit batches expiry"
-        );
-      }
-    }
+    // 并发同周期 grant 可能命中唯一键；后续步骤必须复读真正获胜的首笔账本计划。
+    const [grantedBatch] = await db
+      .select({ id: creditsBatch.id })
+      .from(creditsBatch)
+      .where(
+        and(
+          eq(creditsBatch.sourceRef, periodKey),
+          eq(creditsBatch.sourceType, "subscription")
+        )
+      )
+      .limit(1);
+    if (!grantedBatch)
+      throw new Error("Creem subscription grant receipt missing");
+    await extendGrantedSubscriptionPeriod(userId, sub, grantedBatch.id);
   } catch (error) {
     logError(error, {
       source: "creem-webhook",
@@ -768,9 +789,45 @@ async function grantSubscriptionCredits(
       userId,
     });
     // S-L2：不再吞异常。grantCredits 对幂等命中走 onConflictDoNothing 正常返回不抛错，
-    // 故能到此 catch 的都是真正的 DB/未知异常。前置 existingBatch 短路 +
+    // 故能到此 catch 的都是真正的 DB/未知异常。已提交批次复读 +
     // credits_batch (source_type, source_ref) 唯一索引保证 Creem 重投不会双发周期积分，
     // 因此上抛让外层返回 5xx 触发重投，避免静默漏发订阅积分。
     throw error;
   }
+}
+
+/** 顺延使用首个已提交账本的周期末和开关；仅延长，重复调用安全。旧批次兼容运行时开关。 */
+async function extendGrantedSubscriptionPeriod(
+  userId: string,
+  sub: CreemSubscription,
+  batchId: string
+) {
+  const [receipt] = await db
+    .select({ metadata: creditsTransaction.metadata })
+    .from(creditsTransaction)
+    .where(
+      and(
+        eq(creditsTransaction.userId, userId),
+        eq(creditsTransaction.type, "monthly_grant"),
+        sql`${creditsTransaction.metadata}->>'batchId' = ${batchId}`
+      )
+    )
+    .limit(1);
+  const metadata = receipt?.metadata;
+  const savedEnd = metadata?.periodEnd;
+  const end = new Date(
+    typeof savedEnd === "string" ? savedEnd : sub.current_period_end_date
+  );
+  if (Number.isNaN(end.getTime()))
+    throw new Error("Invalid Creem subscription period end");
+  const enabled =
+    typeof metadata?.renewalExtendsExpiry === "boolean"
+      ? metadata.renewalExtendsExpiry
+      : await getRuntimeSettingBoolean("CREDITS_RENEWAL_EXTENDS_EXPIRY");
+  if (enabled)
+    await extendActiveSubscriptionBatchesExpiry({
+      userId,
+      subscriptionId: sub.id,
+      newExpiresAt: end,
+    });
 }

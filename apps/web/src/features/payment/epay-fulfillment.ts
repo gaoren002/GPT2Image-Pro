@@ -1,7 +1,11 @@
-import { and, eq } from "drizzle-orm";
+/** 易支付履约；升级走订单、预留、订阅、账本同事务，普通购买以持久 lease 和冻结计划恢复独立幂等步骤。 */
 
 import { db } from "@repo/database";
-import { creditsBatch, subscription } from "@repo/database/schema";
+import {
+  creditsBatch,
+  creditsTransaction,
+  subscription,
+} from "@repo/database/schema";
 import {
   findRuntimePlanByPriceId,
   getSubscriptionMonthlyCredits,
@@ -19,28 +23,35 @@ import {
 import {
   extendActiveSubscriptionBatchesExpiry,
   grantCredits,
-  voidActiveSubscriptionCreditsForUpgrade,
 } from "@repo/shared/credits/core";
 import {
   getCreditPackagePriceForPlan,
   getRuntimeCreditPackageById,
 } from "@repo/shared/credits/packages";
+import { logEvent, logger } from "@repo/shared/logger";
+import {
+  claimEpayOrderForFulfillment,
+  decodeEpayMetadata,
+  type EpayFulfillmentLease,
+  type EpayFulfillmentPlan,
+  type EpayMetadata,
+  type EpayVerifyResult,
+  finalizeEpayOrderFulfillment,
+  getEpayOrderMetadata,
+  listRecoverableEpayPayments,
+  moneyToCents,
+  releaseEpayFulfillmentLease,
+  renewEpayFulfillmentLease,
+  saveEpayFulfillmentPlan,
+  updateEpayOrderStatus,
+} from "@repo/shared/payment/epay";
+import { settleUpgradePayment } from "@repo/shared/payment/upgrade-reservation";
+import { getUserPlanType } from "@repo/shared/subscription/services/user-plan";
 import {
   getRuntimeSettingBoolean,
   getRuntimeSettingNumber,
 } from "@repo/shared/system-settings";
-import { getUserPlanType } from "@repo/shared/subscription/services/user-plan";
-import {
-  claimEpayOrderForFulfillment,
-  decodeEpayMetadata,
-  getEpayOrderMetadata,
-  type EpayMetadata,
-  type EpaySubscriptionCheckoutMode,
-  type EpayVerifyResult,
-  moneyToCents,
-  updateEpayOrderStatus,
-} from "@repo/shared/payment/epay";
-import { logger, logEvent } from "@repo/shared/logger";
+import { and, eq, sql } from "drizzle-orm";
 
 interface FulfillEpayPaymentResult {
   metadata: EpayMetadata;
@@ -48,23 +59,20 @@ interface FulfillEpayPaymentResult {
 
 type EpayFulfillmentSource = "epay-webhook" | "epay-return";
 
-// 进程内去重表：仅为单实例下的最佳努力优化，合并同一订单的并发履约，
-// 避免重复的订阅写入等副作用。跨实例的正确性不依赖此表，而由
-// claimEpayOrderForFulfillment 的原子 UPDATE（pending → success）与
-// credits_batch 唯一约束兜底，多实例部署下此表自然失效但不影响幂等。
+// 进程内只合并同实例请求；持久 lease、冻结计划和批次唯一键负责跨实例恢复。
 const inFlightFulfillments = new Map<
   string,
   Promise<FulfillEpayPaymentResult>
 >();
 
-async function getCreditPackExpiresAt() {
+async function getCreditPackExpiresAt(paidAt: Date) {
   const expiryDays = await getRuntimeSettingNumber(
     "CREDITS_EXPIRY_DAYS",
     CREDIT_CONFIG_DEFAULTS.creditsExpiryDays,
     { nonNegative: true }
   );
   return expiryDays > 0
-    ? new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000)
+    ? new Date(paidAt.getTime() + expiryDays * 24 * 60 * 60 * 1000)
     : null;
 }
 
@@ -116,94 +124,50 @@ async function fulfillSuccessfulEpayPaymentInner(
   source: EpayFulfillmentSource
 ): Promise<FulfillEpayPaymentResult> {
   const metadata =
-    decodeEpayMetadata(verifyInfo.param) ??
-    (await getEpayOrderMetadata(verifyInfo.outTradeNo));
+    (await getEpayOrderMetadata(verifyInfo.outTradeNo)) ??
+    decodeEpayMetadata(verifyInfo.param);
   if (!metadata || metadata.outTradeNo !== verifyInfo.outTradeNo) {
     await updateEpayOrderStatus(verifyInfo.outTradeNo, "failed");
     throw new Error("Invalid or mismatched Epay metadata");
   }
 
-  // 原子领取订单（pending → success）。重复异步通知 / 并发回调将领取失败，
-  // 在此安全跳过，避免重复履约。即使后续发放因 A3 唯一约束幂等，
-  // 该门闩仍可避免重复的订阅写入等副作用。
-  const claimed = await claimEpayOrderForFulfillment(verifyInfo.outTradeNo);
-  if (!claimed) {
-    logger.info(
-      { source, outTradeNo: verifyInfo.outTradeNo },
-      "Epay order already fulfilled or not pending; skipping"
-    );
-    return { metadata };
+  if (metadata.checkoutMode === "upgrade") {
+    const result = await settleUpgradePayment(verifyInfo);
+    return { metadata: result.metadata as unknown as EpayMetadata };
   }
 
+  const claim = await claimEpayOrderForFulfillment(
+    verifyInfo.outTradeNo,
+    verifyInfo
+  );
+  if (claim.state === "fulfilled") return { metadata };
+  if (claim.state === "busy")
+    throw new Error("Epay fulfillment is in progress");
+  const { lease } = claim;
   try {
     if (metadata.type === "credit_purchase") {
-      await handleCreditPurchase(
-        metadata.userId,
-        metadata.packageId,
-        metadata.quantity ?? 1,
-        verifyInfo,
-        source
-      );
+      await handleCreditPurchase(metadata, verifyInfo, source, lease);
     } else {
-      await handleSubscription(
-        metadata.userId,
-        metadata.priceId,
-        metadata,
-        verifyInfo,
-        source
-      );
+      await handleSubscription(metadata, verifyInfo, source, lease);
     }
+    await finalizeEpayOrderFulfillment(verifyInfo.outTradeNo, lease.token);
   } catch (error) {
-    // 履约失败：释放领取（success → pending），以便后续异步通知重试。
-    await updateEpayOrderStatus(verifyInfo.outTradeNo, "pending");
+    await releaseEpayFulfillmentLease(verifyInfo.outTradeNo, lease.token);
     throw error;
   }
 
   return { metadata };
 }
 
+/** 积分包计划先持久化再独立 grant；重放不重算有效期或改变已接受的套餐。 */
 async function handleCreditPurchase(
-  userId: string,
-  packageId: string | undefined,
-  quantity: number,
+  metadata: EpayMetadata,
   verifyInfo: EpayVerifyResult,
-  source: EpayFulfillmentSource
+  source: EpayFulfillmentSource,
+  lease: EpayFulfillmentLease
 ) {
-  if (!packageId) {
-    throw new Error("Missing credit package ID");
-  }
-
-  const currentPlan = await getUserPlanType(userId);
-  const metadata = await getEpayOrderMetadata(verifyInfo.outTradeNo);
-  const purchasePlan = isSubscriptionPlan(metadata?.creditPlan)
-    ? metadata.creditPlan
-    : currentPlan;
-  const pkg = await getRuntimeCreditPackageById(packageId, {
-    includeHidden: true,
-    plan: purchasePlan,
-  });
-  if (!pkg) {
-    throw new Error(`Unknown credit package: ${packageId}`);
-  }
-  const normalizedQuantity =
-    Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
-  const isEnterpriseResourcePack = packageId === ENTERPRISE_RESOURCE_PACKAGE_ID;
-  if (isEnterpriseResourcePack && !isPlanAtLeast(currentPlan, "enterprise")) {
-    throw new Error(
-      "Enterprise resource pack purchase requires Enterprise plan"
-    );
-  }
-  if (pkg.requiresPlan && !isPlanAtLeast(currentPlan, pkg.requiresPlan)) {
-    throw new Error("Credit package purchase requires a higher plan");
-  }
-  const creditsAmount = pkg.credits * normalizedQuantity;
-  const expectedAmount =
-    getCreditPackagePriceForPlan(pkg, purchasePlan) * normalizedQuantity;
-
-  if (!isExpectedEpayAmount(verifyInfo, expectedAmount)) {
-    throw new Error("Epay amount does not match credit package price");
-  }
-
+  const { userId, packageId } = metadata;
+  if (!packageId) throw new Error("Missing credit package ID");
   const sourceRef = `epay:${verifyInfo.outTradeNo}`;
   const [existingBatch] = await db
     .select({ id: creditsBatch.id })
@@ -215,177 +179,104 @@ async function handleCreditPurchase(
       )
     )
     .limit(1);
-
-  if (existingBatch) {
-    logger.info({ source, sourceRef }, "Credit purchase already fulfilled");
-    return;
+  const receipt = existingBatch
+    ? null
+    : await findPaymentGrantReceipt(userId, sourceRef, "purchase");
+  if (existingBatch || receipt) return;
+  let plan = lease.plan;
+  if (!plan) {
+    const currentPlan = await getUserPlanType(userId);
+    const purchasePlan = isSubscriptionPlan(metadata.creditPlan)
+      ? metadata.creditPlan
+      : currentPlan;
+    const pkg = await getRuntimeCreditPackageById(packageId, {
+      includeHidden: true,
+      plan: purchasePlan,
+    });
+    if (!pkg) throw new Error(`Unknown credit package: ${packageId}`);
+    if (
+      (packageId === ENTERPRISE_RESOURCE_PACKAGE_ID &&
+        !isPlanAtLeast(currentPlan, "enterprise")) ||
+      (pkg.requiresPlan && !isPlanAtLeast(currentPlan, pkg.requiresPlan))
+    ) {
+      throw new Error("Credit package purchase requires a higher plan");
+    }
+    const quantity =
+      Number.isInteger(metadata.quantity) && (metadata.quantity ?? 0) > 0
+        ? (metadata.quantity ?? 1)
+        : 1;
+    if (
+      !isExpectedEpayAmount(
+        verifyInfo,
+        getCreditPackagePriceForPlan(pkg, purchasePlan) * quantity
+      )
+    ) {
+      throw new Error("Epay amount does not match credit package price");
+    }
+    const expiresAt = await getCreditPackExpiresAt(lease.paidAt);
+    plan = await saveEpayFulfillmentPlan(verifyInfo.outTradeNo, lease.token, {
+      credits: pkg.credits * quantity,
+      monthlyCredits: 0,
+      unitPrice: getCreditPackagePriceForPlan(pkg, purchasePlan),
+      periodStart: lease.paidAt.toISOString(),
+      periodEnd: null,
+      expiresAt: expiresAt?.toISOString() ?? null,
+      extendExpiry: false,
+    });
   }
-
-  const expiresAt = await getCreditPackExpiresAt();
-
-  const result = await grantCredits({
+  await renewEpayFulfillmentLease(verifyInfo.outTradeNo, lease.token);
+  await grantCredits({
     userId,
-    amount: creditsAmount,
+    amount: plan.credits,
     sourceType: "purchase",
     debitAccount: `PAYMENT:${verifyInfo.outTradeNo}`,
     transactionType: "purchase",
-    expiresAt,
+    expiresAt: plan.expiresAt ? new Date(plan.expiresAt) : null,
     sourceRef,
-    description: `Epay credit pack purchase: ${creditsAmount} credits (${pkg.id})`,
+    description: `Epay credit pack purchase: ${plan.credits} credits (${packageId})`,
     metadata: {
       provider: "epay",
       outTradeNo: verifyInfo.outTradeNo,
       tradeNo: verifyInfo.tradeNo,
       paymentMethod: verifyInfo.type,
-      packageId: pkg.id,
-      quantity: normalizedQuantity,
-      unitCredits: pkg.credits,
-      unitPrice: pkg.price,
+      packageId,
+      quantity: metadata.quantity ?? 1,
+      unitCredits: plan.credits / (metadata.quantity ?? 1),
+      unitPrice: plan.unitPrice,
       paidMoney: verifyInfo.money,
     },
   });
-
   logEvent("credits.purchased", {
     userId,
-    amount: creditsAmount,
+    amount: plan.credits,
     paymentId: verifyInfo.outTradeNo,
     source: "epay",
-    packageId: pkg.id,
-    quantity: normalizedQuantity,
+    packageId,
+    quantity: metadata.quantity ?? 1,
   });
-  logger.info(
-    { source, batchId: result.batchId, userId },
-    "Epay credit purchase fulfilled"
-  );
+  logger.info({ source, userId, sourceRef }, "Epay credit purchase fulfilled");
 }
 
+/** 冻结首收款周期；已有批次仅代表 grant 完成，不能跳过顺延和订阅投影。 */
 async function handleSubscription(
-  userId: string,
-  priceId: string | undefined,
   metadata: EpayMetadata,
   verifyInfo: EpayVerifyResult,
-  source: EpayFulfillmentSource
+  source: EpayFulfillmentSource,
+  lease: EpayFulfillmentLease
 ) {
-  if (!priceId) {
-    throw new Error("Missing subscription price ID");
-  }
-
-  const { plan, price } = await findRuntimePlanByPriceId(priceId);
+  const { userId, priceId } = metadata;
+  if (!priceId) throw new Error("Missing subscription price ID");
   const planType = getPlanFromPriceId(priceId);
-  if (!plan || !price || !planType || planType === "free") {
+  if (!planType || planType === "free")
     throw new Error(`Unknown subscription price ID: ${priceId}`);
-  }
-
-  const expectedAmount = metadata.expectedAmount ?? price.amount;
-  if (!isExpectedEpayAmount(verifyInfo, expectedAmount)) {
-    throw new Error("Epay amount does not match subscription price");
-  }
-
-  const now = new Date();
-  const periodEnd = new Date(now);
-  const isYearly = price.interval === "yearly";
-  if (isYearly) {
-    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-  } else {
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
-  }
-
   const subscriptionId = `epay_${verifyInfo.outTradeNo}`;
-  const [existingBySubscriptionId] = await db
-    .select({ id: subscription.id })
-    .from(subscription)
-    .where(eq(subscription.subscriptionId, subscriptionId))
-    .limit(1);
-
-  if (!existingBySubscriptionId) {
-    const [existingByUser] = await db
-      .select({ id: subscription.id })
-      .from(subscription)
-      .where(eq(subscription.userId, userId))
-      .limit(1);
-
-    const values = {
-      subscriptionId,
-      priceId,
-      status: "canceled",
-      currentPeriodStart: now,
-      currentPeriodEnd: periodEnd,
-      cancelAtPeriodEnd: true,
-      updatedAt: new Date(),
-    };
-
-    if (existingByUser) {
-      await db
-        .update(subscription)
-        .set(values)
-        .where(eq(subscription.userId, userId));
-    } else {
-      await db.insert(subscription).values({
-        id: crypto.randomUUID(),
-        userId,
-        ...values,
-      });
-    }
-  }
-
-  await grantSubscriptionCredits({
-    userId,
-    subscriptionId,
-    priceId,
-    planType,
-    isYearly,
-    periodStart: now,
-    periodEnd,
-    outTradeNo: verifyInfo.outTradeNo,
-    paymentMethod: verifyInfo.type,
-    paidMoney: verifyInfo.money,
-    checkoutMode: metadata.checkoutMode ?? "new_subscription",
-    originalAmount: metadata.originalAmount ?? price.amount,
-    prorationCredit: metadata.prorationCredit ?? 0,
-    remainingDays: metadata.remainingDays ?? 0,
-    periodDays: metadata.periodDays ?? 0,
-    upgradeFromPriceId: metadata.upgradeFromPriceId,
-    source,
-  });
-
-  logEvent("payment.checkout.completed", {
-    userId,
-    provider: "epay",
-    priceId,
-    planId: plan.id,
-    subscriptionId,
-    checkoutType: "subscription",
-    checkoutMode: metadata.checkoutMode ?? "new_subscription",
-    paidMoney: verifyInfo.money,
-    prorationCredit: metadata.prorationCredit,
-  });
-}
-
-async function grantSubscriptionCredits(params: {
-  userId: string;
-  subscriptionId: string;
-  priceId: string;
-  planType: PaidPlanId;
-  isYearly: boolean;
-  periodStart: Date;
-  periodEnd: Date;
-  outTradeNo: string;
-  paymentMethod: string;
-  paidMoney: string;
-  checkoutMode: EpaySubscriptionCheckoutMode;
-  originalAmount: number;
-  prorationCredit: number;
-  remainingDays: number;
-  periodDays: number;
-  upgradeFromPriceId?: string;
-  source: EpayFulfillmentSource;
-}) {
-  const sourceRef = `epay_subscription:${params.outTradeNo}`;
-
+  const sourceRef = `epay_subscription:${verifyInfo.outTradeNo}`;
   const [existingBatch] = await db
     .select({
       id: creditsBatch.id,
+      amount: creditsBatch.amount,
       issuedAt: creditsBatch.issuedAt,
+      expiresAt: creditsBatch.expiresAt,
     })
     .from(creditsBatch)
     .where(
@@ -395,132 +286,248 @@ async function grantSubscriptionCredits(params: {
       )
     )
     .limit(1);
-
-  if (existingBatch) {
-    if (params.checkoutMode === "upgrade") {
-      const voidResult = await voidActiveSubscriptionCreditsForUpgrade({
-        userId: params.userId,
-        newBatchSourceRef: sourceRef,
-        subscriptionId: params.subscriptionId,
-        upgradeFromPriceId: params.upgradeFromPriceId,
-        upgradeToPriceId: params.priceId,
-        issuedBefore: existingBatch.issuedAt,
-        description: `${params.planType} Epay upgrade voided previous subscription credits`,
-        metadata: {
-          provider: "epay",
-          outTradeNo: params.outTradeNo,
-          checkoutMode: params.checkoutMode,
-        },
-      });
-      logger.info(
-        {
-          source: params.source,
-          sourceRef,
-          userId: params.userId,
-          voidedAmount: voidResult.voidedAmount,
-        },
-        "Previous subscription credits voided for existing upgrade fulfillment"
-      );
+  const receipt =
+    !lease.plan || !existingBatch
+      ? await findPaymentGrantReceipt(userId, sourceRef, "monthly_grant")
+      : null;
+  let plan = lease.plan;
+  if (!plan && (existingBatch || receipt)) {
+    // 旧 success 的 batch 或财务账本均可证明 grant 提交；不因批次清理而重新发放。
+    // 原始 metadata 周期优先于 expiresAt，后者可能已被后来的续费延长。
+    const savedStart = receipt?.metadata?.periodStart;
+    const savedEnd = receipt?.metadata?.periodEnd;
+    const start =
+      typeof savedStart === "string"
+        ? new Date(savedStart)
+        : (existingBatch?.issuedAt ?? receipt?.createdAt);
+    const end =
+      typeof savedEnd === "string"
+        ? new Date(savedEnd)
+        : existingBatch?.expiresAt;
+    if (
+      !start ||
+      !end ||
+      Number.isNaN(start.getTime()) ||
+      Number.isNaN(end.getTime())
+    ) {
+      throw new Error("Legacy Epay subscription period missing");
     }
-
-    logger.info(
-      { source: params.source, sourceRef },
-      "Subscription credits already fulfilled"
-    );
-    return;
+    plan = await saveEpayFulfillmentPlan(verifyInfo.outTradeNo, lease.token, {
+      credits: existingBatch?.amount ?? receipt?.amount ?? 0,
+      monthlyCredits: 0,
+      periodStart: start.toISOString(),
+      periodEnd: end.toISOString(),
+      expiresAt: end.toISOString(),
+      extendExpiry: await getRuntimeSettingBoolean(
+        "CREDITS_RENEWAL_EXTENDS_EXPIRY"
+      ),
+    });
   }
-
-  const monthlyCreditsByPlan = await getSubscriptionMonthlyCredits();
-  const monthlyCredits = monthlyCreditsByPlan[params.planType];
-  const creditsToGrant = params.isYearly ? monthlyCredits * 12 : monthlyCredits;
-  const fallbackExpiresAt = await getCreditPackExpiresAt();
-  const expiresAt = Number.isNaN(params.periodEnd.getTime())
-    ? fallbackExpiresAt
-    : params.periodEnd;
-  const upgradeCutoff = new Date();
-
-  const result = await grantCredits({
-    userId: params.userId,
-    amount: creditsToGrant,
-    sourceType: "subscription",
-    debitAccount: `SUBSCRIPTION:${params.subscriptionId}`,
-    transactionType: "monthly_grant",
-    expiresAt,
-    sourceRef,
-    description: params.isYearly
-      ? `${params.planType} Epay yearly subscription credits (${monthlyCredits} x 12)`
-      : `${params.planType} Epay monthly subscription credits`,
-    metadata: {
-      provider: "epay",
-      subscriptionId: params.subscriptionId,
-      priceId: params.priceId,
-      planType: params.planType,
+  if (!plan) {
+    const { plan: configuredPlan, price } =
+      await findRuntimePlanByPriceId(priceId);
+    if (!configuredPlan || !price)
+      throw new Error(`Unknown subscription price ID: ${priceId}`);
+    if (
+      !isExpectedEpayAmount(verifyInfo, metadata.expectedAmount ?? price.amount)
+    ) {
+      throw new Error("Epay amount does not match subscription price");
+    }
+    const monthlyCredits = (await getSubscriptionMonthlyCredits())[
+      planType as PaidPlanId
+    ];
+    const periodEnd = new Date(lease.paidAt);
+    if (price.interval === "yearly")
+      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    else periodEnd.setMonth(periodEnd.getMonth() + 1);
+    plan = await saveEpayFulfillmentPlan(verifyInfo.outTradeNo, lease.token, {
+      credits:
+        price.interval === "yearly" ? monthlyCredits * 12 : monthlyCredits,
       monthlyCredits,
-      interval: params.isYearly ? "year" : "month",
-      periodStart: params.periodStart.toISOString(),
-      periodEnd: params.periodEnd.toISOString(),
-      outTradeNo: params.outTradeNo,
-      paymentMethod: params.paymentMethod,
-      paidMoney: params.paidMoney,
-      checkoutMode: params.checkoutMode,
-      originalAmount: params.originalAmount,
-      prorationCredit: params.prorationCredit,
-      remainingDays: params.remainingDays,
-      periodDays: params.periodDays,
-      ...(params.upgradeFromPriceId && {
-        upgradeFromPriceId: params.upgradeFromPriceId,
-      }),
-    },
-  });
-
-  if (params.checkoutMode === "upgrade") {
-    const voidResult = await voidActiveSubscriptionCreditsForUpgrade({
-      userId: params.userId,
-      newBatchSourceRef: sourceRef,
-      subscriptionId: params.subscriptionId,
-      upgradeFromPriceId: params.upgradeFromPriceId,
-      upgradeToPriceId: params.priceId,
-      issuedBefore: upgradeCutoff,
-      description: `${params.planType} Epay upgrade voided previous subscription credits`,
+      periodStart: lease.paidAt.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      expiresAt: periodEnd.toISOString(),
+      extendExpiry: await getRuntimeSettingBoolean(
+        "CREDITS_RENEWAL_EXTENDS_EXPIRY"
+      ),
+    });
+  }
+  if (!plan.periodEnd || !plan.expiresAt)
+    throw new Error("Invalid subscription fulfillment plan");
+  await renewEpayFulfillmentLease(verifyInfo.outTradeNo, lease.token);
+  if (!existingBatch && !receipt) {
+    await grantCredits({
+      userId,
+      amount: plan.credits,
+      sourceType: "subscription",
+      debitAccount: `SUBSCRIPTION:${subscriptionId}`,
+      transactionType: "monthly_grant",
+      expiresAt: new Date(plan.expiresAt),
+      sourceRef,
+      description: `${planType} Epay subscription credits`,
       metadata: {
         provider: "epay",
-        outTradeNo: params.outTradeNo,
-        checkoutMode: params.checkoutMode,
-        newBatchId: result.batchId,
+        subscriptionId,
+        priceId,
+        planType,
+        monthlyCredits: plan.monthlyCredits,
+        interval:
+          new Date(plan.periodEnd).getTime() -
+            new Date(plan.periodStart).getTime() >
+          180 * 86400000
+            ? "year"
+            : "month",
+        periodStart: plan.periodStart,
+        periodEnd: plan.periodEnd,
+        outTradeNo: verifyInfo.outTradeNo,
+        paymentMethod: verifyInfo.type,
+        paidMoney: verifyInfo.money,
+        checkoutMode: metadata.checkoutMode ?? "new_subscription",
+        originalAmount: metadata.originalAmount,
+        prorationCredit: metadata.prorationCredit ?? 0,
       },
     });
-
-    logger.info(
-      {
-        source: params.source,
-        sourceRef,
-        userId: params.userId,
-        batchId: result.batchId,
-        voidedAmount: voidResult.voidedAmount,
-      },
-      "Previous subscription credits voided for upgrade"
-    );
   }
-
-  // 系统设置开启时：把该用户名下未到期的订阅积分批次有效期顺延到新周期末
-  //（升级路径上方已作废旧批次，通常无可顺延；续费/新周期路径生效）。幂等。
-  if (expiresAt && (await getRuntimeSettingBoolean("CREDITS_RENEWAL_EXTENDS_EXPIRY"))) {
-    const extendedCount = await extendActiveSubscriptionBatchesExpiry({
-      userId: params.userId,
-      subscriptionId: params.subscriptionId,
-      newExpiresAt: expiresAt,
+  if (plan.extendExpiry) {
+    await renewEpayFulfillmentLease(verifyInfo.outTradeNo, lease.token);
+    await extendActiveSubscriptionBatchesExpiry({
+      userId,
+      subscriptionId,
+      newExpiresAt: new Date(plan.expiresAt),
     });
-    if (extendedCount > 0) {
-      logger.info(
+  }
+  await renewEpayFulfillmentLease(verifyInfo.outTradeNo, lease.token);
+  await projectSubscription(userId, subscriptionId, priceId, plan);
+  logEvent("payment.checkout.completed", {
+    userId,
+    source,
+    provider: "epay",
+    subscriptionId,
+    priceId,
+    checkoutMode: metadata.checkoutMode ?? "new_subscription",
+  });
+}
+
+/**
+ * 只包订阅投影自己的事务，绝不把 grant/extend service 包在其中。
+ * 与 R08 使用相同用户锁；同套餐按期末优先收敛，跨套餐不能用较低权益延长较高权益。
+ */
+async function projectSubscription(
+  userId: string,
+  subscriptionId: string,
+  priceId: string,
+  plan: EpayFulfillmentPlan
+) {
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(20261025, hashtext(${userId}))`
+    );
+    const [existing] = await tx
+      .select()
+      .from(subscription)
+      .where(eq(subscription.userId, userId))
+      .limit(1)
+      .for("update");
+    const start = new Date(plan.periodStart);
+    const end = new Date(plan.periodEnd ?? plan.periodStart);
+    if (existing?.subscriptionId === subscriptionId) return;
+    if (existing) {
+      const currentPlan = getPlanFromPriceId(existing.priceId);
+      const incomingPlan = getPlanFromPriceId(priceId);
+      const currentEnd = existing.currentPeriodEnd;
+      const currentStart = existing.currentPeriodStart;
+      if (currentPlan && currentPlan === incomingPlan) {
+        // 同套餐已付周期按期末优先；早收款年单可晚于月单恢复，不能因旧起点漏投影。
+        // 同期末才按起点、订单ID稳定裁决，重投顺序不能改变最终结果。
+        if (currentEnd && currentEnd > end) return;
+        if (
+          currentEnd?.getTime() === end.getTime() &&
+          ((currentStart && currentStart > start) ||
+            (currentStart?.getTime() === start.getTime() &&
+              existing.subscriptionId >= subscriptionId))
+        )
+          return;
+      } else if (currentEnd && currentEnd <= start) {
+        // 前一套餐在本单收款前已结束，不存在重叠权益，可切换到本单原始周期。
+      } else if (currentStart && end <= currentStart) {
+        return;
+      } else {
+        // 不同tier的预创建普通单可达。只能选同时覆盖等级和期末的一方，不能把
+        // 低价长单的期末接到高级套餐上；不可比较时抛错保留paid/pending供后续处理。
+        if (!currentPlan || !incomingPlan || !currentEnd) {
+          throw new Error("Epay subscription tier/period conflict");
+        }
+        if (isPlanAtLeast(currentPlan, incomingPlan) && currentEnd >= end)
+          return;
+        if (!isPlanAtLeast(incomingPlan, currentPlan) || end < currentEnd) {
+          throw new Error("Epay subscription tier/period conflict");
+        }
+      }
+    }
+    const values = {
+      subscriptionId,
+      priceId,
+      status: "canceled",
+      currentPeriodStart: start,
+      currentPeriodEnd: end,
+      cancelAtPeriodEnd: true,
+      updatedAt: new Date(),
+    };
+    if (existing)
+      await tx
+        .update(subscription)
+        .set(values)
+        .where(eq(subscription.id, existing.id));
+    else
+      await tx
+        .insert(subscription)
+        .values({ id: crypto.randomUUID(), userId, ...values });
+  });
+}
+
+/** 发放账本是财务真相；同时兼容 source_ref 列和旧 metadata 幂等键。 */
+async function findPaymentGrantReceipt(
+  userId: string,
+  sourceRef: string,
+  type: "purchase" | "monthly_grant"
+) {
+  const [receipt] = await db
+    .select({
+      metadata: creditsTransaction.metadata,
+      amount: creditsTransaction.amount,
+      createdAt: creditsTransaction.createdAt,
+    })
+    .from(creditsTransaction)
+    .where(
+      and(
+        eq(creditsTransaction.userId, userId),
+        eq(creditsTransaction.type, type),
+        sql`(${creditsTransaction.sourceRef} = ${sourceRef} OR ${creditsTransaction.metadata}->>'sourceRef' = ${sourceRef})`
+      )
+    )
+    .limit(1);
+  return receipt ?? null;
+}
+
+/** 有界重放收款事实；单笔故障不阻塞其他订单，失败保留在持久队列。 */
+export async function recoverEpayFulfillments(limit = 100) {
+  const payments = await listRecoverableEpayPayments(limit);
+  let fulfilled = 0;
+  let failed = 0;
+  for (const payment of payments) {
+    try {
+      await fulfillSuccessfulEpayPayment(payment, "epay-webhook");
+      fulfilled++;
+    } catch (error) {
+      failed++;
+      logger.warn(
         {
-          source: params.source,
-          userId: params.userId,
-          subscriptionId: params.subscriptionId,
-          extendedCount,
-          newExpiresAt: expiresAt,
+          outTradeNo: payment.outTradeNo,
+          error: error instanceof Error ? error.message : "unknown",
         },
-        "Subscription renewal extended existing credit batches expiry"
+        "Epay recovery deferred"
       );
     }
   }
+  return { scanned: payments.length, fulfilled, failed };
 }

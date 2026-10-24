@@ -8,7 +8,13 @@ const mocks = vi.hoisted(() => ({
   destroyGenerationPhotosByMaxCount: vi.fn(),
   expireStalePendingGenerations: vi.fn(),
   getRuntimeSettingSelect: vi.fn(),
+  invokeOperation: vi.fn().mockResolvedValue({ released: 0 }),
 }));
+
+vi.mock("@repo/shared/payment/upgrade-reservation-operations", () => ({}));
+vi.mock("@/features/payment/epay-recovery-operation", () => ({}));
+vi.mock("@/features/image-backend-pool/retention-operation", () => ({}));
+vi.mock("@repo/shared/uol", () => ({ invokeOperation: mocks.invokeOperation }));
 
 vi.mock("@repo/shared/credits/core", () => ({
   processExpiredBatches: vi.fn(),
@@ -55,6 +61,11 @@ describe("runImageMaintenanceJob", () => {
 
     await runImageMaintenanceJob();
 
+    expect(mocks.invokeOperation).toHaveBeenCalledWith(
+      "subscription.expireUpgradeReservations",
+      { limit: 500 },
+      { type: "cron", job: "images-maintenance" }
+    );
     expect(mocks.destroyExpiredGenerationPhotos.mock.calls).toEqual([[]]);
     expect(mocks.expireStalePendingGenerations.mock.calls).toEqual([[]]);
     expect(mocks.destroyGenerationPhotosByMaxCount).not.toHaveBeenCalled();

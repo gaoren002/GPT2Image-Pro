@@ -31,6 +31,7 @@
     "./credits/config": "./src/credits/config.ts",
     "./credits/packages": "./src/credits/packages.ts",
     "./credits/format": "./src/credits/format.ts",
+    "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts",
     "./credits/components": "./src/credits/components/index.ts",
     "./generation-maintenance": "./src/generation-maintenance.ts",
     "./generation-timeout": "./src/generation-timeout.ts",
@@ -41,6 +42,7 @@
     "./storage/utils": "./src/storage/utils.ts",
     "./storage/signed-url": "./src/storage/signed-url.ts",
     "./storage/providers": "./src/storage/providers/index.ts",
+    "./storage/thumbnail-cache": "./src/storage/thumbnail-cache.ts",
     "./system-settings": "./src/system-settings/index.ts",
     "./system-settings/actions": "./src/system-settings/actions/index.ts",
     "./system-settings/bootstrap": "./src/system-settings/bootstrap.ts",
@@ -73,6 +75,9 @@
     "./config/subscription-plan": "./src/config/subscription-plan.ts",
     "./payment/creem": "./src/payment/creem.ts",
     "./payment/creem-amount": "./src/payment/creem-amount.ts",
+    "./subscription/services/upgrade-quote": "./src/subscription/services/upgrade-quote.ts",
+    "./payment/upgrade-reservation": "./src/payment/upgrade-reservation.ts",
+    "./payment/upgrade-reservation-operations": "./src/payment/upgrade-reservation-operations.ts",
     "./payment/epay": "./src/payment/epay.ts",
     "./payment/types": "./src/payment/types.ts",
     "./monitoring": "./src/monitoring/index.ts",
@@ -89,9 +94,7 @@
     "./mcp/user-tool-factory": "./src/mcp/user-tool-factory.ts",
     "./mcp/user-key-actions": "./src/mcp/user-key-actions.ts",
     "./support/constants": "./src/support/constants.ts",
-    "./announcements/constants": "./src/announcements/constants.ts",
-    "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts",
-    "./storage/thumbnail-cache": "./src/storage/thumbnail-cache.ts"
+    "./announcements/constants": "./src/announcements/constants.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

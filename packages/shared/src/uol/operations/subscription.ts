@@ -12,6 +12,7 @@
  */
 
 import { z } from "zod";
+import "../../payment/upgrade-reservation-operations";
 import { defineOperation } from "../registry";
 import { getPrincipalUserId } from "../principal";
 import {

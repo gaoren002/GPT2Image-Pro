@@ -7,14 +7,15 @@
  */
 
 import crypto from "node:crypto";
+import { db } from "@repo/database";
+import { epayOrder } from "@repo/database/schema";
+import { and, eq, sql } from "drizzle-orm";
+import { z } from "zod";
 import { getBaseUrl } from "../config/payment";
 import {
   getRuntimeSettingSelect,
   getRuntimeSettingString,
 } from "../system-settings";
-import { db } from "@repo/database";
-import { epayOrder } from "@repo/database/schema";
-import { and, eq } from "drizzle-orm";
 
 export const EPAY_TRADE_SUCCESS = "TRADE_SUCCESS";
 
@@ -70,7 +71,14 @@ export interface EpayVerifyResult {
   raw: Record<string, string>;
 }
 
-export type EpayOrderStatus = "pending" | "success" | "failed";
+export type EpayOrderStatus =
+  | "pending"
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "expired"
+  | "refund_pending"
+  | "refunded";
 
 export function getPaymentProvider(): PaymentProvider {
   const providerValues = [
@@ -304,17 +312,7 @@ export async function saveEpayOrder(
       metadata: metadata as unknown as Record<string, unknown>,
       updatedAt: new Date(),
     })
-    .onConflictDoUpdate({
-      target: epayOrder.outTradeNo,
-      set: {
-        userId: metadata.userId,
-        businessType: metadata.type,
-        amount: Number(formatMoney(amount)),
-        status: "pending",
-        metadata: metadata as unknown as Record<string, unknown>,
-        updatedAt: new Date(),
-      },
-    });
+    .onConflictDoNothing({ target: epayOrder.outTradeNo });
 }
 
 export async function getEpayOrderMetadata(
@@ -346,7 +344,12 @@ export async function updateEpayOrderStatus(
       status,
       updatedAt: new Date(),
     })
-    .where(eq(epayOrder.outTradeNo, outTradeNo));
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        sql`NOT EXISTS (SELECT 1 FROM upgrade_reservation WHERE out_trade_no = ${outTradeNo})`
+      )
+    );
 }
 
 export async function getEpayOrderStatus(
@@ -363,25 +366,232 @@ export async function getEpayOrderStatus(
   return (order?.status as EpayOrderStatus | undefined) ?? null;
 }
 
+/** 普通订单的冻结履约计划；只保存财务标量，不保存网关原始请求。 */
+export const epayFulfillmentPlanSchema = z.object({
+  credits: z.number().positive().finite(),
+  monthlyCredits: z.number().nonnegative().finite(),
+  unitPrice: z.number().nonnegative().finite().optional(),
+  periodStart: z.string().datetime(),
+  periodEnd: z.string().datetime().nullable(),
+  expiresAt: z.string().datetime().nullable(),
+  extendExpiry: z.boolean(),
+});
+export type EpayFulfillmentPlan = z.infer<typeof epayFulfillmentPlanSchema>;
+export interface EpayFulfillmentLease {
+  token: string;
+  paidAt: Date;
+  plan: EpayFulfillmentPlan | null;
+}
+export type EpayFulfillmentClaim =
+  | { state: "fulfilled" }
+  | { state: "busy" }
+  | { state: "claimed"; lease: EpayFulfillmentLease };
+
+// 独立 guard：upgrade 只能由 settleUpgradePayment 同事务结算。
+const normalEpayOrder = sql`COALESCE(${epayOrder.metadata}->>'checkoutMode', '') <> 'upgrade'
+  AND NOT EXISTS (SELECT 1 FROM upgrade_reservation WHERE out_trade_no = ${epayOrder.outTradeNo})`;
+const recoverableEpayOrder = and(
+  normalEpayOrder,
+  sql`${epayOrder.status} NOT IN ('refund_pending', 'refunded')`
+);
+
 /**
- * 原子领取订单进行发放：仅当订单仍为 pending 时将其置为 success。
- * 返回 true 表示本次成功领取（可继续发放），false 表示订单不存在或已被处理。
- * 用于防止异步通知与重复回调对同一订单的重复发放。
+ * 已验签通知先独立提交收款事实，再 CAS 领取 lease。任何一步退出后后台均可发现；
+ * busy 不是履约成功。数据库时间是 lease 与 paidAt 的唯一时钟。
  */
 export async function claimEpayOrderForFulfillment(
-  outTradeNo: string
-): Promise<boolean> {
-  if (!outTradeNo) return false;
-
-  const claimed = await db
+  outTradeNo: string,
+  payment: EpayVerifyResult
+): Promise<EpayFulfillmentClaim> {
+  const cents = moneyToCents(payment.money);
+  if (
+    !outTradeNo ||
+    outTradeNo !== payment.outTradeNo ||
+    !payment.verifyStatus ||
+    payment.tradeStatus !== EPAY_TRADE_SUCCESS ||
+    !Number.isFinite(cents)
+  )
+    throw new Error("Invalid Epay payment fact");
+  const recorded = await db
     .update(epayOrder)
-    .set({ status: "success", updatedAt: new Date() })
+    .set({
+      paidAt: sql`COALESCE(${epayOrder.paidAt}, CURRENT_TIMESTAMP)`,
+      paymentTradeNo: sql`COALESCE(${epayOrder.paymentTradeNo}, NULLIF(${payment.tradeNo}, ''))`,
+      // 旧单后台重放没有网关流水：不得把订单标价伪装成真实收款额或支付方式。
+      paidAmount: sql`CASE WHEN ${payment.tradeNo} = '' THEN ${epayOrder.paidAmount} ELSE ${cents / 100} END`,
+      paymentMethod: sql`COALESCE(NULLIF(${epayOrder.paymentMethod}, ''), NULLIF(${payment.type}, ''))`,
+    })
     .where(
-      and(eq(epayOrder.outTradeNo, outTradeNo), eq(epayOrder.status, "pending"))
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        sql`${cents} BETWEEN ROUND(${epayOrder.amount} * 100) AND ROUND(${epayOrder.amount} * 100) + 10`,
+        sql`(${payment.tradeNo} <> '' OR ${epayOrder.paidAt} IS NOT NULL)`,
+        sql`(${epayOrder.paymentTradeNo} IS NULL OR ${epayOrder.paymentTradeNo} = ${payment.tradeNo})`,
+        sql`(${epayOrder.paidAmount} IS NULL OR ${epayOrder.paidAmount} = ${cents / 100})`
+      )
+    )
+    .returning({ state: epayOrder.fulfillmentState });
+  if (!recorded.length) throw new Error("Epay order or payment fact mismatch");
+  if (recorded[0]?.state === "fulfilled") return { state: "fulfilled" };
+
+  const token = crypto.randomUUID();
+  const [row] = await db
+    .update(epayOrder)
+    .set({
+      fulfillmentState: "processing",
+      fulfillmentLeaseToken: token,
+      fulfillmentLeaseExpiresAt: sql`CURRENT_TIMESTAMP + INTERVAL '2 minutes'`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        sql`${epayOrder.fulfillmentState} <> 'fulfilled'`,
+        sql`(${epayOrder.fulfillmentLeaseExpiresAt} IS NULL OR ${epayOrder.fulfillmentLeaseExpiresAt} <= CURRENT_TIMESTAMP)`
+      )
+    )
+    .returning({ paidAt: epayOrder.paidAt, plan: epayOrder.fulfillmentPlan });
+  if (!row) return { state: "busy" };
+  if (!row.paidAt) throw new Error("Epay paidAt missing");
+  return {
+    state: "claimed",
+    lease: {
+      token,
+      paidAt: row.paidAt,
+      plan: row.plan ? epayFulfillmentPlanSchema.parse(row.plan) : null,
+    },
+  };
+}
+
+/** 在首次副作用前冻结计划；只有当前有效 lease 能写入，旧 worker 不能覆盖。 */
+export async function saveEpayFulfillmentPlan(
+  outTradeNo: string,
+  token: string,
+  plan: EpayFulfillmentPlan
+): Promise<EpayFulfillmentPlan> {
+  const parsed = epayFulfillmentPlanSchema.parse(plan);
+  const [row] = await db
+    .update(epayOrder)
+    .set({
+      fulfillmentPlan: sql`COALESCE(${epayOrder.fulfillmentPlan}::jsonb, ${JSON.stringify(parsed)}::jsonb)::json`,
+    })
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        eq(epayOrder.fulfillmentLeaseToken, token),
+        sql`${epayOrder.fulfillmentLeaseExpiresAt} > CURRENT_TIMESTAMP`,
+        eq(epayOrder.fulfillmentState, "processing")
+      )
+    )
+    .returning({ plan: epayOrder.fulfillmentPlan });
+  if (!row) throw new Error("Epay fulfillment lease lost");
+  return epayFulfillmentPlanSchema.parse(row.plan);
+}
+
+/** 各独立事务副作用前续租；过期或被替换的 worker 必须停止。 */
+export async function renewEpayFulfillmentLease(
+  outTradeNo: string,
+  token: string
+) {
+  const rows = await db
+    .update(epayOrder)
+    .set({
+      fulfillmentLeaseExpiresAt: sql`CURRENT_TIMESTAMP + INTERVAL '2 minutes'`,
+    })
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        eq(epayOrder.fulfillmentLeaseToken, token),
+        eq(epayOrder.fulfillmentState, "processing"),
+        sql`${epayOrder.fulfillmentLeaseExpiresAt} > CURRENT_TIMESTAMP`
+      )
     )
     .returning({ outTradeNo: epayOrder.outTradeNo });
+  if (!rows.length) throw new Error("Epay fulfillment lease lost");
+}
 
-  return claimed.length > 0;
+/** 全部幂等步骤完成后才标 success；响应丢失时重投直接返回 fulfilled。 */
+export async function finalizeEpayOrderFulfillment(
+  outTradeNo: string,
+  token: string
+) {
+  const rows = await db
+    .update(epayOrder)
+    .set({
+      status: "success",
+      fulfillmentState: "fulfilled",
+      fulfilledAt: sql`CURRENT_TIMESTAMP`,
+      fulfillmentLeaseToken: null,
+      fulfillmentLeaseExpiresAt: null,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        eq(epayOrder.fulfillmentLeaseToken, token),
+        eq(epayOrder.fulfillmentState, "processing"),
+        sql`${epayOrder.fulfillmentLeaseExpiresAt} > CURRENT_TIMESTAMP`
+      )
+    )
+    .returning({ outTradeNo: epayOrder.outTradeNo });
+  if (!rows.length) throw new Error("Epay fulfillment lease lost at finalize");
+}
+
+/** 可捕获失败退避一分钟；保留收款与计划，不把已付款恢复为未付款。 */
+export async function releaseEpayFulfillmentLease(
+  outTradeNo: string,
+  token: string
+) {
+  await db
+    .update(epayOrder)
+    .set({
+      fulfillmentState: "pending",
+      fulfillmentLeaseToken: null,
+      fulfillmentLeaseExpiresAt: sql`CURRENT_TIMESTAMP + INTERVAL '1 minute'`,
+      updatedAt: sql`CURRENT_TIMESTAMP`,
+    })
+    .where(
+      and(
+        eq(epayOrder.outTradeNo, outTradeNo),
+        recoverableEpayOrder,
+        eq(epayOrder.fulfillmentLeaseToken, token),
+        eq(epayOrder.fulfillmentState, "processing")
+      )
+    );
+}
+
+/** 后台只重放已持久接收的收款事实；不把未付款订单或 upgrade 当通知伪造。 */
+export async function listRecoverableEpayPayments(
+  limit = 100
+): Promise<EpayVerifyResult[]> {
+  const rows = await db
+    .select()
+    .from(epayOrder)
+    .where(
+      and(
+        recoverableEpayOrder,
+        sql`${epayOrder.paidAt} IS NOT NULL`,
+        sql`${epayOrder.fulfillmentState} <> 'fulfilled'`,
+        sql`(${epayOrder.fulfillmentLeaseExpiresAt} IS NULL OR ${epayOrder.fulfillmentLeaseExpiresAt} <= CURRENT_TIMESTAMP)`
+      )
+    )
+    .orderBy(epayOrder.updatedAt)
+    .limit(Math.min(500, Math.max(1, limit)));
+  return rows.map((row) => ({
+    verifyStatus: true,
+    type: row.paymentMethod ?? "",
+    tradeNo: row.paymentTradeNo ?? "",
+    outTradeNo: row.outTradeNo,
+    name: "",
+    money: String(row.paidAmount ?? row.amount),
+    tradeStatus: EPAY_TRADE_SUCCESS,
+    raw: {},
+  }));
 }
 
 export function verifyEpayParams(

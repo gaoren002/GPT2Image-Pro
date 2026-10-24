@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { getBaseUrl } from "@repo/shared/config/payment";
+import { logger } from "@repo/shared/logger";
 import {
   decodeEpayMetadata,
   EPAY_TRADE_SUCCESS,
@@ -9,7 +9,7 @@ import {
   parseEpayRequestParams,
   verifyRuntimeEpayParams,
 } from "@repo/shared/payment/epay";
-import { logger } from "@repo/shared/logger";
+import { NextResponse } from "next/server";
 
 export async function GET(req: Request) {
   return handleReturn(req);
@@ -37,8 +37,8 @@ async function handleReturn(req: Request) {
   const params = await parseEpayRequestParams(req);
   const verifyInfo = await verifyRuntimeEpayParams(params);
   const metadata = verifyInfo.verifyStatus
-    ? decodeEpayMetadata(verifyInfo.param) ??
-      (await getEpayOrderMetadata(verifyInfo.outTradeNo))
+    ? (decodeEpayMetadata(verifyInfo.param) ??
+      (await getEpayOrderMetadata(verifyInfo.outTradeNo)))
     : null;
   const redirectPath =
     metadata?.type === "subscription" ? "/dashboard" : "/dashboard/billing";
@@ -59,7 +59,11 @@ async function handleReturn(req: Request) {
   let payStatus: "success" | "processing" | "pending" | "fail" = "pending";
   if (orderStatus === "success") {
     payStatus = "success";
-  } else if (orderStatus === "failed") {
+  } else if (
+    ["failed", "cancelled", "expired", "refund_pending", "refunded"].includes(
+      orderStatus ?? ""
+    )
+  ) {
     payStatus = "fail";
   } else if (verifyInfo.tradeStatus === EPAY_TRADE_SUCCESS) {
     // 网关已确认支付，但异步通知可能尚未完成履约。

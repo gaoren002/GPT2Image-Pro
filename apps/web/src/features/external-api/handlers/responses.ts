@@ -13,6 +13,7 @@ import { z } from "zod";
 
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
 import {
+  discardResponseBody,
   fetchPublicImage,
   readResponseBytesWithLimit,
 } from "@/features/external-api/safe-image-fetch";
@@ -580,12 +581,18 @@ async function imageUrlToInputFile(
     return null;
   }
 
-  const response = await fetchPublicImage(imageUrl);
+  const response = await fetchPublicImage(imageUrl, {
+    maxBytes: DEFAULT_MAX_IMAGE_BYTES,
+  });
   if (!response.ok) {
+    discardResponseBody(response);
     throw new Error(`Failed to load input image: ${response.status}`);
   }
   const type = response.headers.get("content-type") || "image/png";
-  if (!type.startsWith("image/")) return null;
+  if (!type.startsWith("image/")) {
+    discardResponseBody(response);
+    return null;
+  }
   // 流式读取并在累计超 25MB 时主动 abort：此前完全无上限，巨大响应可逼近 OOM。
   // content-length 头可伪造，必须按真实字节累计判断。
   const data = await readResponseBytesWithLimit(

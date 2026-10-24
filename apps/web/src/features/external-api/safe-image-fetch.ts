@@ -33,6 +33,18 @@ export class SafeImageFetchError extends Error {
 const MAX_REDIRECTS = 3;
 
 /**
+ * 释放不再使用的响应正文。
+ *
+ * WHY：DNS-pinning fetch 现在以流的形式返回正文（不再整段缓冲），被丢弃的响应
+ * （重定向跳转前的那一跳、临时失败重试前的上一次尝试）若不取消，底层连接会一直
+ * 挂着直到超时。调用方自己丢弃响应时也应调用本函数。
+ */
+export function discardResponseBody(response: Response): void {
+  if (!response.body || response.body.locked) return;
+  void response.body.cancel().catch(() => undefined);
+}
+
+/**
  * 拉取图片时对临时性失败（429 限流 / 5xx）的重试上限与退避基准。
  *
  * 部分图床（用户输入图的外链来源）在被密集下载时会返回 429，导致 api 后端
@@ -187,6 +199,8 @@ export async function fetchPublicCallback(
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
+      // 重定向响应的正文无用，跟随前先释放连接。
+      discardResponseBody(response);
       if (!location) {
         throw new SafeImageFetchError(
           "callback_url redirect missing location."
@@ -267,7 +281,12 @@ export async function readResponseBytesWithLimit(
  */
 export async function fetchPublicImage(
   rawUrl: string,
-  init: { headers?: Record<string, string>; signal?: AbortSignal } = {}
+  init: {
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    /** 正文字节上限，透传到连接层：超限即销毁连接，不先收完再拒绝。 */
+    maxBytes?: number;
+  } = {}
 ): Promise<Response> {
   let currentUrl = rawUrl;
 
@@ -291,6 +310,7 @@ export async function fetchPublicImage(
           method: "GET",
           headers: init.headers,
           signal: init.signal,
+          ...(init.maxBytes === undefined ? {} : { maxBytes: init.maxBytes }),
         });
       } catch (err) {
         if (err instanceof SsrfBlockedError) {
@@ -303,6 +323,8 @@ export async function fetchPublicImage(
         attempt < MAX_TRANSIENT_RETRIES &&
         isTransientFetchStatus(response.status)
       ) {
+        // 这次尝试的正文不会被读取，先释放连接再退避重试。
+        discardResponseBody(response);
         await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
         continue;
       }
@@ -316,6 +338,8 @@ export async function fetchPublicImage(
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
+      // 重定向响应的正文无用，跟随前先释放连接。
+      discardResponseBody(response);
       if (!location) {
         throw new SafeImageFetchError("Image URL redirect missing location.");
       }

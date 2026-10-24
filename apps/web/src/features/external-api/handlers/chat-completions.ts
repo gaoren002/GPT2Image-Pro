@@ -24,6 +24,7 @@ import {
   wantsImageStreamResponse,
 } from "@/features/external-api/images";
 import {
+  discardResponseBody,
   fetchPublicImage,
   readResponseBytesWithLimit,
 } from "@/features/external-api/safe-image-fetch";
@@ -181,13 +182,17 @@ async function imageUrlToInputFile(params: {
     throw new Error("input image_url must be an http(s) URL or data URL.");
   }
 
-  const response = await fetchPublicImage(params.imageUrl);
+  const response = await fetchPublicImage(params.imageUrl, {
+    maxBytes: params.maxImageBytes,
+  });
   if (!response.ok) {
+    discardResponseBody(response);
     throw new Error(`Failed to load input image: HTTP ${response.status}`);
   }
 
   const type = response.headers.get("content-type") || "image/png";
   if (!type.startsWith("image/")) {
+    discardResponseBody(response);
     throw new Error("input image_url must point to an image.");
   }
 

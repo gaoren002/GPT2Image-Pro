@@ -2,12 +2,17 @@
  * DNS-pinning fetch 单元测试。
  *
  * 全部 mock dns 模块与 http/https 传输层，不发起真实网络请求。
- * 覆盖：公网 IP 放行、私有 IP 阻断、混合结果阻断、DNS 失败、Host 头设置。
+ * 覆盖：公网 IP 放行、私有 IP 阻断、混合结果阻断、DNS 失败、Host 头设置，
+ * 以及正文流式返回（响应头到齐即可读、超限销毁连接）与禁止正文的状态码。
+ *
+ * 响应桩使用真实 Readable：被测实现以 Readable.toWeb 把响应接成 Web 流（保留背压），
+ * 裸 EventEmitter 无法反映该行为。
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { RequestOptions } from "node:http";
+import { Readable } from "node:stream";
 
 // mock node:dns/promises
 vi.mock("node:dns/promises", () => ({
@@ -29,7 +34,11 @@ vi.mock("node:https", () => ({
 import { resolve4, resolve6 } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
-import { fetchWithDnsPin, SsrfBlockedError } from "./dns-pin";
+import {
+  DnsPinResponseTooLargeError,
+  fetchWithDnsPin,
+  SsrfBlockedError,
+} from "./dns-pin";
 
 const mockResolve4 = vi.mocked(resolve4);
 const mockResolve6 = vi.mocked(resolve6);
@@ -50,7 +59,7 @@ function setupMockTransport(
   mock.mockImplementation(
     (
       _opts: unknown,
-      callback: (res: EventEmitter) => void
+      callback: (res: Readable) => void
     ) => {
       const req = new EventEmitter() as EventEmitter & {
         write: ReturnType<typeof vi.fn>;
@@ -59,7 +68,7 @@ function setupMockTransport(
       };
       req.write = vi.fn();
       req.end = vi.fn().mockImplementation(() => {
-        const res = new EventEmitter() as EventEmitter & {
+        const res = new Readable({ read() {} }) as Readable & {
           statusCode: number;
           statusMessage: string;
           headers: Record<string, string>;
@@ -71,8 +80,8 @@ function setupMockTransport(
         callback(res);
 
         queueMicrotask(() => {
-          res.emit("data", Buffer.from(responseBody));
-          res.emit("end");
+          res.push(Buffer.from(responseBody));
+          res.push(null);
         });
       });
       req.destroy = vi.fn();
@@ -173,7 +182,7 @@ describe("fetchWithDnsPin", () => {
         };
         req.write = vi.fn();
         req.end = vi.fn().mockImplementation(() => {
-          const res = new EventEmitter() as EventEmitter & {
+          const res = new Readable({ read() {} }) as Readable & {
             statusCode: number;
             statusMessage: string;
             headers: Record<string, string>;
@@ -183,8 +192,8 @@ describe("fetchWithDnsPin", () => {
           res.headers = {};
           callback(res);
           queueMicrotask(() => {
-            res.emit("data", Buffer.from("ok"));
-            res.emit("end");
+            res.push(Buffer.from("ok"));
+            res.push(null);
           });
         });
         req.destroy = vi.fn();
@@ -222,7 +231,7 @@ describe("fetchWithDnsPin", () => {
         };
         req.write = vi.fn();
         req.end = vi.fn().mockImplementation(() => {
-          const res = new EventEmitter() as EventEmitter & {
+          const res = new Readable({ read() {} }) as Readable & {
             statusCode: number;
             statusMessage: string;
             headers: Record<string, string>;
@@ -232,8 +241,8 @@ describe("fetchWithDnsPin", () => {
           res.headers = {};
           callback(res);
           queueMicrotask(() => {
-            res.emit("data", Buffer.from("ok"));
-            res.emit("end");
+            res.push(Buffer.from("ok"));
+            res.push(null);
           });
         });
         req.destroy = vi.fn();
@@ -292,5 +301,104 @@ describe("fetchWithDnsPin", () => {
     await expect(
       fetchWithDnsPin("http://evil.com/x")
     ).rejects.toBeInstanceOf(SsrfBlockedError);
+  });
+});
+
+/**
+ * 正文流式返回与禁止正文状态的行为。
+ *
+ * 此前实现把所有 chunk 收进数组、到 end 事件才构造 Response：上层"流式限额"永远在
+ * 正文全部进内存之后才生效，取消也无法中止传输；且对 204/304 以非 null 正文构造
+ * Response 会在事件回调里抛 TypeError，Promise 永不结算。
+ */
+describe("fetchWithDnsPin 正文处理", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockResolve4.mockResolvedValue(["93.184.216.34"]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** 受控响应桩：手动推送 chunk，可观察连接是否被销毁。 */
+  function setupControllableTransport() {
+    const state = {
+      push: (_chunk: Buffer) => {},
+      finish: () => {},
+      destroyed: false,
+      responded: false,
+    };
+    httpRequestMock.mockImplementation(
+      (_opts: unknown, callback: (res: Readable) => void) => {
+        const req = new EventEmitter() as EventEmitter & {
+          write: ReturnType<typeof vi.fn>;
+          end: ReturnType<typeof vi.fn>;
+          destroy: ReturnType<typeof vi.fn>;
+        };
+        req.write = vi.fn();
+        req.destroy = vi.fn().mockImplementation(() => {
+          state.destroyed = true;
+        });
+        req.end = vi.fn().mockImplementation(() => {
+          const res = new Readable({ read() {} }) as Readable & {
+            statusCode: number;
+            statusMessage: string;
+            headers: Record<string, string>;
+          };
+          res.statusCode = 200;
+          res.statusMessage = "OK";
+          res.headers = { "content-type": "image/png" };
+          state.push = (chunk: Buffer) => res.push(chunk);
+          state.finish = () => res.push(null);
+          state.responded = true;
+          callback(res);
+        });
+        return req;
+      }
+    );
+    return state;
+  }
+
+  it("响应头到齐即返回，正文尚未传完也不阻塞", async () => {
+    const state = setupControllableTransport();
+    const response = await fetchWithDnsPin("http://cdn.example.com/a.png");
+    // 一个 chunk 都还没推送就已拿到响应头。
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    state.push(Buffer.from("abc"));
+    state.finish();
+    expect(Buffer.from(await response.arrayBuffer()).toString()).toBe("abc");
+  });
+
+  it("超过 maxBytes 时销毁连接并让正文流报错", async () => {
+    const state = setupControllableTransport();
+    const response = await fetchWithDnsPin("http://cdn.example.com/a.png", {
+      maxBytes: 4,
+    });
+    state.push(Buffer.from("12345678"));
+    await expect(response.arrayBuffer()).rejects.toBeInstanceOf(
+      DnsPinResponseTooLargeError
+    );
+    expect(state.destroyed).toBe(true);
+  });
+
+  it("取消正文即销毁连接，不继续接收", async () => {
+    const state = setupControllableTransport();
+    const response = await fetchWithDnsPin("http://cdn.example.com/a.png");
+    await response.body?.cancel();
+    expect(state.destroyed).toBe(true);
+  });
+
+  it("204/304 等禁止正文的状态以 null 正文构造，Promise 正常结算", async () => {
+    for (const status of [204, 304]) {
+      setupMockTransport(httpRequestMock, status, "");
+      const response = await fetchWithDnsPin(
+        "http://callback.example.com/hook",
+        { method: "POST", body: "{}" }
+      );
+      expect(response.status, String(status)).toBe(status);
+      expect(response.body, String(status)).toBeNull();
+    }
   });
 });

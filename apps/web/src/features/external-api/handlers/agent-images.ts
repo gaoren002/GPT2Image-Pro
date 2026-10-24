@@ -22,6 +22,7 @@ import {
   wantsImageStreamResponse,
 } from "@/features/external-api/images";
 import {
+  discardResponseBody,
   fetchPublicImage,
   readResponseBytesWithLimit,
 } from "@/features/external-api/safe-image-fetch";
@@ -547,8 +548,10 @@ async function fetchImageReference(
 
   const response = await fetchPublicImage(url.toString(), {
     headers: { Accept: "image/png,image/jpeg,image/webp" },
+    maxBytes: maxImageBytes,
   });
   if (!response.ok) {
+    discardResponseBody(response);
     throw new AgentReferenceError(
       `Failed to fetch image URL: HTTP ${response.status}`,
       response.status >= 500 ? 502 : 400

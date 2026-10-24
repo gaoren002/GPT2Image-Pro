@@ -35,6 +35,7 @@ import {
   wantsImageStreamResponse,
 } from "@/features/external-api/images";
 import {
+  discardResponseBody,
   fetchPublicImage,
   readResponseBytesWithLimit,
 } from "@/features/external-api/safe-image-fetch";
@@ -405,12 +406,15 @@ async function fetchImageReference(
   }
   await assertPublicImageUrl(url);
 
+  const maxImageBytes = options?.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   const response = await fetchPublicImage(url.toString(), {
     headers: {
       Accept: options?.mask ? "image/png" : "image/png,image/jpeg,image/webp",
     },
+    maxBytes: maxImageBytes,
   });
   if (!response.ok) {
+    discardResponseBody(response);
     throw new ImageReferenceError(
       `Failed to fetch image URL: HTTP ${response.status}`,
       response.status >= 500 ? 502 : 400
@@ -421,7 +425,6 @@ async function fetchImageReference(
     (response.headers.get("content-type") || "").split(";")[0] || ""
   ).trim();
   const type = contentType || (options?.mask ? "image/png" : "image/png");
-  const maxImageBytes = options?.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   // 流式读取并在累计超限时主动 abort：content-length 头可伪造，不能据其预判大小，
   // 也不能先把整段正文缓冲进内存（否则可被巨大响应逼近 OOM）。
   const buffer = await readResponseBytesWithLimit(

@@ -22,7 +22,11 @@
  */
 
 import { resolve4, resolve6 } from "node:dns/promises";
-import type { IncomingMessage, RequestOptions } from "node:http";
+import type {
+  ClientRequest,
+  IncomingMessage,
+  RequestOptions,
+} from "node:http";
 import http from "node:http";
 import https from "node:https";
 import { isBlockedIP } from "./ip-validation";
@@ -50,6 +54,83 @@ export interface DnsPinFetchOptions {
   timeoutMs?: number;
   /** AbortSignal 用于外部取消 */
   signal?: AbortSignal;
+  /**
+   * 响应正文字节上限。超限即销毁连接并让正文流报错，不继续接收。
+   *
+   * WHY 放在连接层：上层按 content-length 或读取累计判断时，字节已经进了本进程内存。
+   * 调用方仍应保留自己的限额检查（分套餐限额不同），此处是兜底，防止"先收完再拒绝"。
+   */
+  maxBytes?: number;
+}
+
+/** 响应正文超过 maxBytes 时的错误，连接已被销毁。 */
+export class DnsPinResponseTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Response body exceeded ${maxBytes} bytes.`);
+    this.name = "DnsPinResponseTooLargeError";
+  }
+}
+
+/**
+ * 不允许携带正文的响应状态（RFC 9110）。Response 构造器对这些状态传入非 null 正文
+ * 会抛 TypeError，即使长度为零。
+ */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * 把 Node 响应流转成 Web 流，按需施加字节上限。
+ *
+ * @param res Node 响应流。
+ * @param req 对应请求，用于超限或取消时销毁连接。
+ * @param maxBytes 字节上限；未给出则不限制（仍由调用方自己的限额把关）。
+ * @returns 可交给 Response 构造器的正文流；超限时流报错且连接已销毁。
+ * @remarks 队列满即暂停 socket、被拉取时恢复，保留背压；调用方取消正文时销毁连接，
+ *   使"读到一半放弃"真正停止传输，而不是继续收完。
+ */
+function toLimitedWebStream(
+  res: IncomingMessage,
+  req: ClientRequest,
+  maxBytes?: number
+): ReadableStream<Uint8Array> {
+  let received = 0;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      res.on("data", (chunk: Buffer) => {
+        received += chunk.byteLength;
+        if (maxBytes !== undefined && received > maxBytes) {
+          req.destroy();
+          controller.error(new DnsPinResponseTooLargeError(maxBytes));
+          return;
+        }
+        controller.enqueue(new Uint8Array(chunk));
+        // 消费方跟不上时暂停接收，由 pull 恢复，避免在内存里堆积。
+        if ((controller.desiredSize ?? 1) <= 0) {
+          res.pause();
+        }
+      });
+      res.on("end", () => {
+        // 已因超限/错误结束时 close 会抛，按已结束处理。
+        try {
+          controller.close();
+        } catch {
+          // 流已结束，无需处理。
+        }
+      });
+      res.on("error", (error: Error) => {
+        try {
+          controller.error(error);
+        } catch {
+          // 流已结束，无需处理。
+        }
+      });
+    },
+    pull() {
+      res.resume();
+    },
+    cancel() {
+      req.destroy();
+    },
+  });
 }
 
 /**
@@ -121,6 +202,7 @@ export async function fetchWithDnsPin(
   const isHttps = parsed.protocol === "https:";
   const hostname = parsed.hostname;
   const timeoutMs = init?.timeoutMs ?? 10_000;
+  const maxBytes = init?.maxBytes;
 
   // 若 URL 已是 IP 字面量，直接校验
   const isLiteralIP =
@@ -181,17 +263,11 @@ export async function fetchWithDnsPin(
     const req = transport.request(
       requestOptions,
       (res: IncomingMessage) => {
-        const chunks: Buffer[] = [];
-
-        res.on("data", (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-
-        res.on("end", () => {
-          const body = Buffer.concat(chunks);
+        // 响应头到齐即构造 Response，正文作为流交给调用方：此前把全部 chunk 收进数组、
+        // 到 end 事件才 resolve，于是上层的"流式限额"永远在正文已全部进内存之后才生效，
+        // 巨大响应可逼近 OOM，取消也无法中止传输。
+        try {
           const responseHeaders = new Headers();
-
-          // 转换 Node.js 响应头到 Web Headers
           for (const [key, value] of Object.entries(res.headers)) {
             if (value === undefined) continue;
             if (Array.isArray(value)) {
@@ -203,18 +279,27 @@ export async function fetchWithDnsPin(
             }
           }
 
-          resolve(
-            new Response(body, {
-              status: res.statusCode ?? 200,
-              statusText: res.statusMessage ?? "",
-              headers: responseHeaders,
-            })
-          );
-        });
+          const status = res.statusCode ?? 200;
+          const init: ResponseInit = {
+            status,
+            statusText: res.statusMessage ?? "",
+            headers: responseHeaders,
+          };
 
-        res.on("error", (err: Error) => {
-          reject(err);
-        });
+          // 204/304 等状态不允许携带正文，传入非 null 会抛 TypeError；
+          // 丢弃正文流并以 null 构造（正常回调返回 204 即走这里）。
+          if (NULL_BODY_STATUSES.has(status) || requestOptions.method === "HEAD") {
+            res.resume();
+            resolve(new Response(null, init));
+            return;
+          }
+
+          resolve(new Response(toLimitedWebStream(res, req, maxBytes), init));
+        } catch (error) {
+          // 构造失败发生在事件回调里，不能让异常逸出（会变成未捕获异常、Promise 永不结算）。
+          req.destroy();
+          reject(error);
+        }
       }
     );
 

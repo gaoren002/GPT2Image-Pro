@@ -24,6 +24,7 @@ import {
 } from "@repo/shared/storage/signed-url";
 import { getRuntimeSettingString } from "@repo/shared/system-settings";
 import {
+  discardResponseBody,
   fetchPublicImage,
   readResponseBytesWithLimit,
 } from "../external-api/safe-image-fetch";
@@ -51,8 +52,12 @@ async function downloadImageBytes(
   url: string,
   signal?: AbortSignal
 ): Promise<{ data: Buffer; type: string }> {
-  const response = await fetchPublicImage(url, { signal });
+  const response = await fetchPublicImage(url, {
+    ...(signal ? { signal } : {}),
+    maxBytes: DEFAULT_MAX_IMAGE_BYTES,
+  });
   if (!response.ok) {
+    discardResponseBody(response);
     throw new Error(
       `Input image download failed with status ${response.status}`
     );

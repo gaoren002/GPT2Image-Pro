@@ -11,6 +11,7 @@ import {
   creditsBalance,
   creditsBatch,
   creditsTransaction,
+  externalApiKey,
 } from "@repo/database/schema";
 import {
   and,
@@ -108,6 +109,96 @@ export interface GrantCreditsParams {
   description?: string;
   /** 元数据 */
   metadata?: Record<string, unknown>;
+  /** 仅供 generation 专用退款调用；封顶、幂等及 Key 退额必须在本函数事务内完成。 */
+  generationRefund?: { generationId: string };
+}
+
+type GenerationRefundLedgerRow = {
+  type: CreditsTransactionType;
+  amount: number;
+  sourceRef: string | null;
+  metadata: Record<string, unknown> | null;
+};
+
+/** 只读取已记账消费的 Key 归属；历史退款缺逐 Key 明细时按最保守余额计算。 */
+function buildGenerationRefundPlan(
+  rows: GenerationRefundLedgerRow[],
+  generationId: string
+) {
+  let debited = 0;
+  let refunded = 0;
+  let attributedRefunded = 0;
+  const keyDebits = new Map<string, number>();
+  const keyRefunds = new Map<string, number>();
+  for (const row of rows) {
+    if (row.metadata?.generationId !== generationId) continue;
+    const amount = normalizeCreditAmount(row.amount);
+    if (amount <= 0) continue;
+    if (row.type === "consumption") {
+      debited = normalizeCreditAmount(debited + amount);
+      const keyId = row.metadata.externalApiKeyId;
+      if (typeof keyId === "string" && keyId) {
+        keyDebits.set(
+          keyId,
+          normalizeCreditAmount((keyDebits.get(keyId) ?? 0) + amount)
+        );
+      }
+    } else if (row.type === "refund") {
+      refunded = normalizeCreditAmount(refunded + amount);
+      const audit = row.metadata.generationRefund;
+      if (!audit || typeof audit !== "object" || Array.isArray(audit)) continue;
+      const record = audit as Record<string, unknown>;
+      if (record.version !== 1 || !Array.isArray(record.apiKeyRefunds))
+        continue;
+      const refunds: Array<{ apiKeyId: string; amount: number }> = [];
+      for (const item of record.apiKeyRefunds) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const value = item as Record<string, unknown>;
+        if (
+          typeof value.apiKeyId !== "string" ||
+          typeof value.amount !== "number" ||
+          !Number.isFinite(value.amount) ||
+          value.amount <= 0
+        )
+          continue;
+        refunds.push({
+          apiKeyId: value.apiKeyId,
+          amount: normalizeCreditAmount(value.amount),
+        });
+      }
+      const total = normalizeCreditAmount(
+        refunds.reduce((sum, item) => sum + item.amount, 0)
+      );
+      if (total > amount) continue;
+      attributedRefunded = normalizeCreditAmount(attributedRefunded + total);
+      for (const item of refunds)
+        keyRefunds.set(
+          item.apiKeyId,
+          normalizeCreditAmount(
+            (keyRefunds.get(item.apiKeyId) ?? 0) + item.amount
+          )
+        );
+    }
+  }
+  const unattributedRefunded = normalizeCreditAmount(
+    Math.max(0, refunded - attributedRefunded)
+  );
+  const keyLimits = Array.from(keyDebits, ([apiKeyId, amount]) => ({
+    apiKeyId,
+    // 旧退款未记 Key 分摊时，不能假设它未退过任何 Key，否则会把旧额度再退一次。
+    amount: normalizeCreditAmount(
+      Math.max(
+        0,
+        amount - (keyRefunds.get(apiKeyId) ?? 0) - unattributedRefunded
+      )
+    ),
+  })).sort((left, right) => left.apiKeyId.localeCompare(right.apiKeyId));
+  return {
+    debited,
+    refunded,
+    netDebited: normalizeCreditAmount(Math.max(0, debited - refunded)),
+    keyLimits,
+  };
 }
 
 /**
@@ -401,6 +492,7 @@ export async function extendActiveSubscriptionBatchesExpiry(params: {
  * 发放积分
  *
  * 在事务中执行：
+ * 0. 专用 generationRefund 按用户和任务加锁，查重并按净扣费封顶
  * 1. 创建积分批次
  * 2. 记录交易（双重记账）
  * 3. 更新余额
@@ -416,10 +508,22 @@ export async function grantCredits(params: GrantCreditsParams) {
     description,
     metadata,
   } = params;
-  const amount = normalizeCreditAmount(params.amount);
+  let amount = normalizeCreditAmount(params.amount);
+  const generationRefund = params.generationRefund;
 
-  if (amount <= 0) {
+  if (amount < 0 || (amount === 0 && !generationRefund)) {
     throw new Error("积分数量必须大于 0");
+  }
+
+  if (
+    generationRefund &&
+    (sourceType !== "refund" ||
+      transactionType !== "refund" ||
+      debitAccount !== "SYSTEM:generation_refund" ||
+      !sourceRef ||
+      !generationRefund.generationId?.trim())
+  ) {
+    throw new Error("generationRefund 只能用于带任务和幂等键的专用退款");
   }
 
   // 到期日必须在开启事务之前算好。设置读取走全局 db 连接(缓存过期时查
@@ -434,170 +538,302 @@ export async function grantCredits(params: GrantCreditsParams) {
         : await getDefaultCreditsExpiryDate(issuedAt)
       : expiresAt;
 
-  return await db.transaction(async (tx) => {
-    const [balanceRecord] = await tx
-      .select()
-      .from(creditsBalance)
-      .where(eq(creditsBalance.userId, userId))
-      .limit(1);
-
-    let currentBalance = balanceRecord;
-
-    if (!currentBalance) {
-      const [newBalance] = await tx
-        .insert(creditsBalance)
-        .values({
-          id: crypto.randomUUID(),
+  return await db.transaction(
+    async (tx) => {
+      let refundPlan: ReturnType<typeof buildGenerationRefundPlan> | undefined;
+      let duplicateRefund = false;
+      const requestedAmount = amount;
+      if (generationRefund) {
+        if (!sourceRef) throw new Error("generationRefund 缺少退款幂等键");
+        // 不依赖 generation 行仍存在；同用户同任务的不同退款阶段共用事务级锁。
+        // 锁和读账均使用 tx，不能再占全局连接或在 service 事务外另包一层事务。
+        // 下方显式 READ COMMITTED，保证等锁后的读账能看见前一笔退款的提交结果，
+        // 不沿用 REPEATABLE READ 在等待锁之前建立的旧快照。
+        const lockKey = JSON.stringify([
+          "generation-refund",
           userId,
-          balance: 0,
-          totalEarned: 0,
-          totalSpent: 0,
-          status: "active",
-        })
-        .returning();
-
-      if (!newBalance) {
-        throw new Error("创建积分账户失败");
-      }
-
-      currentBalance = newBalance;
-    }
-
-    if (currentBalance.status === "frozen") {
-      throw new AccountFrozenError(userId);
-    }
-
-    // refund 批次合并:退款按 generation 逐笔发放,若每笔一条批次行,单用户
-    // 可积累数万条 active 批次(2026-10 生产实测 42615 条/用户),扣费挑选
-    // 与余额列举成本随批次数线性放大。退款改为并入该用户已有的"退款池批次"
-    // (source_ref 为 NULL 且未过期的 active refund 批次;不存在则首笔创建)。
-    // 幂等不受影响:退款查重在调用方按 credits_transaction(source_ref)
-    // 判断(见 refundGenerationCredits),不依赖批次行;amount 记 pool 累加
-    // 前的原始值,remaining 每次加 amount。其他 sourceType 行为不变。
-    let batchId: string;
-    if (sourceType === "refund") {
-      const [pool] = await tx
-        .select({ id: creditsBatch.id })
-        .from(creditsBatch)
-        .where(
-          and(
-            eq(creditsBatch.userId, userId),
-            eq(creditsBatch.sourceType, "refund"),
-            eq(creditsBatch.status, "active"),
-            isNull(creditsBatch.sourceRef),
-            or(
-              isNull(creditsBatch.expiresAt),
-              gt(creditsBatch.expiresAt, issuedAt)
-            )
-          )
-        )
-        .orderBy(asc(creditsBatch.issuedAt))
-        .limit(1)
-        // 先锁批次再改余额，与消费路径保持同一顺序。否则消费可在读池后
-        // 将其标为 consumed，退款随后只增加 remaining，导致余额无法消费。
-        .for("update");
-
-      if (pool) {
-        batchId = pool.id;
-        await tx
-          .update(creditsBatch)
-          .set({
-            amount: sql`${creditsBatch.amount} + ${amount}`,
-            remaining: sql`${creditsBatch.remaining} + ${amount}`,
-            updatedAt: new Date(),
+          generationRefund.generationId,
+        ]);
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
+        );
+        const ledgerRows = await tx
+          .select({
+            type: creditsTransaction.type,
+            amount: creditsTransaction.amount,
+            sourceRef: creditsTransaction.sourceRef,
+            metadata: creditsTransaction.metadata,
           })
-          .where(eq(creditsBatch.id, pool.id));
-      } else {
-        batchId = crypto.randomUUID();
-        await tx.insert(creditsBatch).values({
-          id: batchId,
-          userId,
-          amount,
-          remaining: amount,
-          issuedAt,
-          expiresAt: effectiveExpiresAt,
-          status: "active",
-          sourceType,
-          sourceRef: null,
-        });
+          .from(creditsTransaction)
+          .where(
+            and(
+              eq(creditsTransaction.userId, userId),
+              or(
+                and(
+                  eq(creditsTransaction.type, "refund"),
+                  eq(creditsTransaction.sourceRef, sourceRef)
+                ),
+                and(
+                  sql`${creditsTransaction.metadata}->> 'generationId' = ${generationRefund.generationId}`,
+                  inArray(creditsTransaction.type, ["consumption", "refund"])
+                )
+              )
+            )
+          );
+        duplicateRefund = ledgerRows.some(
+          (row) => row.type === "refund" && row.sourceRef === sourceRef
+        );
+        refundPlan = buildGenerationRefundPlan(
+          ledgerRows,
+          generationRefund.generationId
+        );
+        amount = duplicateRefund ? 0 : Math.min(amount, refundPlan.netDebited);
       }
-    } else {
-      const candidateId = crypto.randomUUID();
-      const insertedBatch = await tx
-        .insert(creditsBatch)
-        .values({
-          id: candidateId,
-          userId,
-          amount,
-          remaining: amount,
-          issuedAt,
-          expiresAt: effectiveExpiresAt,
-          status: "active",
-          sourceType,
-          sourceRef,
-        })
-        .onConflictDoNothing({
-          target: [creditsBatch.sourceType, creditsBatch.sourceRef],
-          where: sql`${creditsBatch.sourceRef} is not null`,
-        })
-        .returning({ id: creditsBatch.id });
+      const [balanceRecord] = await tx
+        .select()
+        .from(creditsBalance)
+        .where(eq(creditsBalance.userId, userId))
+        .limit(1);
 
-      // 幂等性保障：(source_type, source_ref) 唯一索引使重复发放的插入为空。
-      // 此时跳过记账与余额累加，避免支付 webhook 重放 / 并发回调 / 注册奖励
-      // 重复领取导致的积分双重发放（薅羊毛）。
-      if (insertedBatch.length === 0) {
+      if (generationRefund && amount <= 0) {
         return {
           batchId: null,
           transactionId: null,
           amount: 0,
-          newBalance: currentBalance.balance,
-          alreadyGranted: true,
+          newBalance: balanceRecord?.balance ?? 0,
+          alreadyGranted: duplicateRefund,
+          remainingDebited: refundPlan?.netDebited ?? null,
         };
       }
-      batchId = insertedBatch[0]?.id || candidateId;
-    }
 
-    const transactionId = crypto.randomUUID();
-    const creditAccount = `WALLET:${userId}`;
+      let currentBalance = balanceRecord;
 
-    await tx.insert(creditsTransaction).values({
-      id: transactionId,
-      userId,
-      type: transactionType,
-      amount,
-      debitAccount,
-      creditAccount,
-      description,
-      // source_ref 列写入:退款的幂等查重按本列判断(见
-      // refundGenerationCredits)。历史上仅写 metadata,导致列全 NULL、
-      // 查重对存量永远 miss;两处都写,列为主、metadata 兼顾审计展示。
-      sourceRef: sourceRef ?? null,
-      metadata: {
-        ...metadata,
+      if (!currentBalance) {
+        const [newBalance] = await tx
+          .insert(creditsBalance)
+          .values({
+            id: crypto.randomUUID(),
+            userId,
+            balance: 0,
+            totalEarned: 0,
+            totalSpent: 0,
+            status: "active",
+          })
+          .returning();
+
+        if (!newBalance) {
+          throw new Error("创建积分账户失败");
+        }
+
+        currentBalance = newBalance;
+      }
+
+      if (currentBalance.status === "frozen") {
+        throw new AccountFrozenError(userId);
+      }
+
+      // refund 批次合并:退款按 generation 逐笔发放,若每笔一条批次行,单用户
+      // 可积累数万条 active 批次(2026-10 生产实测 42615 条/用户),扣费挑选
+      // 与余额列举成本随批次数线性放大。退款改为并入该用户已有的"退款池批次"
+      // (source_ref 为 NULL 且未过期的 active refund 批次;不存在则首笔创建)。
+      // generation 专用退款在上方同一事务内锁定并按交易表查重和净额封顶，
+      // 不依赖退款批次行;amount 记 pool 累加
+      // 前的原始值,remaining 每次加 amount。其他 sourceType 行为不变。
+      let batchId: string;
+      if (sourceType === "refund") {
+        const [pool] = await tx
+          .select({ id: creditsBatch.id })
+          .from(creditsBatch)
+          .where(
+            and(
+              eq(creditsBatch.userId, userId),
+              eq(creditsBatch.sourceType, "refund"),
+              eq(creditsBatch.status, "active"),
+              isNull(creditsBatch.sourceRef),
+              or(
+                isNull(creditsBatch.expiresAt),
+                gt(creditsBatch.expiresAt, issuedAt)
+              )
+            )
+          )
+          .orderBy(asc(creditsBatch.issuedAt))
+          .limit(1)
+          // 先锁批次再改余额，与消费路径保持同一顺序。否则消费可在读池后
+          // 将其标为 consumed，退款随后只增加 remaining，导致余额无法消费。
+          .for("update");
+
+        if (pool) {
+          batchId = pool.id;
+          await tx
+            .update(creditsBatch)
+            .set({
+              amount: sql`${creditsBatch.amount} + ${amount}`,
+              remaining: sql`${creditsBatch.remaining} + ${amount}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(creditsBatch.id, pool.id));
+        } else {
+          batchId = crypto.randomUUID();
+          await tx.insert(creditsBatch).values({
+            id: batchId,
+            userId,
+            amount,
+            remaining: amount,
+            issuedAt,
+            expiresAt: effectiveExpiresAt,
+            status: "active",
+            sourceType,
+            sourceRef: null,
+          });
+        }
+      } else {
+        const candidateId = crypto.randomUUID();
+        const insertedBatch = await tx
+          .insert(creditsBatch)
+          .values({
+            id: candidateId,
+            userId,
+            amount,
+            remaining: amount,
+            issuedAt,
+            expiresAt: effectiveExpiresAt,
+            status: "active",
+            sourceType,
+            sourceRef,
+          })
+          .onConflictDoNothing({
+            target: [creditsBatch.sourceType, creditsBatch.sourceRef],
+            where: sql`${creditsBatch.sourceRef} is not null`,
+          })
+          .returning({ id: creditsBatch.id });
+
+        // 幂等性保障：(source_type, source_ref) 唯一索引使重复发放的插入为空。
+        // 此时跳过记账与余额累加，避免支付 webhook 重放 / 并发回调 / 注册奖励
+        // 重复领取导致的积分双重发放（薅羊毛）。
+        if (insertedBatch.length === 0) {
+          return {
+            batchId: null,
+            transactionId: null,
+            amount: 0,
+            newBalance: currentBalance.balance,
+            alreadyGranted: true,
+            remainingDebited: null,
+          };
+        }
+        batchId = insertedBatch[0]?.id || candidateId;
+      }
+
+      const transactionMetadata = { ...metadata };
+      if (generationRefund && refundPlan) {
+        const apiKeyRefunds: Array<{ apiKeyId: string; amount: number }> = [];
+        let remainingKeyRefund = amount;
+        // 统一先锁退款池，再按 Key ID 顺序锁 Key，最后更新钱包；避免多 Key 锁顺序反转。
+        for (const keyLimit of refundPlan.keyLimits) {
+          if (remainingKeyRefund <= 0 || keyLimit.amount <= 0) continue;
+          const [key] = await tx
+            .select({
+              id: externalApiKey.id,
+              creditsUsed: externalApiKey.creditsUsed,
+            })
+            .from(externalApiKey)
+            .where(
+              and(
+                eq(externalApiKey.id, keyLimit.apiKeyId),
+                eq(externalApiKey.userId, userId)
+              )
+            )
+            .limit(1)
+            .for("update");
+          if (!key) continue;
+          const keyAmount = normalizeCreditAmount(
+            Math.min(
+              remainingKeyRefund,
+              keyLimit.amount,
+              Number(key.creditsUsed)
+            )
+          );
+          if (keyAmount <= 0) continue;
+          await tx
+            .update(externalApiKey)
+            .set({
+              creditsUsed: sql`${externalApiKey.creditsUsed} - ${keyAmount}`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(externalApiKey.id, key.id),
+                eq(externalApiKey.userId, userId)
+              )
+            );
+          apiKeyRefunds.push({ apiKeyId: key.id, amount: keyAmount });
+          remainingKeyRefund = normalizeCreditAmount(
+            remainingKeyRefund - keyAmount
+          );
+        }
+        // 调用方 metadata 不得伪造 generation 或 Key 退额来源；缺历史 Key 信息时只退钱包，
+        // 明确保留未归属金额，不能把它描述成完成了 Key 与钱包的原子退额。
+        delete transactionMetadata.externalApiKeyId;
+        transactionMetadata.generationId = generationRefund.generationId;
+        transactionMetadata.generationRefund = {
+          version: 1,
+          requestedAmount,
+          debitedCredits: refundPlan.debited,
+          previouslyRefundedCredits: refundPlan.refunded,
+          netDebitedCredits: refundPlan.netDebited,
+          remainingDebited: normalizeCreditAmount(
+            refundPlan.netDebited - amount
+          ),
+          apiKeyRefunds,
+          apiKeyUnattributedCredits: remainingKeyRefund,
+        };
+      }
+      const transactionId = crypto.randomUUID();
+      const creditAccount = `WALLET:${userId}`;
+
+      await tx.insert(creditsTransaction).values({
+        id: transactionId,
+        userId,
+        type: transactionType,
+        amount,
+        debitAccount,
+        creditAccount,
+        description,
+        // source_ref 列写入:专用退款在本事务上方按本列查重。
+        // 历史上仅写 metadata,导致列全 NULL、
+        // 查重对存量永远 miss;两处都写,列为主、metadata 兼顾审计展示。
+        sourceRef: sourceRef ?? null,
+        metadata: {
+          ...transactionMetadata,
+          batchId,
+          sourceRef,
+        },
+      });
+
+      await tx
+        .update(creditsBalance)
+        .set({
+          balance: sql`${creditsBalance.balance} + ${amount}`,
+          totalEarned: sql`${creditsBalance.totalEarned} + ${amount}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(creditsBalance.userId, userId));
+
+      // 注意: newBalance 是基于事务开始时快照的预估值，在并发事务下可能不精确。
+      // 需要精确余额的调用方应在事务完成后调用 getCreditsBalance()。
+      return {
         batchId,
-        sourceRef,
-      },
-    });
-
-    await tx
-      .update(creditsBalance)
-      .set({
-        balance: sql`${creditsBalance.balance} + ${amount}`,
-        totalEarned: sql`${creditsBalance.totalEarned} + ${amount}`,
-        updatedAt: new Date(),
-      })
-      .where(eq(creditsBalance.userId, userId));
-
-    // 注意: newBalance 是基于事务开始时快照的预估值，在并发事务下可能不精确。
-    // 需要精确余额的调用方应在事务完成后调用 getCreditsBalance()。
-    return {
-      batchId,
-      transactionId,
-      amount,
-      newBalance: currentBalance.balance + amount,
-      alreadyGranted: false,
-    };
-  });
+        transactionId,
+        amount,
+        newBalance: currentBalance.balance + amount,
+        alreadyGranted: false,
+        // 同 sourceRef 回放也返回当前账本净额；调用方不能从本地旧扣费数推算。
+        remainingDebited: refundPlan
+          ? normalizeCreditAmount(refundPlan.netDebited - amount)
+          : null,
+      };
+    },
+    generationRefund ? { isolationLevel: "read committed" } : undefined
+  );
 }
 
 /**

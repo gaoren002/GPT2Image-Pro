@@ -1,5 +1,5 @@
 import { db } from "@repo/database";
-import { creditsTransaction, generation } from "@repo/database/schema";
+import { generation } from "@repo/database/schema";
 import { and, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { grantCredits } from "./credits/core";
 import { getFailedGenerationTargetCreditsFromMetadata } from "./generation-settlement";
@@ -261,30 +261,8 @@ export function stripDestroyedGenerationImageReferences(
   return nextMetadata;
 }
 
-/**
- * 退款幂等查重:按 credits_transaction(type='refund', source_ref) 判断。
- *
- * WHY 交易表而非批次表:财务真相在双重记账的 credits_transaction;且退款
- * 批次已改为按用户合并入单条"退款池批次"(source_ref 为 NULL,见
- * grantCredits 的 refund 分支),新退款不再有自己的批次行,按批次查重会
- * 永远 miss 导致重复退款。交易行每笔退款一条,幂等语义不受合并影响。
- */
-async function refundAlreadyGranted(userId: string, sourceRef: string) {
-  const [existing] = await db
-    .select({ id: creditsTransaction.id })
-    .from(creditsTransaction)
-    .where(
-      and(
-        eq(creditsTransaction.userId, userId),
-        eq(creditsTransaction.type, "refund"),
-        eq(creditsTransaction.sourceRef, sourceRef)
-      )
-    )
-    .limit(1);
-
-  return Boolean(existing);
-}
-
+/** 专用生成退款：同事务完成封顶及 Key 退额，并返回锁内账本所见的退后净额。
+ * remainingDebited 是本次事务快照，不包含此后提交的其他扣费或退款。 */
 export async function refundGenerationCredits(params: {
   generationId: string;
   userId: string;
@@ -293,29 +271,37 @@ export async function refundGenerationCredits(params: {
   description: string;
   metadata?: Record<string, unknown>;
 }) {
-  if (params.amount <= 0) {
-    return { refunded: false, amount: 0 };
-  }
-
-  if (await refundAlreadyGranted(params.userId, params.sourceRef)) {
-    return { refunded: false, amount: params.amount };
-  }
-
-  await grantCredits({
+  const granted = await grantCredits({
     userId: params.userId,
-    amount: params.amount,
+    // 零请求也只读核对净额，供已有其他路径退款的投影收敛；不新建退款流水。
+    amount: Math.max(0, params.amount),
     sourceType: "refund",
     debitAccount: "SYSTEM:generation_refund",
     transactionType: "refund",
     sourceRef: params.sourceRef,
     description: params.description,
+    generationRefund: { generationId: params.generationId },
     metadata: {
-      generationId: params.generationId,
       ...params.metadata,
+      generationId: params.generationId,
     },
   });
 
-  return { refunded: true, amount: params.amount };
+  const refunded = !granted.alreadyGranted && granted.amount > 0;
+  if (
+    typeof granted.remainingDebited !== "number" ||
+    !Number.isFinite(granted.remainingDebited) ||
+    granted.remainingDebited < 0
+  ) {
+    throw new Error(
+      "Generation refund did not return an authoritative remaining debit"
+    );
+  }
+  return {
+    refunded,
+    amount: refunded ? granted.amount : 0,
+    remainingDebited: granted.remainingDebited,
+  };
 }
 
 export async function expireStalePendingGenerations(
@@ -357,6 +343,7 @@ export async function expireStalePendingGenerations(
     userId: string;
     creditsRefunded: number;
     refundGranted: boolean;
+    remainingDebited: number | null;
   }> = [];
 
   for (const row of staleRows) {
@@ -395,7 +382,7 @@ export async function expireStalePendingGenerations(
               expiredAt: now.toISOString(),
               targetCredits,
               refundSourceRef: sourceRef,
-              refundCredits: creditsToRefund,
+              requestedRefundCredits: creditsToRefund,
             },
           }
         )}::jsonb`,
@@ -411,57 +398,62 @@ export async function expireStalePendingGenerations(
     if (!updated) continue;
 
     let refundGranted = false;
-    if (creditsToRefund > 0) {
-      try {
-        const refund = await refundGenerationCredits({
-          generationId: row.id,
-          userId: row.userId,
-          amount: creditsToRefund,
-          sourceRef,
-          description: `Refund timed out image generation charge: ${row.prompt.slice(
-            0,
-            50
-          )}`,
-          metadata: {
-            reason: "pending_timeout",
-            createdAt: row.createdAt.toISOString(),
-            expiredAt: now.toISOString(),
-            timeoutMs,
-          },
-        });
-        refundGranted = refund.refunded;
+    let creditsRefunded = 0;
+    let remainingDebited: number | null = null;
+    try {
+      const refund = await refundGenerationCredits({
+        generationId: row.id,
+        userId: row.userId,
+        amount: creditsToRefund,
+        sourceRef,
+        description: `Refund timed out image generation charge: ${row.prompt.slice(
+          0,
+          50
+        )}`,
+        metadata: {
+          reason: "pending_timeout",
+          createdAt: row.createdAt.toISOString(),
+          expiredAt: now.toISOString(),
+          timeoutMs,
+        },
+      });
+      refundGranted = refund.refunded;
+      creditsRefunded = refund.amount;
+      remainingDebited = refund.remainingDebited;
 
-        await db
-          .update(generation)
-          .set({
-            creditsConsumed: targetCredits,
-            metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
-              {
-                timeoutRefund: {
-                  sourceRef,
-                  creditsRefunded: creditsToRefund,
-                  granted: refund.refunded,
-                  settledAt: now.toISOString(),
-                },
-              }
-            )}::jsonb`,
-          })
-          .where(eq(generation.id, row.id));
-      } catch (error) {
-        logError(error, {
-          source: "image-generation-timeout-refund",
-          generationId: row.id,
-          userId: row.userId,
-          creditsToRefund,
-        });
-      }
+      await db
+        .update(generation)
+        .set({
+          creditsConsumed: refund.remainingDebited,
+          metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
+            {
+              timeoutRefund: {
+                sourceRef,
+                requestedCredits: creditsToRefund,
+                creditsRefunded: refund.amount,
+                remainingDebited: refund.remainingDebited,
+                granted: refund.refunded,
+                settledAt: now.toISOString(),
+              },
+            }
+          )}::jsonb`,
+        })
+        .where(eq(generation.id, row.id));
+    } catch (error) {
+      logError(error, {
+        source: "image-generation-timeout-refund",
+        generationId: row.id,
+        userId: row.userId,
+        creditsToRefund,
+      });
     }
 
     results.push({
       generationId: row.id,
       userId: row.userId,
-      creditsRefunded: refundGranted ? creditsToRefund : 0,
+      creditsRefunded,
       refundGranted,
+      remainingDebited,
     });
   }
 

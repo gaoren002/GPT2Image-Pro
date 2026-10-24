@@ -1,235 +1,92 @@
-/**
- * refund 批次合并策略测试(DB-free,vi.mock 掉 @repo/database)。
- *
- * 背景:退款按 generation 逐条发放,单用户可积累数万条 active refund 批次
- * (2026-10 生产实测 42615 条/用户),扣费查询与余额列举成本随批次数线性
- * 放大。策略:grantCredits 对 sourceType="refund" 不再插新批次,而是把
- * 金额并入该用户的"退款池批次"(source_ref IS NULL 的单条 active refund
- * 批次,首次退款时创建)。
- *
- * 幂等语义变更:refundAlreadyGranted 原按 credits_batch(source_ref) 查重;
- * 合并后新退款不再有自己的批次行,查重改按 credits_transaction
- * (type='refund', source_ref) —— 双重记账的真相表,语义更准。
- */
-
+/** 专用退款包装器契约；退款池合并与并发封顶由 generation-refund 的真实 Drizzle 回归验证。 */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-/**
- * drizzle 表对象 String() 为 "[object Object]";vi.resetModules 后 schema
- * 模块会被重新加载,引用比对也失效。按列名集合识别表(签名在 schema 中
- * 唯一即可靠)。
- */
-function tableKeys(t: unknown): string[] {
-  return t && typeof t === "object" ? Object.keys(t) : [];
-}
+const state = vi.hoisted(() => ({ grant: vi.fn(), select: vi.fn() }));
+vi.mock("@repo/database", () => ({ db: { select: state.select } }));
+vi.mock("./core", () => ({ grantCredits: state.grant }));
+vi.mock("../storage/providers", () => ({ getStorageProvider: vi.fn() }));
 
-function isSystemSettingTable(t: unknown): boolean {
-  const keys = tableKeys(t);
-  return keys.includes("key") && keys.includes("isSecret");
-}
+import { refundGenerationCredits } from "../generation-maintenance";
 
-/** credits_transaction 签名:debitAccount/creditAccount 唯一。 */
-function isTransactionTable(t: unknown): boolean {
-  return tableKeys(t).includes("debitAccount");
-}
-
-/** credits_batch 签名:remaining/issuedAt 并存。 */
-function isBatchTable(t: unknown): boolean {
-  const keys = tableKeys(t);
-  return keys.includes("remaining") && keys.includes("issuedAt");
-}
-
-process.env.DATABASE_URL ||=
-  "postgres://test:test@127.0.0.1:5432/gpt2image_test";
-
-type TxChain = {
-  select: ReturnType<typeof vi.fn>;
-  insert: ReturnType<typeof vi.fn>;
-  update: ReturnType<typeof vi.fn>;
-  rollback?: () => never;
+const request = {
+  userId: "u1",
+  generationId: "g1",
+  sourceRef: "g1:failure",
+  amount: 10,
+  description: "test",
 };
-
-/**
- * 构造最小 drizzle 链式 mock:只覆盖 grantCredits/refundGenerationCredits
- * 实际用到的调用形状(select().from().where().limit()、insert().values()
- * .onConflictDoNothing().returning()、update().set().where().returning())。
- */
-function makeTx(tableRows: {
-  balance?: Array<Record<string, unknown>>;
-  transactions?: Array<Record<string, unknown>>;
-}) {
-  const calls = {
-    inserts: [] as Array<{ table: string; values: unknown }>,
-    updates: [] as Array<{ table: string; values: unknown }>,
-    selects: [] as Array<string>,
-  };
-  const returningRows: Record<string, Array<Record<string, unknown>>> = {};
-
-  const chainFinal = (rows: Array<Record<string, unknown>> = []) => {
-    return Object.assign(Promise.resolve(rows), {
-      returning: () => Promise.resolve(rows),
-      for: () => Promise.resolve(rows),
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.grant
+    .mockReset()
+    .mockResolvedValue({
+      amount: 4,
+      alreadyGranted: false,
+      remainingDebited: 6,
     });
-  };
-
-  const tx: TxChain = {
-    select: vi.fn(() => {
-      const api = {
-        from: (t: unknown) => {
-          calls.selects.push(String(t));
-          if (isSystemSettingTable(t)) {
-            // 查询失败 → loadSystemSettingsMap 的 catch 按空设置负缓存,
-            // getRuntimeSetting* 落代码默认值(与空库行为一致)。
-            return Promise.reject(new Error("mock: no db"));
-          }
-          return {
-            where: () => ({
-              limit: () => chainFinal(tableRows.balance || []),
-              orderBy: () => ({
-                limit: () => chainFinal(tableRows.balance || []),
-              }),
-            }),
-            orderBy: () => ({
-              limit: () => chainFinal(tableRows.balance || []),
-            }),
-          };
-        },
-      };
-      return api;
-    }),
-    insert: vi.fn((t: unknown) => {
-      calls.selects.push(`insert:${String(t)}`);
-      return {
-        values: (
-          v: Record<string, unknown> | Array<Record<string, unknown>>
-        ) => {
-          const list = Array.isArray(v) ? v : [v];
-          const tableKind = isTransactionTable(t)
-            ? "transaction"
-            : isBatchTable(t)
-              ? "batch"
-              : "other";
-          calls.inserts.push({ table: tableKind, values: list });
-          return {
-            onConflictDoNothing: () => ({
-              returning: () =>
-                Promise.resolve(returningRows.insert || [{ id: "batch-1" }]),
-            }),
-            returning: () =>
-              Promise.resolve(returningRows.insert || [{ id: "tx-1" }]),
-          };
-        },
-      };
-    }),
-    update: vi.fn((t: unknown) => ({
-      set: (v: Record<string, unknown>) => {
-        const tableKind = isTransactionTable(t)
-          ? "transaction"
-          : isBatchTable(t)
-            ? "batch"
-            : "other";
-        calls.updates.push({ table: tableKind, values: v });
-        return {
-          where: () => Object.assign(Promise.resolve([{ id: "updated" }]), {
-            returning: () => Promise.resolve([{ id: "updated" }]),
-          }),
-        };
-      },
-    })),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as unknown as TxChain;
-  return { tx, calls, returningRows };
-}
-
-describe("refundGenerationCredits 幂等查重改走交易表", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
+  state.select.mockImplementation(() => {
+    throw new Error("包装器不得在事务外查重");
   });
-
-  // settingsCache 是模块级单例:resetModules 后重新加载 system-settings,
-  // 否则首用例已用真实 db 触发的负缓存会泄漏到后续用例。
-  async function loadMaintenance() {
-    return await import("./../generation-maintenance");
-  }
-
-  it("同一 sourceRef 已有 refund 交易时不重复发放", async () => {
-    const dbSelect = () => ({
-      from: (table: unknown) => {
-        if (isSystemSettingTable(table)) {
-          return Promise.reject(new Error("mock: no db"));
-        }
-        return {
-          where: () => ({
-            limit: () => Promise.resolve([{ id: "existing-tx" }]),
-          }),
-        };
-      },
+});
+describe("refundGenerationCredits 专用事务委托", () => {
+  it("传入内部 context，只报告实际发放金额", async () => {
+    expect(await refundGenerationCredits(request)).toEqual({
+      refunded: true,
+      amount: 4,
+      remainingDebited: 6,
     });
-    vi.doMock("@repo/database", () => ({
-      db: {
-        select: dbSelect,
-        transaction: async () => {
-          throw new Error("不应触达发放路径");
-        },
-      },
-    }));
-    const mod = await loadMaintenance();
-    const result = await mod.refundGenerationCredits({
-      generationId: "g1",
-      userId: "u1",
-      amount: 5,
-      sourceRef: "g1:timeout-refund",
-      description: "test",
-    });
-    expect(result.refunded).toBe(false);
+    expect(state.grant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceType: "refund",
+        transactionType: "refund",
+        debitAccount: "SYSTEM:generation_refund",
+        generationRefund: { generationId: "g1" },
+      })
+    );
+    expect(state.select).not.toHaveBeenCalled();
   });
-
-  it("无既有交易时经 grantCredits 合并发放", async () => {
-    // makeTx 的事务内 select(余额/退款池)统一返回 balance 行;
-    // 退款池查询 select({id}).from(creditsBatch).where(...).limit(1)
-    // 也命中同一 mock,返回首行 → 走"并入已有池"路径(update 而非 insert 批次)。
-    const { tx, calls } = makeTx({
-      balance: [{ balance: 10, status: "active" }],
+  it.each([
+    { amount: 0, alreadyGranted: false },
+    { amount: 4, alreadyGranted: true },
+  ])("no-op 返回零金额：%o", async (result) => {
+    state.grant.mockResolvedValueOnce({ ...result, remainingDebited: 6 });
+    expect(await refundGenerationCredits(request)).toEqual({
+      refunded: false,
+      amount: 0,
+      remainingDebited: 6,
     });
-    const dbSelect = () => ({
-      from: (table: unknown) => {
-        if (isSystemSettingTable(table)) {
-          return Promise.reject(new Error("mock: no db"));
-        }
-        return {
-          where: () => ({
-            limit: () => Promise.resolve([]),
-          }),
-        };
-      },
+  });
+  it("不允许 metadata 覆盖权威任务 ID", async () => {
+    await refundGenerationCredits({
+      ...request,
+      metadata: { generationId: "other" },
     });
-    vi.doMock("@repo/database", () => ({
-      db: {
-        select: dbSelect,
-        transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
-      },
-    }));
-    const mod = await loadMaintenance();
-    const result = await mod.refundGenerationCredits({
-      generationId: "g2",
-      userId: "u1",
-      amount: 5,
-      sourceRef: "g2:timeout-refund",
-      description: "test",
+    expect(state.grant.mock.calls[0]?.[0].metadata.generationId).toBe("g1");
+    expect(state.grant.mock.calls[0]?.[0].generationRefund.generationId).toBe(
+      "g1"
+    );
+  });
+  it("零请求仍核对权威净额，事务失败向上传递", async () => {
+    state.grant.mockResolvedValueOnce({
+      amount: 0,
+      alreadyGranted: false,
+      remainingDebited: 6,
     });
-    expect(result.refunded).toBe(true);
-    // 记账必须落交易表(credits_transaction,双重记账真相)
-    const txInsert = calls.inserts.find((i) => i.table === "transaction");
-    expect(txInsert).toBeTruthy();
-    // 幂等键必须写进 source_ref 列(查重按列判断;历史上只写 metadata
-    // 导致列全 NULL、查重对存量 miss —— 2026-10 已回填并双写)
-    const txValues = txInsert?.values as Array<Record<string, unknown>>;
-    expect(txValues[0]?.sourceRef).toBe("g2:timeout-refund");
-    // 退款池已存在时:批次走 update(amount/remaining 累加),不再插新批次行
-    const batchInsert = calls.inserts.find((i) => i.table === "batch");
-    expect(batchInsert).toBeUndefined();
-    const poolUpdate = calls.updates.find((i) => i.table === "batch");
-    expect(poolUpdate).toBeTruthy();
+    expect(await refundGenerationCredits({ ...request, amount: 0 })).toEqual({
+      refunded: false,
+      amount: 0,
+      remainingDebited: 6,
+    });
+    expect(state.grant.mock.calls[0]?.[0].amount).toBe(0);
+    state.grant.mockRejectedValueOnce(new Error("transaction failed"));
+    await expect(refundGenerationCredits(request)).rejects.toThrow(
+      "transaction failed"
+    );
+  });
+  it("缺权威净额时失败关闭，不回退使用请求额或本地旧计数", async () => {
+    state.grant.mockResolvedValueOnce({ amount: 0, alreadyGranted: true });
+    await expect(refundGenerationCredits(request)).rejects.toThrow(
+      /authoritative remaining debit/
+    );
   });
 });

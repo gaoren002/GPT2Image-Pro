@@ -416,6 +416,13 @@
       "breakpoints": true
     },
     {
+      "idx": 60,
+      "version": "7",
+      "when": 1793487600000,
+      "tag": "0060_pool_oauth_rotation",
+      "breakpoints": true
+    },
+    {
       "idx": 61,
       "version": "7",
       "when": 1793574000000,

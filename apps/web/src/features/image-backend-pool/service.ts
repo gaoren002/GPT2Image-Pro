@@ -90,6 +90,11 @@ import {
   type ImageApiHealthResult,
 } from "./health-check";
 import { parseImportTokensText } from "./import-token-parser";
+import { rotateAndStoreOAuth } from "./oauth-rotation";
+import {
+  OAuthRecoveryError,
+  type OAuthAccountTarget,
+} from "./oauth-rotation-types";
 import {
   mutateSub2ApiTaskSetting,
   readSub2ApiTaskSetting,
@@ -4149,37 +4154,53 @@ function tokenSourceForRefreshClient(
     : "openai.oauth.platform_refresh";
 }
 
-async function refreshAccessTokenForBackend(
-  refreshToken: string,
-  backend: ImageBackendAccountBackend,
-  clientId = clientIdForAccountBackend(backend)
-) {
-  return await refreshOpenAIAccessToken(refreshToken, clientId);
+/** 去除输入凭据后冻结本次落库意图；配置归一化先于外呼和事务。 */
+function oauthTarget(
+  input: UpsertAccountInput,
+  expectedCredentialHash?: string
+): OAuthAccountTarget {
+  const { accessToken: _access, refreshToken: _refresh, ...target } = input;
+  return {
+    ...target,
+    groupIds: accountGroupIdsFromInput(input),
+    expectedCredentialHash,
+    ...(input.qualityBilling !== undefined
+      ? {
+          qualityBilling: normalizeQualityBillingForStorage(
+            input.qualityBilling
+          ),
+        }
+      : {}),
+  };
 }
 
 export async function upsertImageBackendAccount(input: UpsertAccountInput) {
   const implementationMode = normalizeAccountBackend(input.implementationMode);
   const groupIds = accountGroupIdsFromInput(input);
   const primaryGroupId = groupIds[0] || null;
-  let accessToken = input.accessToken?.trim() || "";
-  let refreshToken =
+  const accessToken = input.accessToken?.trim() || "";
+  const refreshToken =
     input.refreshToken === undefined
       ? undefined
       : input.refreshToken?.trim() || null;
   let existingPrimaryGroupId: string | null | undefined;
   let existingMetadata: Record<string, unknown> | null | undefined;
+  let existingCredentialHash: string | undefined;
 
   if (input.id) {
     const [existingAccount] = await db
       .select({
+        credentialHash: imageBackendAccount.credentialHash,
         groupId: imageBackendAccount.groupId,
         metadata: imageBackendAccount.metadata,
       })
       .from(imageBackendAccount)
       .where(eq(imageBackendAccount.id, input.id))
       .limit(1);
-    existingPrimaryGroupId = existingAccount?.groupId ?? null;
+    if (!existingAccount) throw new Error("账号不存在");
+    existingPrimaryGroupId = existingAccount.groupId ?? null;
     existingMetadata = existingAccount?.metadata;
+    existingCredentialHash = existingAccount?.credentialHash;
     if (
       refreshToken !== undefined &&
       isSub2ApiBackedMetadata(existingAccount?.metadata)
@@ -4189,15 +4210,17 @@ export async function upsertImageBackendAccount(input: UpsertAccountInput) {
   }
 
   if (!accessToken && refreshToken) {
-    const refreshed = await refreshAccessTokenForBackend(
+    const result = await rotateAndStoreOAuth({
       refreshToken,
-      implementationMode
-    );
-    if (!refreshed?.accessToken) {
-      throw new Error("Refresh Token 无法换取 Access Token");
-    }
-    accessToken = refreshed.accessToken;
-    refreshToken = refreshed.refreshToken || refreshToken;
+      clientId: clientIdForAccountBackend(implementationMode),
+      targets: [
+        oauthTarget({ ...input, implementationMode }, existingCredentialHash),
+      ],
+      refresh: refreshOpenAIAccessToken,
+    });
+    const id = result.accounts[0]?.id;
+    if (!id) throw new OAuthRecoveryError("account-not-written");
+    return id;
   }
 
   const mergedInputMetadata = mergeChatGptAccountIdMetadata(
@@ -4412,11 +4435,7 @@ export async function bulkUpdateImageBackendAccounts(
       }
       if (targetMode) {
         const [account] = await db
-          .select({
-            implementationMode: imageBackendAccount.implementationMode,
-            refreshToken: imageBackendAccount.refreshToken,
-            metadata: imageBackendAccount.metadata,
-          })
+          .select()
           .from(imageBackendAccount)
           .where(eq(imageBackendAccount.id, accountId))
           .limit(1);
@@ -4430,22 +4449,26 @@ export async function bulkUpdateImageBackendAccounts(
           if (!account.refreshToken) {
             throw new Error("账号没有保存 RT，无法刷新目标接口模式的 AT");
           }
-          const refreshed = await refreshAccessTokenForBackend(
-            account.refreshToken,
-            targetMode
-          );
-          if (!refreshed?.accessToken) {
-            throw new Error("Refresh Token 无法换取目标模式 Access Token");
-          }
-          update.implementationMode = targetMode;
-          update.accessToken = refreshed.accessToken;
-          update.credentialHash = hashBackendCredential(refreshed.accessToken);
-          update.refreshToken = refreshed.refreshToken || account.refreshToken;
-          update.metadata = mergeChatGptAccountIdMetadata(
-            account.metadata,
-            refreshed.accessToken,
-            targetMode
-          );
+          await rotateAndStoreOAuth({
+            refreshToken: account.refreshToken,
+            clientId: clientIdForAccountBackend(targetMode),
+            targets: [
+              oauthTarget(
+                {
+                  ...account,
+                  ...baseUpdate,
+                  id: accountId,
+                  groupIds: bulkGroupIds ?? undefined,
+                  mergeGroupIds: bulkGroupIds === null,
+                  implementationMode: targetMode,
+                },
+                account.credentialHash
+              ),
+            ],
+            refresh: refreshOpenAIAccessToken,
+          });
+          updatedCount++;
+          continue;
         }
       }
       await db
@@ -4714,149 +4737,62 @@ export async function importImageBackendAccountsFromRefreshTokens(input: {
     );
   }
 
+  let pendingCount = 0;
+  let preflightFailed = false;
   for (const [index, originalRefreshToken] of refreshTokens.entries()) {
     const importIndex = startIndex + index + 1;
-    let currentRefreshToken = originalRefreshToken;
-    const currentTokenImportedIds: string[] = [];
-    if (input.useMobileRt) {
-      try {
-        const refreshed = await refreshOpenAIAccessToken(
-          currentRefreshToken,
-          OPENAI_MOBILE_RT_CLIENT_ID
-        );
-        if (!refreshed?.accessToken) {
-          for (const mode of modes) skipped[mode]++;
-          continue;
+    const clientId = input.useMobileRt
+      ? OPENAI_MOBILE_RT_CLIENT_ID
+      : clientIdForAccountBackend("responses");
+    try {
+      const targets: OAuthAccountTarget[] = modes.map((mode) => ({
+        groupId:
+          mode === "responses" ? input.responsesGroupId : input.webGroupId,
+        mergeGroupIds: true,
+        name: `${input.namePrefix?.trim() || (input.useMobileRt ? "Mobile RT 导入" : "手工导入")} ${importIndex} / ${mode === "responses" ? "Codex" : "Web"}`,
+        email: null,
+        implementationMode: mode,
+        model: input.model || null,
+        contentSafetyEnabled: input.contentSafetyEnabled,
+        isEnabled: true,
+        priority: input.priority,
+        concurrency: Math.max(1, Math.min(100, input.concurrency)),
+        status: "active",
+        metadata: {
+          source: "manual_refresh_token",
+          importBatchId,
+          importIndex,
+          syncedAt: new Date().toISOString(),
+          tokenSource: tokenSourceForRefreshClient(clientId, mode),
+          oauthClientId: clientId,
+          mobileRtImport: Boolean(input.useMobileRt),
+        },
+      }));
+      const result = await rotateAndStoreOAuth({
+        refreshToken: originalRefreshToken,
+        clientId,
+        targets,
+        refresh: refreshOpenAIAccessToken,
+      });
+      if (result.rotated) refreshTokenRotatedCount++;
+      for (const account of result.accounts) {
+        if (!importedIds.includes(account.id)) {
+          importedIds.push(account.id);
+          syncedByMode[account.mode]++;
         }
-        const nextRefreshToken = refreshed.refreshToken || currentRefreshToken;
-        if (nextRefreshToken !== currentRefreshToken) {
-          refreshTokenRotatedCount++;
-          currentRefreshToken = nextRefreshToken;
-        }
-
-        for (const mode of modes) {
-          const id = await upsertImageBackendAccount({
-            groupId:
-              mode === "responses" ? input.responsesGroupId : input.webGroupId,
-            mergeGroupIds: true,
-            name: `${
-              input.namePrefix?.trim() || "Mobile RT 导入"
-            } ${importIndex} / ${mode === "responses" ? "Codex" : "Web"}`,
-            email: null,
-            accessToken: refreshed.accessToken,
-            refreshToken: currentRefreshToken,
-            implementationMode: mode,
-            model: input.model || null,
-            contentSafetyEnabled: input.contentSafetyEnabled,
-            isEnabled: true,
-            priority: input.priority,
-            concurrency: Math.max(1, Math.min(100, input.concurrency)),
-            status: "active",
-            metadata: {
-              source: "manual_refresh_token",
-              importBatchId,
-              importIndex,
-              syncedAt: new Date().toISOString(),
-              tokenSource: tokenSourceForRefreshClient(
-                OPENAI_MOBILE_RT_CLIENT_ID,
-                mode
-              ),
-              oauthClientId: OPENAI_MOBILE_RT_CLIENT_ID,
-              mobileRtImport: true,
-              refreshTokenRotated: nextRefreshToken !== originalRefreshToken,
-            },
-          });
-          importedIds.push(id);
-          currentTokenImportedIds.push(id);
-          syncedByMode[mode]++;
-        }
-
-        if (currentTokenImportedIds.length) {
-          await db
-            .update(imageBackendAccount)
-            .set({
-              refreshToken: currentRefreshToken,
-              updatedAt: new Date(),
-            })
-            .where(inArray(imageBackendAccount.id, currentTokenImportedIds));
-        }
-      } catch (error) {
-        for (const mode of modes) failedByMode[mode]++;
-        logWarn("手工 Mobile RT 导入生图账号失败，已跳过", {
-          index: importIndex,
-          error: describeErrorForLog(error),
-        });
       }
-      continue;
-    }
-
-    for (const mode of modes) {
-      try {
-        const clientId = clientIdForAccountBackend(mode);
-        const refreshed = await refreshAccessTokenForBackend(
-          currentRefreshToken,
-          mode,
-          clientId
-        );
-        if (!refreshed?.accessToken) {
-          skipped[mode]++;
-          continue;
-        }
-        const nextRefreshToken = refreshed.refreshToken || currentRefreshToken;
-        if (nextRefreshToken !== currentRefreshToken) {
-          refreshTokenRotatedCount++;
-          currentRefreshToken = nextRefreshToken;
-        }
-
-        const id = await upsertImageBackendAccount({
-          groupId:
-            mode === "responses" ? input.responsesGroupId : input.webGroupId,
-          mergeGroupIds: true,
-          name: `${input.namePrefix?.trim() || "手工导入"} ${importIndex} / ${
-            mode === "responses" ? "Codex" : "Web"
-          }`,
-          email: null,
-          accessToken: refreshed.accessToken,
-          refreshToken: currentRefreshToken,
-          implementationMode: mode,
-          model: input.model || null,
-          contentSafetyEnabled: input.contentSafetyEnabled,
-          isEnabled: true,
-          priority: input.priority,
-          concurrency: Math.max(1, Math.min(100, input.concurrency)),
-          status: "active",
-          metadata: {
-            source: "manual_refresh_token",
-            importBatchId,
-            importIndex,
-            syncedAt: new Date().toISOString(),
-            tokenSource: tokenSourceForRefreshClient(clientId, mode),
-            oauthClientId: clientId,
-            mobileRtImport: false,
-            refreshTokenRotated: nextRefreshToken !== originalRefreshToken,
-          },
-        });
-        importedIds.push(id);
-        currentTokenImportedIds.push(id);
-        syncedByMode[mode]++;
-      } catch (error) {
-        failedByMode[mode]++;
-        logWarn("手工 RT 导入生图账号失败，已跳过", {
-          mode,
-          index: importIndex,
-          error: describeErrorForLog(error),
-        });
-      }
-    }
-
-    if (currentTokenImportedIds.length) {
-      await db
-        .update(imageBackendAccount)
-        .set({
-          refreshToken: currentRefreshToken,
-          updatedAt: new Date(),
-        })
-        .where(inArray(imageBackendAccount.id, currentTokenImportedIds));
+    } catch (error) {
+      for (const mode of modes) failedByMode[mode]++;
+      if (error instanceof OAuthRecoveryError && error.pending) pendingCount++;
+      if (error instanceof OAuthRecoveryError && !error.pending)
+        preflightFailed = true;
+      logWarn("手工RT导入未完成；请按恢复记录补写，不重复消耗旧RT", {
+        index: importIndex,
+        recoveryId:
+          error instanceof OAuthRecoveryError
+            ? error.recoveryId
+            : "unavailable",
+      });
     }
   }
 
@@ -4872,9 +4808,13 @@ export async function importImageBackendAccountsFromRefreshTokens(input: {
     failedByMode,
     refreshTokenRotatedCount,
     message:
-      parsedRefreshTokenCount > refreshTokens.length
-        ? `已导入前 ${refreshTokens.length} 个 RT，超出 ${MANUAL_TOKEN_IMPORT_LIMIT} 个的部分已跳过。`
-        : (null as string | null),
+      pendingCount > 0
+        ? `有 ${pendingCount} 项轮换结果已暂存或状态不确定；重试导入会优先补写，不会再次刷新旧RT。`
+        : preflightFailed
+          ? "持久化配置不可用，本次未执行RT刷新；请检查共享卷、权限和密钥版本。"
+          : parsedRefreshTokenCount > refreshTokens.length
+            ? `已导入前 ${refreshTokens.length} 个 RT，超出 ${MANUAL_TOKEN_IMPORT_LIMIT} 个的部分已跳过。`
+            : (null as string | null),
   };
 }
 
@@ -6257,6 +6197,7 @@ export async function listSub2ApiSourceGroups() {
 }
 
 type OpenAITokenRefreshResponse = {
+  id_token?: string;
   access_token?: string;
   refresh_token?: string;
   token_type?: string;
@@ -6267,7 +6208,11 @@ type OpenAITokenRefreshResponse = {
 async function refreshOpenAIAccessToken(
   refreshToken: string,
   clientId: string
-): Promise<{ accessToken: string; refreshToken: string | null } | null> {
+): Promise<{
+  accessToken: string;
+  refreshToken: string | null;
+  idToken?: string;
+} | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -6279,6 +6224,7 @@ async function refreshOpenAIAccessToken(
 
     const response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
       method: "POST",
+      redirect: "error",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -6291,18 +6237,28 @@ async function refreshOpenAIAccessToken(
       body: form.toString(),
     });
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(
-        `OpenAI token refresh failed: HTTP ${response.status}${text ? ` ${text.slice(0, 300)}` : ""}`
-      );
-    }
-    const payload = (await response.json()) as OpenAITokenRefreshResponse;
-    const accessToken = payload.access_token?.trim();
-    if (!accessToken) return null;
+    if (!response.ok)
+      throw new Error(`OpenAI token refresh failed: HTTP ${response.status}`);
+    const value: unknown = await response.json();
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return null;
+    const payload = value as Record<keyof OpenAITokenRefreshResponse, unknown>;
+    const accessToken =
+      typeof payload.access_token === "string"
+        ? payload.access_token.trim()
+        : "";
+    const nextRefreshToken =
+      typeof payload.refresh_token === "string"
+        ? payload.refresh_token.trim()
+        : "";
+    const idToken =
+      typeof payload.id_token === "string" ? payload.id_token.trim() : "";
+    // RT存在时先交给密文checkpoint；AT缺失/形状错误也不能丢弃唯一轮换结果。
+    if (!accessToken && !nextRefreshToken) return null;
     return {
       accessToken,
-      refreshToken: payload.refresh_token?.trim() || null,
+      refreshToken: nextRefreshToken || null,
+      ...(idToken ? { idToken } : {}),
     };
   } finally {
     clearTimeout(timeout);

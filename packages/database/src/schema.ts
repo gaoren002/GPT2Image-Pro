@@ -901,6 +901,8 @@ export const imageBackendAccount = pgTable(
     name: text("name").notNull(),
     email: text("email"),
     credentialHash: text("credential_hash").notNull(),
+    // 仅由可信 OAuth 轮换响应建立；不按每轮 AT 哈希识别账户。
+    oauthIdentityKey: text("oauth_identity_key"),
     accessToken: text("access_token").notNull(),
     refreshToken: text("refresh_token"),
     implementationMode: text("interface_mode").notNull().default("web"),
@@ -936,8 +938,30 @@ export const imageBackendAccount = pgTable(
       table.implementationMode,
       table.credentialHash
     ),
+    uniqueIndex("image_backend_account_oauth_identity_unique").on(
+      table.implementationMode,
+      table.oauthIdentityKey
+    ),
   ]
 );
+
+/** OAuth 轮换意图及加密结果；prepared/uncertain 不自动重发，远端与本库不能跨系统原子提交。 */
+export const imageBackendTokenRotation = pgTable("image_backend_token_rotation", {
+  id: text("id").primaryKey(),
+  owner: text("owner").notNull(),
+  journalIdentity: text("journal_identity"),
+  clientId: text("client_id").notNull(),
+  state: text("state").notNull().default("prepared"),
+  encryptedPlan: text("encrypted_plan"),
+  accounts: json("accounts").$type<{ id: string; mode: "web" | "responses" }[]>(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (table) => [
+  index("image_backend_token_rotation_pending_idx").on(table.createdAt)
+    .where(sql`${table.state} = 'ready'`),
+  index("image_backend_token_rotation_unfinished_idx").on(table.journalIdentity)
+    .where(sql`${table.state} IN ('prepared', 'uncertain', 'ready')`),
+]);
 
 export const imageBackendAccountGroup = pgTable(
   "image_backend_account_group",

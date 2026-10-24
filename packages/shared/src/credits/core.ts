@@ -205,7 +205,12 @@ function buildGenerationRefundPlan(
 /**
  * 消费积分参数
  */
+/** R05 同事务认领已接线；生命周期在缺失此能力时拒绝付费 capture。 */
+export const EDITABLE_TASK_ATOMIC_CAPTURE_VERSION = 1;
+
 export interface ConsumeCreditsParams {
+  /** 任务行锁在批次/Key/钱包前获得，prepared→running 与本次扣费一起提交。 */
+  editableTaskClaim?: import("../editable-task-contract").EditableTaskClaim;
   /** 用户 ID */
   userId: string;
   /** 消费数量 */
@@ -881,6 +886,11 @@ export async function consumeCredits(
     generationSettlement,
   } = params;
   const amount = normalizeCreditAmount(params.amount);
+  if (params.editableTaskClaim && params.generationSettlement) {
+    throw new Error(
+      "Editable task claim and generation settlement are mutually exclusive"
+    );
+  }
 
   if (amount <= 0) {
     throw new Error("消费数量必须大于 0");
@@ -897,6 +907,15 @@ export async function consumeCredits(
 
   try {
     return await db.transaction(async (tx) => {
+      if (params.editableTaskClaim) {
+        const { claimEditableTaskInTransaction } = await import(
+          "../editable-task-guard"
+        );
+        await claimEditableTaskInTransaction(tx, params.editableTaskClaim, {
+          ...params,
+          amount,
+        });
+      }
       if (generationSettlement) {
         await tx.setTransaction({ isolationLevel: "read committed" });
         // 同 R11 task 锁先于 generation/batch/key/wallet；COMMIT ACK 丢失也不能跨过失败围栏。
@@ -1174,6 +1193,7 @@ export async function consumeCredits(
         ? error.cause
         : error;
     if (
+      !params.editableTaskClaim &&
       sourceRef &&
       (isUniqueConstraintViolation(error) ||
         isUniqueConstraintViolation(databaseError))

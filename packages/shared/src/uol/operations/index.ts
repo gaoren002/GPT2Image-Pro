@@ -33,3 +33,5 @@ import "./moderation";
 import "./external-api";
 // 客服支持域
 import "./support";
+// 可编辑文件持久任务查询和到期恢复
+import "./editable-task";

@@ -1532,3 +1532,37 @@ export const generationRefundOutbox = pgTable(
     ),
   ]
 );
+
+/** 可编辑文件执行墓碑和结果引用；不保存 prompt、输入图、签名 URL、账号凭据或任意错误。 */
+export const editableFileTask = pgTable(
+  "editable_file_task",
+  {
+    id: text("id").primaryKey(),
+    publicId: text("public_id").notNull().unique(),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    // 保留原 Key 身份，删除 Key 也不能使任务变成无 Key 可读。
+    apiKeyId: text("api_key_id"),
+    kind: text("kind").notNull().$type<"ppt" | "psd">(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    claimToken: text("claim_token").notNull(),
+    state: text("state").notNull().$type<"prepared" | "running" | "completed" | "refund_pending" | "refunded" | "failed">(),
+    quotedCredits: numeric("quoted_credits", { precision: 12, scale: 2, mode: "number" }).notNull(),
+    resultReferences: json("result_references").$type<{
+      conversationId: string;
+      primary: { key: string; bucket: string };
+      zip: { key: string; bucket: string } | null;
+    }>(),
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("editable_file_task_due_idx").on(table.expiresAt, table.id)
+      .where(sql`${table.state} IN ('prepared', 'running', 'refund_pending')`),
+    check("editable_file_task_state_check", sql`${table.state} IN ('prepared', 'running', 'completed', 'refund_pending', 'refunded', 'failed')`),
+    check("editable_file_task_kind_check", sql`${table.kind} IN ('ppt', 'psd')`),
+    check("editable_file_task_amount_check", sql`${table.quotedCredits} >= 0`),
+    check("editable_file_task_fingerprint_check", sql`${table.requestFingerprint} ~ '^[a-f0-9]{64}$'`),
+    check("editable_file_task_result_check", sql`(${table.state} = 'completed') = (${table.resultReferences} IS NOT NULL)`),
+  ]
+);

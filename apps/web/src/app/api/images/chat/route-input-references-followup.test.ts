@@ -550,3 +550,37 @@ describe("R37 历史上传取消", () => {
     expect(mocks.run).not.toHaveBeenCalled();
   });
 });
+
+// 文件生成的领域错误须在站内与v1保持一致，附加上传确认/恢复入口不能把状态降成502。
+describe("R05 站内文件错误编码", () => {
+  it.each([
+    ["editable_file_task_already_consumed", 409],
+    ["editable_file_refund_pending", 503],
+    ["editable_file_delivery_pending", 503],
+    ["editable_file_cancelled", 499],
+  ] as const)("保留 %s 对应的 %s", async (code, status) => {
+    const failure = Object.assign(
+      new Error("File task could not finish"),
+      code === "editable_file_cancelled" ? { name: "AbortError" } : { code }
+    );
+    mocks.editable.mockRejectedValueOnce(failure);
+    const response = await editable(
+      new NextRequest("https://app.example.test/api/editable-file/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: "known-attempt",
+          kind: "ppt",
+          prompt: "outline",
+        }),
+      })
+    );
+    expect(response.status).toBe(status);
+    const payload = await response.json();
+    expect(payload.error).toMatchObject({ code, status });
+    expect(payload.taskId).toBe("known-attempt");
+    expect(payload.poll_url).toBe(
+      "/api/editable-file/tasks/known-attempt?kind=ppt"
+    );
+  });
+});

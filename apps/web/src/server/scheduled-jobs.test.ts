@@ -62,6 +62,11 @@ describe("runImageMaintenanceJob", () => {
     await runImageMaintenanceJob();
 
     expect(mocks.invokeOperation).toHaveBeenCalledWith(
+      "file.recoverTasks",
+      { limit: 100 },
+      { type: "cron", job: "images-maintenance" }
+    );
+    expect(mocks.invokeOperation).toHaveBeenCalledWith(
       "subscription.expireUpgradeReservations",
       { limit: 500 },
       { type: "cron", job: "images-maintenance" }

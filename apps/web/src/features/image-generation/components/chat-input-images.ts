@@ -58,6 +58,7 @@ export function buildEditableFileRequest(params: {
   images: Array<{ attachmentId: string; file: File }>;
 }) {
   const form = new FormData();
+  form.set("taskId", params.messageId);
   form.set("kind", params.kind);
   form.set("prompt", params.prompt);
   form.set("chatRound", "true");

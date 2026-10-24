@@ -34,6 +34,7 @@
     "./credits/format": "./src/credits/format.ts",
     "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts",
     "./credits/components": "./src/credits/components/index.ts",
+    "./editable-task-lifecycle": "./src/editable-task-lifecycle.ts",
     "./generation-maintenance": "./src/generation-maintenance.ts",
     "./generation-timeout": "./src/generation-timeout.ts",
     "./generation-settlement": "./src/generation-settlement.ts",

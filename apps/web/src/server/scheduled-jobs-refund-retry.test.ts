@@ -32,6 +32,11 @@ it("images-maintenance 保留升级预留释放并执行退款恢复", async () 
   const result = await runImageMaintenanceJob();
   expect(mocks.invoke.mock.calls).toEqual([
     [
+      "file.recoverTasks",
+      { limit: 100 },
+      { type: "cron", job: "images-maintenance" },
+    ],
+    [
       "subscription.recoverEpayFulfillments",
       { limit: 100 },
       { type: "cron", job: "images-maintenance" },
@@ -53,7 +58,8 @@ it("images-maintenance 保留升级预留释放并执行退款恢复", async () 
     ],
   ]);
   expect(mocks.expire.mock.invocationCallOrder[0]).toBeLessThan(
-    mocks.invoke.mock.invocationCallOrder[2] ?? 0
+    mocks.invoke.mock.invocationCallOrder[3] ?? 0
   );
+  expect(result.editableRecovery).toEqual({ settled: 1 });
   expect(result.refundRecovery).toEqual({ settled: 1 });
 });

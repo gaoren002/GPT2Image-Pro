@@ -23,6 +23,12 @@ import {
 } from "@/server/scheduled-jobs-response";
 
 export async function runImageMaintenanceJob() {
+  // R05 到期任务先封闭执行，再持久投递 R11；绝不重发上游。
+  const editableRecovery = await invokeOperation(
+    "file.recoverTasks",
+    { limit: 100 },
+    { type: "cron", job: "images-maintenance" }
+  );
   // 独立恢复已收款普通订单，lease 超时可重领；不依赖网关再次通知。
   const epayRecovery = await invokeOperation(
     "subscription.recoverEpayFulfillments",
@@ -81,6 +87,7 @@ export async function runImageMaintenanceJob() {
 
   return {
     success: true,
+    editableRecovery,
     refundRecovery,
     backendRetention,
     epayRecovery,

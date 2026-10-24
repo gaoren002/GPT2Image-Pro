@@ -5,7 +5,7 @@
  * 供任意传输(v1 API / 站内 chat(web) 路由 / MCP / 内置 agent)统一调用。归属 image-generation 域。
  *
  * 机制:model=gpt-5-5-thinking + 代码解释器产出 .pptx/.psd(+素材 zip),只调付费级 web 账号,
- * 按任务固定价扣费(幂等键 sourceRef=editable-file:{clientRequestId})。
+ * 按任务固定价扣费；用户、文件类型与 clientRequestId 共同派生财务幂等键。
  *
  * 使用方:operations/index.ts 副作用导入触发注册;execute 为 STUB,真实委托在
  * apps/web/src/server/uol-bindings.ts 用 bindExecute 接到 runEditableFileForUser。
@@ -17,6 +17,8 @@ import { defineOperation } from "../registry";
 
 const editableFileOutput = z.object({
   taskId: z.string(),
+  publicTaskId: z.string().optional(),
+  requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   conversationId: z.string(),
   primaryUrl: z.string(),
   zipUrl: z.string().nullable().optional(),

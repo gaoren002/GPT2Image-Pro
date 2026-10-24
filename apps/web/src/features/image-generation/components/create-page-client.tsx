@@ -3,6 +3,10 @@
 /** 创作页客户端：编排图像与聊天面板；聊天恢复及异步写入受已确认账号边界保护。 */
 
 import {
+  editableFileTaskQueryUrl,
+  readRecoverableEditableFileResponse,
+} from "./editable-file-recovery-client";
+import {
   GPT6_ASTRA_CHAT_MODEL,
   GPT55_CHAT_MODEL,
   GPT56_LUNA_CHAT_MODEL,
@@ -84,7 +88,6 @@ import {
   createChatSourceImageReceiver,
   getChatHistoryImageInput,
   buildEditableFileRequest,
-  readEditableFileResponse,
 } from "./chat-input-images";
 import { ChatPanel } from "./chat-panel";
 // 聊天叶子组件(高频状态订阅下沉):chatStream 流式气泡、chatMessages 去抖持久化。
@@ -6302,7 +6305,7 @@ function AccountCreatePageClient({
 
   // chat(web) 会话内生成可编辑文件(PPT/PSD):独立于图像 SSE 提交自成一条链路——自建会话消息、
   // 调 /api/editable-file/generate(session 鉴权、只选付费 web 账号)、把产物下载链接写回 assistant
-  // 消息。轮次费由后端 chatRound 补扣(复用套餐 chatRoundCredits)。单飞(isChatGenerating 阻并发)。
+  // 消息。固定价与轮次费在执行前原子扣费，失败全退。单飞(isChatGenerating 阻并发)。
   const submitEditableFileToChat = async (params: {
     kind: "ppt" | "psd";
     prompt: string;
@@ -6352,6 +6355,15 @@ function AccountCreatePageClient({
                     "Generating PPT (may take minutes)…",
                     "正在生成 PPT(可能需几分钟)…"
                   ),
+            files: [
+              {
+                label: copy(
+                  "Task status / retrieve result",
+                  "任务状态 / 重取文件"
+                ),
+                url: editableFileTaskQueryUrl(userMessageId, kind),
+              },
+            ],
             pending: true,
           },
         ],
@@ -6423,28 +6435,23 @@ function AccountCreatePageClient({
       const imagePreviews = attachmentPreviews.filter(
         (item) => item.kind === "image"
       );
-      const response = await fetch("/api/editable-file/generate", {
-        method: "POST",
-        body: buildEditableFileRequest({
-          kind,
-          prompt,
-          messageId: userMessageId,
-          images: imageFiles.map((item, index) => ({
-            file: item.file,
-            attachmentId: imagePreviews[index]?.id || "",
-          })),
-        }),
-      });
-      const data = await readEditableFileResponse(
-        response,
+      const data = await readRecoverableEditableFileResponse(
+        () =>
+          fetch("/api/editable-file/generate", {
+            method: "POST",
+            body: buildEditableFileRequest({
+              kind,
+              prompt,
+              messageId: userMessageId,
+              images: imageFiles.map((item, index) => ({
+                file: item.file,
+                attachmentId: imagePreviews[index]?.id || "",
+              })),
+            }),
+          }),
+        { taskId: userMessageId, kind },
         receiveSourceImages
       );
-      if (!response.ok || data.error) {
-        throw new Error(
-          (typeof data.error === "string" ? data.error : data.error?.message) ||
-            copy("Generation failed", "生成失败")
-        );
-      }
       const files: Array<{ label: string; url: string }> = [];
       if (data.result?.primary_url) {
         files.push({

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   run: vi.fn(),
+  prepare: vi.fn(),
   complete: vi.fn(),
   create: vi.fn(),
 }));
@@ -22,6 +23,7 @@ vi.mock("@/features/external-api/auth", () => ({
 }));
 vi.mock("@/features/image-generation/editable-file-operations", () => ({
   runEditableFileForUser: state.run,
+  prepareEditableFileExecution: state.prepare,
 }));
 vi.mock("@/features/external-api/async-image-tasks", () => ({
   AsyncImageTaskCapacityError: class extends Error {},
@@ -59,7 +61,51 @@ beforeEach(() => {
     zipUrl: null,
     creditsCharged: 25,
   });
+  state.prepare.mockImplementation(async (params: unknown) => ({
+    requestFingerprint: "a".repeat(64),
+    publicTaskId: "async-1",
+    execute: () => state.run(params),
+  }));
   state.create.mockReturnValue({ id: "async-1", status: "processing" });
+});
+
+describe("异步ACK丢失的恢复ID", () => {
+  it.each([
+    "running",
+    "refunded",
+  ])("服务核验过的%s重放409返回原ID和GET路径，不执行", async () => {
+    const pollId = "task_original_opaque_id_123456";
+    state.prepare.mockRejectedValue(
+      Object.assign(new Error("Task already exists"), {
+        code: "editable_file_task_already_consumed",
+        publicTaskId: pollId,
+      })
+    );
+    const response = await postExternalPptGenerations(request(true));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      poll_id: pollId,
+      poll_url: `/v1/editable-file-tasks/${pollId}`,
+    });
+    expect(state.run).not.toHaveBeenCalled();
+  });
+  it.each([
+    "different key",
+    "changed fingerprint",
+  ])("%s的冲突未附恢复ID，不泄露新旧opaque ID", async () => {
+    state.prepare.mockRejectedValue(
+      Object.assign(new Error("Task identity conflict"), {
+        code: "editable_file_task_already_consumed",
+      })
+    );
+    const response = await postExternalPptGenerations(request(true));
+    const body = await response.json();
+    expect(response.status).toBe(409);
+    expect(body).not.toHaveProperty("poll_id");
+    expect(body).not.toHaveProperty("id");
+    expect(body).not.toHaveProperty("poll_url");
+    expect(state.run).not.toHaveBeenCalled();
+  });
 });
 
 describe.each([
@@ -94,6 +140,7 @@ describe.each([
   });
 
   it.each([
+    "editable_file_delivery_pending",
     "editable_file_refund_pending",
     "editable_file_quota_release_pending",
   ])("%s 暴露稳定的待处理 code", async (code) => {

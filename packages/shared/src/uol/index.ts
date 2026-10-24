@@ -12,3 +12,6 @@ export * from "./access";
 export * from "./invoke";
 // webhook 传输按根入口加载已注册的纯契约；业务服务仍延迟读取。
 export { creemWebhook } from "./operations/creem-webhook";
+
+// 可编辑任务纯契约；查询与恢复的数据库服务延迟加载。
+export { getEditableFileTask, recoverEditableFileTasks } from "./operations/editable-task";

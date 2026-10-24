@@ -101,7 +101,7 @@ bindExecute(
 /**
  * file.generatePpt / file.generatePsd - 可编辑文件(PPT/PSD)生成
  * 源: apps/web/src/features/image-generation/editable-file-operations.ts
- * clientRequestId 作计费幂等键(sourceRef=editable-file:{clientRequestId});PSD 强校验非空图。
+ * 用户、文件类型与 clientRequestId 共同派生幂等键；PSD 强校验非空图。
  */
 function bindEditableFile(name: "file.generatePpt" | "file.generatePsd") {
   const kind = name === "file.generatePsd" ? "psd" : "ppt";
@@ -114,11 +114,13 @@ function bindEditableFile(name: "file.generatePpt" | "file.generatePsd") {
         prompt: string;
         base64Images?: string[];
       },
-      _principal: Principal,
-      _ctx: OperationContext,
+      principal: Principal,
+      ctx: OperationContext,
     ) => {
+      ctx.assertOwnership("editable task", input.userId);
       const result = await runEditableFileForUser({
         userId: input.userId,
+        apiKeyId: principal.type === "apiKey" ? principal.apiKeyId : undefined,
         kind,
         prompt: input.prompt,
         base64Images: input.base64Images ?? [],
@@ -130,6 +132,8 @@ function bindEditableFile(name: "file.generatePpt" | "file.generatePsd") {
         primaryUrl: result.primaryUrl,
         zipUrl: result.zipUrl,
         creditsUsed: result.creditsCharged,
+        requestFingerprint: result.requestFingerprint,
+        publicTaskId: result.publicTaskId,
       };
     },
   );

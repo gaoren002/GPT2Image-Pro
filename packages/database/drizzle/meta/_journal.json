@@ -414,6 +414,13 @@
       "when": 1793401200000,
       "tag": "0059_generation_browse_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1793574000000,
+      "tag": "0061_editable_file_task",
+      "breakpoints": true
     }
   ]
 }

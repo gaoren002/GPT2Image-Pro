@@ -8,7 +8,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EditableFileResult } from "./chatgpt-web";
 import type { ApiConfig } from "./types";
 
+type FixtureTask = {
+  id: string;
+  publicId: string;
+  userId: string;
+  apiKeyId: string | undefined;
+  kind: string;
+  fingerprint: string;
+  amount: number;
+  state: string;
+  refs?: import("../../../../../packages/shared/src/editable-task-contract").EditableResultReferences;
+};
+
 const state = vi.hoisted(() => ({
+  tasks: new Map<string, FixtureTask>(),
   price: 25,
   wallet: 1000,
   keyLimit: 1000,
@@ -80,6 +93,151 @@ vi.mock("./chatgpt-web", () => ({
   generateFileWithChatGptWeb: state.generate,
 }));
 
+// 本文件只验证 Web 编排边界；真实任务SQL/事务/账本交错在 shared lifecycle 专项执行。
+vi.mock("@repo/shared/editable-task-lifecycle", async () => {
+  const contract = await import(
+    "../../../../../packages/shared/src/editable-task-contract"
+  );
+  type Identity =
+    import("../../../../../packages/shared/src/editable-task-contract").EditableTaskIdentity;
+  type References =
+    import("../../../../../packages/shared/src/editable-task-contract").EditableResultReferences;
+  const deliver = async (task: FixtureTask) => {
+    if (!task.refs) throw new contract.EditableFileTaskAlreadyConsumedError();
+    const primaryUrl = state.sign(
+      task.refs.primary.key,
+      task.refs.primary.bucket
+    ) as string | null;
+    const zipUrl = task.refs.zip
+      ? (state.sign(task.refs.zip.key, task.refs.zip.bucket) as string | null)
+      : null;
+    if (!primaryUrl || (task.refs.zip && !zipUrl))
+      throw new contract.EditableTaskPendingError(
+        "editable_file_delivery_pending"
+      );
+    return {
+      conversationId: task.refs.conversationId,
+      primaryUrl,
+      zipUrl,
+      creditsCharged: task.amount,
+    };
+  };
+  return {
+    ...contract,
+    editableExecutionSignal: async (_claim: unknown, signal?: AbortSignal) =>
+      signal ?? new AbortController().signal,
+    assertEditableTaskExecutable: async () => 30 * 60_000,
+    getEditableTask: async (identity: Identity) => {
+      const task = state.tasks.get(
+        contract.editableTaskId(identity.userId, identity.kind, identity.taskId)
+      );
+      if (
+        !task ||
+        task.apiKeyId !== identity.apiKeyId ||
+        task.fingerprint !== identity.requestFingerprint
+      )
+        return null;
+      return {
+        publicId: task.publicId,
+        status: task.state,
+        result: task.state === "completed" ? await deliver(task) : null,
+      };
+    },
+    prepareEditableTask: async (identity: Identity, amount: number) => {
+      const id = contract.editableTaskId(
+        identity.userId,
+        identity.kind,
+        identity.taskId
+      );
+      const existing = state.tasks.get(id);
+      if (existing) throw new contract.EditableFileTaskAlreadyConsumedError();
+      const legacy = [
+        identity.userId,
+        "consumption",
+        `editable-file:${identity.taskId}`,
+      ];
+      state.legacyReads.push(legacy);
+      if (state.legacyEntries.has(JSON.stringify(legacy)))
+        throw new contract.EditableFileTaskAlreadyConsumedError();
+      const task: FixtureTask = {
+        id,
+        publicId: "task_fixture",
+        userId: identity.userId,
+        apiKeyId: identity.apiKeyId,
+        kind: identity.kind,
+        fingerprint: identity.requestFingerprint,
+        amount,
+        state: "prepared",
+      };
+      state.tasks.set(id, task);
+      return { task, claim: { taskId: id, claimToken: "owner" } };
+    },
+    captureEditableTask: async (task: FixtureTask) => {
+      if (task.state !== "prepared")
+        throw new contract.EditableFileTaskAlreadyConsumedError();
+      if (task.amount > 0) {
+        const result = await state.consume({
+          userId: task.userId,
+          amount: task.amount,
+          sourceRef: task.id,
+          ...(task.apiKeyId ? { externalApiKeyId: task.apiKeyId } : {}),
+          serviceName: "editable",
+          metadata: { kind: task.kind, generationId: task.id },
+        });
+        if (result.alreadyConsumed)
+          throw new contract.EditableFileTaskAlreadyConsumedError();
+      }
+      task.state = "running";
+    },
+    completeEditableTask: async (
+      claim: { taskId: string },
+      refs: References
+    ) => {
+      const task = state.tasks.get(claim.taskId);
+      if (task?.state !== "running")
+        throw new contract.EditableFileTaskAlreadyConsumedError();
+      task.state = "completed";
+      task.refs = refs;
+      return task;
+    },
+    failEditableTask: async (id: string) => {
+      const task = state.tasks.get(id);
+      if (!task) throw new contract.EditableFileTaskAlreadyConsumedError();
+      if (task.state === "completed") return task;
+      if (task.state === "prepared") {
+        task.state = "failed";
+        return task;
+      }
+      task.state = "refund_pending";
+      try {
+        if (task.amount > 0) {
+          const result = await state.refund({
+            userId: task.userId,
+            generationId: id,
+            amount: task.amount,
+            targetCredits: 0,
+            sourceRef: `${id}:lifecycle-refund`,
+          });
+          if (result.remainingDebited !== 0) throw new Error("Unsettled debit");
+        }
+        task.state = "refunded";
+        return task;
+      } catch {
+        throw new contract.EditableTaskPendingError(
+          "editable_file_refund_pending"
+        );
+      }
+    },
+    deliverEditableTask: deliver,
+  };
+});
+vi.mock("@repo/shared/subscription/services/user-plan", () => ({
+  getUserPlan: async () => ({ plan: "ultra" }),
+}));
+vi.mock("@repo/shared/subscription/services/plan-capabilities", () => ({
+  getPlanBillingConfig: async () => ({ chatRoundCredits: 3 }),
+}));
+
 import { runEditableFileForUser } from "./editable-file-operations";
 
 /** 提供真实编排需要的最小付费 Web 账号，租约标识用于核对释放次数。 */
@@ -132,6 +290,7 @@ function request(
 
 beforeEach(() => {
   vi.resetAllMocks();
+  state.tasks.clear();
   state.price = 25;
   state.wallet = 1000;
   state.keyLimit = 1000;
@@ -261,7 +420,6 @@ describe("可编辑文件的固定费与任务认领", () => {
     expect(debit.sourceRef).toBeTruthy();
     expect(debit.metadata).toMatchObject({
       kind: "ppt",
-      taskId: "task-1",
     });
     expect(debit.metadata?.generationId).toEqual(expect.any(String));
   });
@@ -322,11 +480,9 @@ describe("可编辑文件的固定费与任务认领", () => {
   });
 
   it.each([
-    0,
     -1,
     Number.NaN,
     Number.POSITIVE_INFINITY,
-    0.5,
   ])("无有效固定费 %s 时失败关闭，不绕过认领", async (price) => {
     state.price = price;
     await expect(runEditableFileForUser(request())).rejects.toThrow();
@@ -521,12 +677,20 @@ describe("本地失败与池健康隔离", () => {
     expect(state.keyUsed).toBe(0);
   });
 
-  it("本地签名失败不返回空下载地址、不重做上游", async () => {
+  it("完成态签名失败保留付费结果，恢复签名可重取", async () => {
     state.sign.mockReturnValue(null);
-    await expect(runEditableFileForUser(request())).rejects.toThrow();
-    expect(state.generate.mock.calls.length).toBeLessThanOrEqual(1);
-    expect(state.wallet).toBe(1000);
-    expect(state.keyUsed).toBe(0);
+    await expect(runEditableFileForUser(request())).rejects.toMatchObject({
+      code: "editable_file_delivery_pending",
+    });
+    expect(state.generate).toHaveBeenCalledTimes(1);
+    expect(state.wallet).toBe(975);
+    expect(state.keyUsed).toBe(25);
+    expect(state.refund).not.toHaveBeenCalled();
+    state.sign.mockReturnValue("fresh-result");
+    expect((await runEditableFileForUser(request())).primaryUrl).toBe(
+      "fresh-result"
+    );
+    expect(state.generate).toHaveBeenCalledTimes(1);
   });
 
   it("本地池读取失败不误记账号失败，扣费经专用退款归还", async () => {

@@ -1,14 +1,8 @@
-/**
- * v1 可编辑文件异步任务查询 handler:GET /v1/editable-file-tasks/{task_id}。
- *
- * async:true 创建的可编辑文件(PPT/PSD)任务按 task_<uuid> 存进程内内存(30 分钟 TTL、
- * 多实例不共享、重启即清)。本 handler 鉴权后按 taskId 取回任务,显式校验归属(userId +
- * apiKeyId)防越权(IDOR),只返回 object=editable_file_task 的任务(与图像/视频任务查询隔离)。
- * 可编辑文件无 DB generation 行,故不作持久回退——任务过期/跨实例即 404。
- */
+/** 外接可编辑任务轮询：仅需既有opaque task ID；持久记录优先，旧内存任务兼容兜底。 */
 import { withApiLogging } from "@repo/shared/api-logger";
+import type { getEditableTaskByPublicId } from "@repo/shared/editable-task-lifecycle";
+import { invokeOperation } from "@repo/shared/uol";
 import type { NextRequest } from "next/server";
-
 import {
   getAsyncImageTask,
   toAsyncImageTaskResponse,
@@ -22,31 +16,75 @@ export const getExternalEditableFileTask = withApiLogging(
     { params }: { params: Promise<{ taskId: string }> }
   ) => {
     const auth = await authenticateExternalApiRequest(request);
-    if (!auth) {
+    if (!auth)
       return openAIImageError(
         "Invalid or missing API key",
         401,
         "invalid_api_key"
       );
-    }
-
     const { taskId } = await params;
-    if (!taskId || taskId.length > 128) {
+    if (!taskId || taskId.length > 200)
       return openAIImageError("Invalid task_id.");
-    }
-
-    const task = getAsyncImageTask(taskId);
+    const task = await invokeOperation<
+      Awaited<ReturnType<typeof getEditableTaskByPublicId>>
+    >(
+      "file.getTask",
+      { taskId },
+      {
+        type: "apiKey",
+        userId: auth.userId,
+        apiKeyId: auth.apiKeyId,
+        plan: auth.plan,
+        relayOnly: auth.relayOnly,
+      }
+    );
+    if (task)
+      return Response.json(
+        {
+          object: "editable_file_task",
+          id: task.publicId,
+          taskId: task.publicId,
+          kind: task.kind,
+          status:
+            task.status === "prepared" || task.status === "running"
+              ? "processing"
+              : task.status === "completed"
+                ? "completed"
+                : "failed",
+          lifecycle_status: task.status,
+          request_fingerprint: task.requestFingerprint,
+          credits_charged: task.creditsCharged,
+          result: task.result
+            ? {
+                conversation_id: task.result.conversationId,
+                primary_url: task.result.primaryUrl,
+                zip_url: task.result.zipUrl,
+              }
+            : null,
+          ...(["failed", "refunded", "refund_pending"].includes(task.status)
+            ? {
+                error: {
+                  code:
+                    task.status === "refund_pending"
+                      ? "editable_file_refund_pending"
+                      : "editable_file_failed",
+                  message:
+                    "This task will not execute again. Start a new task for a new attempt.",
+                },
+              }
+            : {}),
+        },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    const legacy = getAsyncImageTask(taskId);
     if (
-      task &&
-      task.object === "editable_file_task" &&
-      task.userId === auth.userId &&
-      (!task.apiKeyId || task.apiKeyId === auth.apiKeyId)
-    ) {
-      return Response.json(toAsyncImageTaskResponse(task), {
+      legacy?.object === "editable_file_task" &&
+      legacy.userId === auth.userId &&
+      legacy.apiKeyId === auth.apiKeyId
+    )
+      return Response.json(toAsyncImageTaskResponse(legacy), {
         headers: { "Cache-Control": "no-store" },
       });
-    }
-
-    return openAIImageError("Editable file task not found or expired.", 404);
+    return openAIImageError("Editable file task not found.", 404);
   }
 );

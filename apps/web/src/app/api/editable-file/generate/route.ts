@@ -12,10 +12,8 @@
 import { randomUUID } from "node:crypto";
 import { withApiLogging } from "@repo/shared/api-logger";
 import { auth } from "@repo/shared/auth";
-import { consumeCredits } from "@repo/shared/credits/core";
 import {
   canUsePlanCapability,
-  getPlanBillingConfig,
   getPlanLimits,
 } from "@repo/shared/subscription/services/plan-capabilities";
 import { getPlanUploadLimits } from "@repo/shared/subscription/services/upload-limits";
@@ -23,10 +21,8 @@ import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import { type NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import {
-  createJsonKeepAliveResponse,
-  toOpenAIErrorPayload,
-} from "@/features/external-api/images";
+import { createJsonKeepAliveResponse } from "@/features/external-api/images";
+import { toEditableFileErrorPayload } from "@/features/external-api/editable-file-errors";
 import { runEditableFileForUser } from "@/features/image-generation/editable-file-operations";
 
 import {
@@ -38,6 +34,7 @@ import {
 } from "../../images/chat/input-image-references";
 
 const generateSchema = z.object({
+  taskId: z.string().trim().min(1).max(200).optional(),
   kind: z.enum(["ppt", "psd"]),
   prompt: z.string().min(1, "prompt is required").max(8000),
   // 输入图 data URL 数组(PSD 必须非空;PPT 可空)。
@@ -71,6 +68,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       const messageId = form.get("source_image_message_id");
       const rawIds = form.get("source_image_attachment_ids");
       body = {
+        taskId: form.get("taskId") || undefined,
         kind: form.get("kind"),
         prompt: form.get("prompt"),
         chatRound: form.get("chatRound") === "true",
@@ -152,7 +150,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
     );
   }
 
-  const taskId = randomUUID();
+  const taskId = parsed.data.taskId || randomUUID();
   const runOnce = async () => {
     const result = await runEditableFileForUser({
       userId,
@@ -160,26 +158,9 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       prompt,
       base64Images,
       taskId,
+      chatRound,
+      signal: request.signal,
     });
-    let creditsCharged = result.creditsCharged;
-    // chat(web) 会话内生成:成功后再按套餐轮次价扣一次(复用 chat 轮次费,幂等键防重复扣)。
-    // 只在生成成功后扣,失败不扣;与生成扣费是两笔独立幂等消费。
-    if (chatRound) {
-      const billing = await getPlanBillingConfig(plan.plan);
-      const roundFee = Math.max(0, Math.trunc(billing.chatRoundCredits || 0));
-      if (roundFee > 0) {
-        await consumeCredits({
-          userId,
-          amount: roundFee,
-          serviceName: "editable_file_chat_round",
-          description:
-            kind === "psd" ? "chat(web) PSD 轮次" : "chat(web) PPT 轮次",
-          sourceRef: `editable-file-round:${taskId}`,
-          metadata: { kind, taskId, chatRound: true },
-        });
-        creditsCharged += roundFee;
-      }
-    }
     return {
       object: "editable_file_task",
       taskId,
@@ -190,7 +171,8 @@ export const POST = withApiLogging(async (request: NextRequest) => {
         primary_url: result.primaryUrl,
         zip_url: result.zipUrl,
       },
-      credits_charged: creditsCharged,
+      credits_charged: result.creditsCharged,
+      request_fingerprint: result.requestFingerprint,
     };
   };
   // 上传确认独立于生成结果；生成失败也回传，客户端先保存输入再展示错误。
@@ -199,9 +181,9 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       return { ...(await runOnce()), sourceImageReferences };
     } catch (error) {
       return {
-        ...toOpenAIErrorPayload(
-          error instanceof Error ? error.message : "Image request failed"
-        ),
+        ...toEditableFileErrorPayload(error, kind.toUpperCase()),
+        taskId,
+        poll_url: `/api/editable-file/tasks/${encodeURIComponent(taskId)}?kind=${kind}`,
         sourceImageReferences,
       };
     }

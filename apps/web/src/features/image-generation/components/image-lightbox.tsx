@@ -303,7 +303,13 @@ export function ImageLightbox({
   const { execute: executeDelete, isExecuting: isDeleting } = useAction(
     deleteGenerationAction,
     {
-      onSuccess: () => {
+      onSuccess: ({ data }) => {
+        // 动作以返回值报告业务拒绝（记录不存在、任务仍在处理中），不能当作已删除。
+        if (data?.error) {
+          toast.error(copy("Failed to delete image", "删除图片失败"));
+          setConfirmDelete(false);
+          return;
+        }
         toast.success(copy("Image deleted", "图片已删除"));
         onDelete?.(generation.id);
         setConfirmDelete(false);
@@ -676,7 +682,8 @@ export function ImageLightbox({
                   )}
                 </>
               )}
-              {onDelete && (
+              {/* 处理中的任务由执行进程与超时清扫结算，服务端拒绝删除，这里不提供入口。 */}
+              {onDelete && generation.status !== "pending" && (
                 <Button
                   variant={confirmDelete ? "destructive" : "ghost"}
                   className="w-full justify-center"

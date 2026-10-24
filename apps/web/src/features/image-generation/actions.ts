@@ -64,6 +64,11 @@ export const deleteGenerationAction = protectedAction
     if (!gen[0] || gen[0].userId !== ctx.userId) {
       return { error: "Not found" };
     }
+    // pending 任务可能仍在执行，或首笔扣费结果未知、等待超时清扫按行内额度退款；
+    // 删除会让清扫看不到它，已入账的扣费从此无人退回。终态后才允许删除。
+    if (gen[0].status === "pending") {
+      return { error: "Generation is still in progress" };
+    }
 
     const storageReferences = collectGenerationImageStorageReferences({
       storageKey: gen[0].storageKey,
@@ -107,7 +112,12 @@ export const deleteGenerationAction = protectedAction
 
     await db
       .delete(generation)
-      .where(eq(generation.id, parsedInput.generationId));
+      .where(
+        and(
+          eq(generation.id, parsedInput.generationId),
+          ne(generation.status, "pending")
+        )
+      );
     return { success: true };
   });
 
@@ -136,16 +146,19 @@ export const batchDeleteGenerationAction = protectedAction
         )
       );
 
-    if (gens.length === 0) {
-      return { success: true, deletedCount: 0 };
+    // pending 任务保留给执行进程与超时清扫结算，见单条删除的说明。
+    const deletable = gens.filter((g) => g.status !== "pending");
+    const skippedPendingCount = gens.length - deletable.length;
+    if (deletable.length === 0) {
+      return { success: true, deletedCount: 0, skippedPendingCount };
     }
 
-    const idsToDelete = gens.map((g) => g.id);
+    const idsToDelete = deletable.map((g) => g.id);
 
     // 收集待删记录的全部存储引用
     const allRefs: GenerationImageStorageReference[] = [];
     const allRefKeys = new Set<string>();
-    for (const g of gens) {
+    for (const g of deletable) {
       const refs = collectGenerationImageStorageReferences({
         storageKey: g.storageKey,
         storageBucket: g.storageBucket,
@@ -177,9 +190,7 @@ export const batchDeleteGenerationAction = protectedAction
           )
         );
       for (const other of otherGenerations) {
-        for (const ref of collectGenerationImageStorageReferences(
-          other
-        )) {
+        for (const ref of collectGenerationImageStorageReferences(other)) {
           uniqueRefKeys.delete(referenceKey(ref));
         }
       }
@@ -201,7 +212,16 @@ export const batchDeleteGenerationAction = protectedAction
     // 批量删除 DB 记录
     await db
       .delete(generation)
-      .where(inArray(generation.id, idsToDelete));
+      .where(
+        and(
+          inArray(generation.id, idsToDelete),
+          ne(generation.status, "pending")
+        )
+      );
 
-    return { success: true, deletedCount: idsToDelete.length };
+    return {
+      success: true,
+      deletedCount: idsToDelete.length,
+      skippedPendingCount,
+    };
   });

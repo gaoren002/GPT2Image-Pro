@@ -13,6 +13,7 @@ import {
   evaluateVerificationAttempt,
   getResendCooldownRemainingSeconds,
 } from "./registration-verification-core";
+import { logWarn } from "../logger";
 import { RegistrationVerificationCodeEmail } from "../mail/templates/primary-action-email";
 import { sendEmail } from "../mail/utils";
 import { isSelfUseModeEnabled } from "./self-use-mode";
@@ -22,6 +23,10 @@ import { getRuntimeRegistrationEmailPolicy } from "./registration-email-policy";
 
 const PURPOSE = "registration-email-code";
 const CODE_LENGTH = 6;
+
+/** 发信失败时对外返回的通用文案；具体原因只记录在服务端日志。 */
+export const REGISTRATION_CODE_SEND_FAILED_MESSAGE =
+  "Failed to send verification code, please try again later";
 
 function getIdentifier(email: string) {
   return `${PURPOSE}:${normalizeEmail(email)}`;
@@ -107,7 +112,13 @@ export async function sendRegistrationVerificationCode(email: string) {
     await db
       .delete(verification)
       .where(eq(verification.identifier, identifier));
-    throw new Error(result.error || "Failed to send verification code");
+    // 发码接口对匿名调用方开放，邮件服务原始错误可能含内网地址、端口或服务商细节，
+    // 只写日志，对外统一返回通用文案。
+    logWarn("注册验证码邮件发送失败", {
+      provider: result.provider,
+      error: result.error,
+    });
+    throw new Error(REGISTRATION_CODE_SEND_FAILED_MESSAGE);
   }
 
   return { simulated: result.simulated ?? false };

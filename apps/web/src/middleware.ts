@@ -16,7 +16,7 @@ const intlMiddleware = createIntlMiddleware(routing);
 const VERSIONED_ASSET_PREFIX_PATTERN =
   /^\/(?:gpt2-assets|next-assets)-[^/]+(\/_next\/.*)$/;
 
-function setPrivateNoStore(response: NextResponse) {
+function setPrivateNoStore<T extends Response>(response: T): T {
   response.headers.set(
     "Cache-Control",
     "private, no-store, no-cache, max-age=0, must-revalidate"
@@ -57,21 +57,20 @@ export async function middleware(request: NextRequest) {
       return NextResponse.next();
     }
 
-    if (
-      pathname.startsWith("/api/auth/") ||
-      pathname === "/api/session/current"
-    ) {
-      return setPrivateNoStore(NextResponse.next());
-    }
+    const isPrivateApiPath =
+      pathname.startsWith("/api/auth/") || pathname === "/api/session/current";
 
-    // 白名单模式：只对匹配的敏感路由做限流
+    // 白名单模式：只对匹配的敏感路由做限流。认证类路由（登录、注册、发码、
+    // 重置密码）也在此限流，因此必须先于下方认证路径的 no-store 放行执行；
+    // 此前放行分支在前，认证限流从未生效（2026-10-24 审查确认）。
     const rateLimitType = getApiRateLimitType(pathname);
     if (rateLimitType) {
       const ip = getClientIp(request);
       const result = await checkRateLimit(ip, rateLimitType);
 
       if (!result.success) {
-        return createRateLimitResponse(result);
+        const limited = createRateLimitResponse(result);
+        return isPrivateApiPath ? setPrivateNoStore(limited) : limited;
       }
 
       const response = NextResponse.next();
@@ -79,10 +78,11 @@ export async function middleware(request: NextRequest) {
       for (const [key, value] of Object.entries(headers)) {
         response.headers.set(key, value);
       }
-      return pathname.startsWith("/api/auth/") ||
-        pathname === "/api/session/current"
-        ? setPrivateNoStore(response)
-        : response;
+      return isPrivateApiPath ? setPrivateNoStore(response) : response;
+    }
+
+    if (isPrivateApiPath) {
+      return setPrivateNoStore(NextResponse.next());
     }
 
     // 未匹配的 API 路由直接放行，不触发 Redis

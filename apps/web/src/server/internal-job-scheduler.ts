@@ -9,6 +9,7 @@ import {
 import { eq } from "drizzle-orm";
 
 import { runGenerationDailyStatsJob } from "./generation-daily-stats";
+import { startInstanceCacheMaintenance } from "./instance-cache-maintenance";
 import {
   runCreditsExpireJob,
   runImageMaintenanceJob,
@@ -272,6 +273,9 @@ async function scheduleJob(job: InternalJob) {
 export async function startInternalJobScheduler() {
   if (process.env.NODE_ENV === "test") return;
   if (process.env.NEXT_PHASE === "phase-production-build") return;
+
+  // 本地磁盘的回收必须在每个实例执行，不能由全站单例锁或 DB 调度开关抑制。
+  startInstanceCacheMaintenance();
 
   const state = getSchedulerState();
   if (state.started) return;

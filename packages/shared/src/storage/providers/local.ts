@@ -1,10 +1,11 @@
-import type { StorageProvider } from "../types";
 import { getRuntimeSettingString } from "../../system-settings";
 import { buildSignedStorageImageUrl } from "../signed-url";
+import { invalidateThumbnailCache } from "../thumbnail-cache";
+import type { StorageProvider } from "../types";
 import {
   assertObjectReadBudget,
-  readObjectBody,
   type ObjectReadOptions,
+  readObjectBody,
 } from "./object-budget";
 
 /**
@@ -114,9 +115,19 @@ export const localProvider: StorageProvider = {
     const fs = await getFs();
     try {
       await fs.unlink(filePath);
-    } catch {
-      // File may not exist
+    } catch (error) {
+      // 缺失也应清除派生缓存；权限或 I/O 故障不能伪装原图已删除。
+      if (
+        !(
+          error &&
+          typeof error === "object" &&
+          "code" in error &&
+          error.code === "ENOENT"
+        )
+      )
+        throw error;
     }
+    await invalidateThumbnailCache(bucket, key);
   },
 
   async getObject(

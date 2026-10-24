@@ -90,7 +90,8 @@
     "./mcp/user-key-actions": "./src/mcp/user-key-actions.ts",
     "./support/constants": "./src/support/constants.ts",
     "./announcements/constants": "./src/announcements/constants.ts",
-    "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts"
+    "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts",
+    "./storage/thumbnail-cache": "./src/storage/thumbnail-cache.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

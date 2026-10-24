@@ -181,6 +181,9 @@ vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingBoolean: state.enabled,
   getRuntimeSettingNumber: state.interval,
 }));
+vi.mock("./instance-cache-maintenance", () => ({
+  startInstanceCacheMaintenance: vi.fn(),
+}));
 vi.mock("./generation-daily-stats", () => ({
   runGenerationDailyStatsJob: state.dailyStats,
 }));

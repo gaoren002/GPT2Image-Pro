@@ -6,8 +6,18 @@
  * 会话回退鉴权按存储键前缀判定（不查库），以及缓存策略与授权方式绑定。
  */
 
+import { rm } from "node:fs/promises";
 import type { NextRequest } from "next/server";
+import sharp from "sharp";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// 测试缓存只落在 fiber/tools/run 的项目内 TMPDIR，不使用服务端默认目录。
+const testCache = vi.hoisted(() => {
+  const original = process.env.THUMB_CACHE_DIR;
+  const directory = `${process.env.TMPDIR}/storage-route-${process.pid}`;
+  process.env.THUMB_CACHE_DIR = directory;
+  return { original, directory };
+});
 
 // 模拟存储 provider，使该路由测试保持 DB-free（不触达 @repo/database / runtime settings）。
 const getObject = vi.fn();
@@ -37,9 +47,7 @@ function makeParams(bucket: string, key: string[]) {
  * 构造带 nextUrl.searchParams 的 NextRequest 模拟对象。
  * avatars 桶不需要签名；generations 桶需要 sig+exp。
  */
-function makeRequest(
-  searchParams?: Record<string, string>
-): NextRequest {
+function makeRequest(searchParams?: Record<string, string>): NextRequest {
   const params = new URLSearchParams(searchParams);
   return {
     nextUrl: {
@@ -71,7 +79,10 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
     getCurrentUser.mockResolvedValue(null);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    await rm(testCache.directory, { recursive: true, force: true });
+    if (testCache.original === undefined) delete process.env.THUMB_CACHE_DIR;
+    else process.env.THUMB_CACHE_DIR = testCache.original;
     if (originalSecret === undefined) {
       delete process.env.BETTER_AUTH_SECRET;
     } else {
@@ -327,13 +338,87 @@ describe("GET /api/storage/[bucket]/[...key]", () => {
 
   it("路径宽度段用错误 key 的签名仍 403(宽度段不能绕过鉴权)", async () => {
     // 用 "其它/key.png" 的签名去访问 "user-123/abc.png",即便带 w128 段也应 403。
-    const { sig, exp } = generateSignedImageParams("generations", "other/key.png");
+    const { sig, exp } = generateSignedImageParams(
+      "generations",
+      "other/key.png"
+    );
     const res = await GET(
       makeRequest({ sig, exp: String(exp) }),
       makeParams("generations", ["w128", "user-123", "abc.png"])
     );
     expect(res.status).toBe(403);
     expect(getObject).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "path",
+    "query",
+  ])("%s 任意合法宽度归一到规范尺寸，共用派生缓存", async (mode) => {
+    const key = `user-123/normalize-${mode}.png`;
+    const original = await sharp({
+      create: { width: 800, height: 400, channels: 3, background: "red" },
+    })
+      .png()
+      .toBuffer();
+    getObject.mockResolvedValue(original);
+    const { sig, exp } = generateSignedImageParams("generations", key);
+    const request = makeRequest({
+      sig,
+      exp: String(exp),
+      ...(mode === "query" ? { w: "129" } : {}),
+    });
+    const segments = [...(mode === "path" ? ["w129"] : []), ...key.split("/")];
+    const response = await GET(request, makeParams("generations", segments));
+    expect(response.status).toBe(200);
+    expect(
+      (await sharp(Buffer.from(await response.arrayBuffer())).metadata()).width
+    ).toBe(256);
+    const again = await GET(
+      makeRequest({ sig, exp: String(exp), w: "256" }),
+      makeParams("generations", key.split("/"))
+    );
+    expect(again.status).toBe(200);
+    expect(getObject).toHaveBeenCalledTimes(1);
+  });
+
+  it("预热后的缩略图仍先鉴权，Cookie 与短签名缓存头保持 R16/R34 约束", async () => {
+    const key = "user-123/warm-authorization.png";
+    getObject.mockResolvedValue(
+      await sharp({
+        create: { width: 200, height: 100, channels: 3, background: "blue" },
+      })
+        .png()
+        .toBuffer()
+    );
+    const segments = ["w128", ...key.split("/")];
+    const signed = generateSignedImageParams("generations", key, 30);
+    const warm = await GET(
+      makeRequest({ sig: signed.sig, exp: String(signed.exp) }),
+      makeParams("generations", segments)
+    );
+    expect(warm.status).toBe(200);
+    getCurrentUser.mockResolvedValue({ id: "intruder" });
+    const denied = await GET(
+      makeRequest(),
+      makeParams("generations", segments)
+    );
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("Cache-Control")).toBe("no-store");
+    getCurrentUser.mockResolvedValue({ id: "user-123" });
+    const owner = await GET(makeRequest(), makeParams("generations", segments));
+    for (const header of [
+      "Cache-Control",
+      "CDN-Cache-Control",
+      "Cloudflare-CDN-Cache-Control",
+    ]) {
+      expect(owner.headers.get(header)).toBe("private, no-store");
+      const cacheControl = warm.headers.get(header) ?? "";
+      expect(cacheControl).not.toContain("immutable");
+      expect(
+        Number(/max-age=(\d+)/.exec(cacheControl)?.[1])
+      ).toBeLessThanOrEqual(30);
+    }
+    expect(getObject).toHaveBeenCalledTimes(1);
   });
 
   it("基础设施故障映射为 502 并记日志（不静默吞成 404）", async () => {

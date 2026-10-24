@@ -11,18 +11,18 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
+import { getRuntimeSettingString } from "../../system-settings";
+import { invalidateThumbnailCache } from "../thumbnail-cache";
 import {
   DEFAULT_SIGNED_URL_EXPIRES,
   DEFAULT_UPLOAD_URL_EXPIRES,
   type S3StorageConfig,
   type StorageProvider,
 } from "../types";
-import { getRuntimeSettingString } from "../../system-settings";
 import {
   assertObjectReadBudget,
-  readObjectBody,
   type ObjectReadOptions,
+  readObjectBody,
 } from "./object-budget";
 
 // ============================================
@@ -176,6 +176,7 @@ export const s3Provider: StorageProvider = {
     });
 
     await client.send(command);
+    await invalidateThumbnailCache(bucket, key);
   },
 
   /**

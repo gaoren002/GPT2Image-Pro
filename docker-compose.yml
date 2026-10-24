@@ -46,7 +46,7 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL 必填:须为站点公网访问地址(如 https://your-domain),否则登录失败}
       LOCAL_STORAGE_PATH: /app/storage
       CHATGPT_WEB_PROXY_URL: http://chatgpt-web-proxy:3021
-      CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:-}
+      CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:?set a random non-placeholder secret of at least 32 bytes}
       SUPER_RESOLUTION_WORKER_URL: http://super-resolution-worker:3310
       SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
       GPT2IMAGE_BOOTSTRAP_CREDENTIALS_PATH: /app/.gpt2image/super-admin-credentials.txt
@@ -98,10 +98,13 @@ services:
     restart: unless-stopped
     environment:
       CHATGPT_WEB_PROXY_BIND: :3021
-      CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:-}
+      CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:?set a random non-placeholder secret of at least 32 bytes}
       CHATGPT_WEB_PROXY_PROFILE: ${CHATGPT_WEB_PROXY_PROFILE:-chrome_146}
       CHATGPT_WEB_PROXY_TIMEOUT_SECONDS: ${CHATGPT_WEB_PROXY_TIMEOUT_SECONDS:-300}
       CHATGPT_WEB_PROXY_MAX_BODY_MB: ${CHATGPT_WEB_PROXY_MAX_BODY_MB:-64}
+      CHATGPT_WEB_PROXY_MAX_CONCURRENT: ${CHATGPT_WEB_PROXY_MAX_CONCURRENT:-2}
+      CHATGPT_WEB_PROXY_MAX_INFLIGHT_BODY_MB: ${CHATGPT_WEB_PROXY_MAX_INFLIGHT_BODY_MB:-64}
+      CHATGPT_WEB_PROXY_MAX_SESSIONS: ${CHATGPT_WEB_PROXY_MAX_SESSIONS:-64}
       # 上游出口：POOL 为逗号分隔的多上游（按优先级，进程内健康探测+自动切换，
       # 见 services/chatgpt-web-proxy/upstream.go）；未配 POOL 时回落到单上游变量。
       CHATGPT_WEB_UPSTREAM_POOL: ${CHATGPT_WEB_UPSTREAM_POOL:-}

@@ -127,12 +127,12 @@ func (p *upstreamPool) Status() []map[string]any {
 	out := make([]map[string]any, 0, len(p.entries))
 	for _, e := range p.entries {
 		out = append(out, map[string]any{
-			"url":        maskProxyCredential(e.URL),
-			"active":     e.URL == activeURL,
-			"healthy":    e.healthy,
-			"failures":   e.failures,
-			"lastError":  e.lastError,
-			"lastCheck":  e.lastCheck.UTC().Format(time.RFC3339),
+			"url":       maskProxyCredential(e.URL),
+			"active":    e.URL == activeURL,
+			"healthy":   e.healthy,
+			"failures":  e.failures,
+			"lastError": e.lastError,
+			"lastCheck": e.lastCheck.UTC().Format(time.RFC3339),
 		})
 	}
 	return out
@@ -307,9 +307,7 @@ func probeViaProfile(profileName, proxyURL, probeURL string, timeoutSecs int) er
 		tls_client.WithClientProfile(profile),
 		tls_client.WithNotFollowRedirects(),
 		tls_client.WithDisableHttp3(),
-	}
-	if proxyURL != "" {
-		options = append(options, tls_client.WithProxyUrl(proxyURL))
+		tls_client.WithProxyDialerFactory(proxyDialerFactory(proxyURL)),
 	}
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {

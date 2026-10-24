@@ -1,5 +1,7 @@
 package main
 
+// ChatGPT Web TLS 指纹转发入口，复用有界会话 client 并支持可取消的 clearance 后备。
+
 import (
 	"bytes"
 	"context"
@@ -19,7 +21,6 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	stdhttp "net/http"
 )
 
@@ -33,16 +34,16 @@ const (
 )
 
 type requestPayload struct {
-	SessionKey string            `json:"sessionKey"`
-	Method     string            `json:"method"`
-	URLPath    string            `json:"urlPath"`
-	TargetPath string            `json:"targetPath"`
+	SessionKey string `json:"sessionKey"`
+	Method     string `json:"method"`
+	URLPath    string `json:"urlPath"`
+	TargetPath string `json:"targetPath"`
 	// TargetURL 为可选的绝对 URL（https）。设置后走主机白名单转发（用于 Adobe Firefly
 	// 等多主机直连）；未设置时回落到 URLPath + chatgpt.com（保持原 ChatGPT Web 行为）。
-	TargetURL  string            `json:"targetUrl"`
-	Headers    map[string]string `json:"headers"`
-	HeaderOrder []string         `json:"headerOrder"`
-	BodyBase64 string            `json:"bodyBase64"`
+	TargetURL   string            `json:"targetUrl"`
+	Headers     map[string]string `json:"headers"`
+	HeaderOrder []string          `json:"headerOrder"`
+	BodyBase64  string            `json:"bodyBase64"`
 }
 
 type responsePayload struct {
@@ -54,13 +55,19 @@ type responsePayload struct {
 type sessionClient struct {
 	client   tls_client.HttpClient
 	lastUsed time.Time
+	inflight int
 }
 
 type server struct {
-	secret       string
-	profileName  string
-	timeoutSecs  int
-	maxBodyBytes int64
+	secret               string
+	profileName          string
+	timeoutSecs          int
+	maxBodyBytes         int64
+	maxConcurrent        int
+	maxInflightBodyBytes int64
+	maxSessions          int
+	activeRequests       int
+	inflightBodyBytes    int64
 
 	// 上游出口池（多上游 + 健康探测 + 故障转移）。空池 = 直连（与旧版单上游
 	// 未配置时行为一致）。见 upstream.go。
@@ -80,6 +87,10 @@ type server struct {
 }
 
 func main() {
+	secret := strings.TrimSpace(os.Getenv("CHATGPT_WEB_PROXY_SECRET"))
+	if err := validateSecret(secret); err != nil {
+		log.Fatal(err)
+	}
 	// 上游池：优先读逗号分隔的 POOL；未配置时回落到旧单上游变量（等价单项池），
 	// 两者都为空则直连。标准部署经 docker-compose/.env 注入，见 .env.docker.example。
 	upstreamURLs := parseUpstreamList(os.Getenv("CHATGPT_WEB_UPSTREAM_POOL"))
@@ -96,36 +107,31 @@ func main() {
 	)
 
 	s := &server{
-		secret:                 strings.TrimSpace(os.Getenv("CHATGPT_WEB_PROXY_SECRET")),
+		secret:                 secret,
 		profileName:            envString("CHATGPT_WEB_PROXY_PROFILE", defaultProfile),
-		timeoutSecs:            envInt("CHATGPT_WEB_PROXY_TIMEOUT_SECONDS", defaultTimeoutSecs),
-		maxBodyBytes:           int64(envInt("CHATGPT_WEB_PROXY_MAX_BODY_MB", defaultMaxBodyMB)) * 1024 * 1024,
 		pool:                   pool,
 		clearanceProxyOverride: strings.TrimSpace(os.Getenv("CHATGPT_WEB_CLEARANCE_PROXY_URL")),
 		// 默认启用(设 CHATGPT_WEB_CLEARANCE_MODE=off 关);出口默认跟随上游池、FlareSolverr 同网络。
 		clearanceEnabled: !strings.EqualFold(envString("CHATGPT_WEB_CLEARANCE_MODE", "flaresolverr"), "off"),
 		flareSolverrURL:  envString("FLARESOLVERR_URL", "http://flaresolverr:8191"),
-		clearanceTimeout: envInt("CHATGPT_WEB_CLEARANCE_TIMEOUT_SECONDS", 60),
-		clearanceRefresh: envInt("CHATGPT_WEB_CLEARANCE_REFRESH_SECONDS", 3600),
 		clients:          map[string]*sessionClient{},
+	}
+	if err := s.configureLimits(); err != nil {
+		log.Fatal(err)
 	}
 	// 切换上游后：会话 client 与 cf_clearance 都绑定旧出口 IP，必须整体作废重建。
 	pool.onSwitch = func(oldURL, newURL string) {
-		s.resetSessionClients()
 		resetClearance()
+		s.resetSessionClients()
 	}
 
 	go s.cleanupLoop()
 	go pool.Run(context.Background())
 
-	mux := stdhttp.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/request", s.handleRequest)
-
 	bind := envString("CHATGPT_WEB_PROXY_BIND", defaultBind)
 	log.Printf("chatgpt-web-proxy listening on %s profile=%s upstreams=%d active=%s",
 		bind, s.profileName, len(upstreamURLs), maskProxyCredential(pool.ActiveURL()))
-	if err := stdhttp.ListenAndServe(bind, mux); err != nil {
+	if err := s.httpServer(bind).ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -151,6 +157,10 @@ func envInt(key string, fallback int) int {
 }
 
 func (s *server) handleHealth(w stdhttp.ResponseWriter, _ *stdhttp.Request) {
+	if validateSecret(s.secret) != nil {
+		writeError(w, stdhttp.StatusServiceUnavailable, "proxy is not configured")
+		return
+	}
 	writeJSON(w, stdhttp.StatusOK, map[string]any{
 		"status":    "ok",
 		"upstreams": s.pool.Status(),
@@ -162,27 +172,66 @@ func (s *server) handleRequest(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		writeError(w, stdhttp.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if s.secret != "" && r.Header.Get("X-Proxy-Secret") != s.secret {
+	if validateSecret(s.secret) != nil {
+		writeError(w, stdhttp.StatusServiceUnavailable, "proxy is not configured")
+		return
+	}
+	if !matchesSecret(s.secret, r.Header.Get("X-Proxy-Secret")) {
 		writeError(w, stdhttp.StatusUnauthorized, "unauthorized")
 		return
 	}
 
+	if !s.acquireRequest() {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, stdhttp.StatusTooManyRequests, "proxy capacity exhausted")
+		return
+	}
+	defer func() {
+		// net/http 在 handler 返回后才做最后 flush，必须在归还预算之前同步清空。
+		if err := stdhttp.NewResponseController(w).Flush(); err != nil && r.Context().Err() == nil {
+			log.Printf("flush proxy response failed")
+		}
+		s.releaseRequest()
+	}()
 	defer r.Body.Close()
 	var payload requestPayload
-	if err := json.NewDecoder(stdhttp.MaxBytesReader(w, r.Body, 8*1024*1024)).Decode(&payload); err != nil {
+	decoder := json.NewDecoder(stdhttp.MaxBytesReader(w, r.Body, maxRequestBytes))
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(w, stdhttp.StatusBadRequest, "invalid request payload")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, stdhttp.StatusBadRequest, "invalid request payload")
 		return
 	}
 
-	result, err := s.forward(payload)
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.timeoutSecs)*time.Second)
+	defer cancel()
+	result, err := s.forward(ctx, payload)
 	if err != nil {
-		writeError(w, stdhttp.StatusBadGateway, err.Error())
+		if r.Context().Err() != nil {
+			return
+		}
+		if requestDeadlineExceeded(ctx, err) {
+			writeError(w, stdhttp.StatusGatewayTimeout, "proxy request timed out")
+		} else {
+			writeError(w, stdhttp.StatusBadGateway, "proxy upstream request failed")
+		}
 		return
 	}
-	writeJSON(w, stdhttp.StatusOK, result)
+	writeResponse(w, result)
 }
 
-func (s *server) forward(payload requestPayload) (*responsePayload, error) {
+func (s *server) forward(ctx context.Context, payload requestPayload) (*responsePayload, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(payload.SessionKey) > 256 {
+		return nil, errors.New("sessionKey is too long")
+	}
+	if payload.Headers == nil {
+		payload.Headers = map[string]string{}
+	}
 	var targetURL string
 	var err error
 	if strings.TrimSpace(payload.TargetURL) != "" {
@@ -209,13 +258,14 @@ func (s *server) forward(payload requestPayload) (*responsePayload, error) {
 		return nil, err
 	}
 
+	defer s.releaseClient(payload.SessionKey, client)
 	// 单次构建+发送:每次按当前 payload.Headers/Order 重建请求(重试时头已被 clearance 覆盖）。
 	send := func() (int, fhttp.Header, []byte, error) {
 		var reader io.Reader
 		if len(body) > 0 {
 			reader = bytes.NewReader(body)
 		}
-		req, reqErr := fhttp.NewRequest(method, targetURL, reader)
+		req, reqErr := fhttp.NewRequestWithContext(ctx, method, targetURL, reader)
 		if reqErr != nil {
 			return 0, nil, nil, reqErr
 		}
@@ -233,7 +283,8 @@ func (s *server) forward(payload requestPayload) (*responsePayload, error) {
 	}
 
 	// cf_clearance 后备仅对 chatgpt.com 请求生效。已有活跃 clearance 则先注入(cookie 进 jar + 覆盖 UA)。
-	isChatGPT := strings.HasPrefix(targetURL, chatGPTOrigin)
+	target, _ := url.Parse(targetURL)
+	isChatGPT := target.Hostname() == "chatgpt.com"
 	if s.clearanceEnabled && isChatGPT {
 		if ua, cookies := getActiveClearance(); ua != "" {
 			applyClearanceHeaders(payload.Headers, ua)
@@ -248,7 +299,7 @@ func (s *server) forward(payload requestPayload) (*responsePayload, error) {
 
 	// 命中 Cloudflare 挑战 → 经 FlareSolverr(同一 WARP 出口)刷 clearance → 注入 → 重试一次。
 	if s.clearanceEnabled && isChatGPT && isCloudflareChallenge(status, respBody) {
-		if ua, cookies := s.refreshClearance(); ua != "" {
+		if ua, cookies := s.refreshClearance(ctx); ua != "" {
 			applyClearanceHeaders(payload.Headers, ua)
 			s.injectCookies(client, cookies)
 			status, respHeaders, respBody, err = send()
@@ -257,26 +308,31 @@ func (s *server) forward(payload requestPayload) (*responsePayload, error) {
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return &responsePayload{
 		Status:     status,
 		Headers:    mapHeaders(respHeaders),
-		BodyBase64: base64.StdEncoding.EncodeToString(respBody),
+		BodyBase64: encodeResponseBody(respBody),
 	}, nil
 }
 
 // ===== cf_clearance 后备(仿 basketikun/chatgpt2api:WARP + FlareSolverr 刷 cf_clearance) =====
 //
 // cf_clearance 绑「出口 IP + UA」不绑 ChatGPT 账号,而全池共用同一 WARP 上游 → 一份 clearance 全池通用,
-// 故用全局单例缓存 + 单飞(clrRefreshMu 串行 + 双检):一次挑战波只真解一次,不至于把 FlareSolverr
+// 故用全局单例缓存 + 单飞(可取消 gate 串行 + 双检):一次挑战波只真解一次,不至于把 FlareSolverr
 // 的无头 Chrome 打爆。默认启用但完全惰性:无挑战时不触发、不注入,对现网零影响。
 
 var (
-	clrMu        sync.Mutex
-	clrUA        string
-	clrCookies   []*fhttp.Cookie
-	clrExpires   time.Time
-	clrRefreshMu sync.Mutex
+	clrMu          sync.Mutex
+	clrUA          string
+	clrCookies     []*fhttp.Cookie
+	clrExpires     time.Time
+	clrRefreshGate = make(chan struct{}, 1)
+	clrRetryAfter  time.Time
+	clrGeneration  uint64
 )
 
 var chromeMajorRe = regexp.MustCompile(`Chrome/(\d+)`)
@@ -363,20 +419,41 @@ func (s *server) injectCookies(client tls_client.HttpClient, cookies []*fhttp.Co
 	client.SetCookies(u, cookies)
 }
 
-// refreshClearance 经 FlareSolverr(走 WARP 出口)解 chatgpt.com 挑战,拿 cf_clearance+UA,写全局缓存。
-// clrRefreshMu 串行 + 双检 → 一次挑战波只真解一次;失败返回空并记日志(不阻断,退回原响应)。
-func (s *server) refreshClearance() (string, []*fhttp.Cookie) {
-	clrRefreshMu.Lock()
-	defer clrRefreshMu.Unlock()
-	if ua, cookies := getActiveClearance(); ua != "" {
+// refreshClearance 以请求 context 控制单飞等待、FlareSolverr 网络与响应读取。
+// 失败短暂负缓存，避免一波挑战逐个执行浏览器请求；响应最多 1MiB，禁止重定向。
+func (s *server) refreshClearance(ctx context.Context) (string, []*fhttp.Cookie) {
+	select {
+	case clrRefreshGate <- struct{}{}:
+		defer func() { <-clrRefreshGate }()
+	case <-ctx.Done():
+		return "", nil
+	}
+	if ctx.Err() != nil {
+		return "", nil
+	}
+	clrMu.Lock()
+	generation := clrGeneration
+	if clrUA != "" && time.Now().Before(clrExpires) {
+		ua, cookies := clrUA, clrCookies
+		clrMu.Unlock()
 		return ua, cookies
 	}
-	reqBody := map[string]any{
-		"cmd":        "request.get",
-		"url":        chatGPTOrigin + "/",
-		"maxTimeout": s.clearanceTimeout * 1000,
+	backoff := time.Now().Before(clrRetryAfter)
+	clrMu.Unlock()
+	if backoff {
+		return "", nil
 	}
-	// clearance 代理：显式配置优先，否则跟随上游池当前生效出口（cf_clearance 绑出口 IP）。
+	success := false
+	defer func() {
+		if !success && ctx.Err() == nil {
+			clrMu.Lock()
+			if generation == clrGeneration {
+				clrRetryAfter = time.Now().Add(5 * time.Second)
+			}
+			clrMu.Unlock()
+		}
+	}()
+	reqBody := map[string]any{"cmd": "request.get", "url": chatGPTOrigin + "/", "maxTimeout": s.clearanceTimeout * 1000}
 	clearanceProxy := s.clearanceProxyOverride
 	if clearanceProxy == "" {
 		clearanceProxy = s.pool.ActiveURL()
@@ -385,16 +462,25 @@ func (s *server) refreshClearance() (string, []*fhttp.Cookie) {
 		reqBody["proxy"] = map[string]string{"url": clearanceProxy}
 	}
 	buf, _ := json.Marshal(reqBody)
-	httpClient := &stdhttp.Client{Timeout: time.Duration(s.clearanceTimeout+20) * time.Second}
-	resp, err := httpClient.Post(strings.TrimRight(s.flareSolverrURL, "/")+"/v1", "application/json", bytes.NewReader(buf))
+	req, err := stdhttp.NewRequestWithContext(ctx, stdhttp.MethodPost,
+		strings.TrimRight(s.flareSolverrURL, "/")+"/v1", bytes.NewReader(buf))
 	if err != nil {
-		log.Printf("cf_clearance refresh error: %v", err)
+		log.Printf("cf_clearance refresh: invalid solver URL")
+		return "", nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	httpClient := &stdhttp.Client{Timeout: time.Duration(s.clearanceTimeout+20) * time.Second,
+		CheckRedirect: func(_ *stdhttp.Request, _ []*stdhttp.Request) error { return stdhttp.ErrUseLastResponse }}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("cf_clearance refresh transport failed")
 		return "", nil
 	}
 	defer resp.Body.Close()
+	raw, err := readLimited(resp.Body, clearanceMaxBodyBytes)
 	var fr flareResp
-	if decErr := json.NewDecoder(resp.Body).Decode(&fr); decErr != nil || fr.Status != "ok" {
-		log.Printf("cf_clearance refresh failed status=%s msg=%s", fr.Status, fr.Message)
+	if err != nil || resp.StatusCode != stdhttp.StatusOK || json.Unmarshal(raw, &fr) != nil || fr.Status != "ok" {
+		log.Printf("cf_clearance refresh: invalid or oversized response")
 		return "", nil
 	}
 	var cookies []*fhttp.Cookie
@@ -413,11 +499,15 @@ func (s *server) refreshClearance() (string, []*fhttp.Cookie) {
 		return "", nil
 	}
 	clrMu.Lock()
-	clrUA = ua
-	clrCookies = cookies
+	defer clrMu.Unlock()
+	// generation 在读取出口之前截取；切换后迟到的正缓存、负缓存与待注入结果一并丢弃。
+	if generation != clrGeneration || ctx.Err() != nil {
+		return "", nil
+	}
+	clrUA, clrCookies = ua, cookies
 	clrExpires = time.Now().Add(time.Duration(s.clearanceRefresh) * time.Second)
-	clrMu.Unlock()
-	log.Printf("cf_clearance refreshed ua=%s cookies=%d", ua, len(cookies))
+	clrRetryAfter = time.Time{}
+	success = true
 	return ua, cookies
 }
 
@@ -429,44 +519,10 @@ func buildTargetURL(urlPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid urlPath: %w", err)
 	}
-	if parsed.Scheme != "https" || parsed.Host != "chatgpt.com" {
+	if parsed.Scheme != "https" || parsed.Host != "chatgpt.com" || parsed.Fragment != "" {
 		return "", errors.New("only https://chatgpt.com requests are allowed")
 	}
 	return parsed.String(), nil
-}
-
-// buildAllowlistedURL 校验绝对 URL：必须 https，且主机在白名单内（chatgpt.com 或 Adobe
-// 系域名）。用于 Adobe Firefly 直连的多主机转发（firefly-3p / IMS / platform-cs 等）。
-func buildAllowlistedURL(rawURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return "", fmt.Errorf("invalid targetUrl: %w", err)
-	}
-	if parsed.Scheme != "https" {
-		return "", errors.New("only https targetUrl is allowed")
-	}
-	if !isAllowlistedHost(parsed.Hostname()) {
-		return "", fmt.Errorf("host not allowlisted: %s", parsed.Hostname())
-	}
-	return parsed.String(), nil
-}
-
-func isAllowlistedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return false
-	}
-	if host == "chatgpt.com" {
-		return true
-	}
-	// Adobe 系域名（含子域）。
-	suffixes := []string{".adobe.io", ".adobe.com", ".adobelogin.com"}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(host, suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeBody(value string) ([]byte, error) {
@@ -506,7 +562,7 @@ func applyHeaders(req *fhttp.Request, headers map[string]string, order []string)
 
 func shouldSkipHeader(key string) bool {
 	switch strings.ToLower(key) {
-	case "host", "content-length", "connection":
+	case "host", "content-length", "connection", "x-proxy-secret", "proxy-authorization":
 		return true
 	default:
 		return false
@@ -514,33 +570,48 @@ func shouldSkipHeader(key string) bool {
 }
 
 func (s *server) getClient(sessionKey string) (tls_client.HttpClient, error) {
-	key := strings.TrimSpace(sessionKey)
-	if key == "" {
-		key = "default"
-	}
+	key := normalizeSessionKey(sessionKey)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var evicted tls_client.HttpClient
+	defer func() {
+		s.mu.Unlock()
+		if evicted != nil {
+			evicted.CloseIdleConnections()
+		}
+	}()
 
 	if existing := s.clients[key]; existing != nil {
+		existing.client = controlClient(existing.client)
 		existing.lastUsed = time.Now()
+		existing.inflight++
 		return existing.client, nil
 	}
 
-	profile, ok := profiles.MappedTLSClients[s.profileName]
-	if !ok {
-		return nil, fmt.Errorf("unknown tls-client profile: %s", s.profileName)
+	if s.clients == nil {
+		s.clients = map[string]*sessionClient{}
 	}
-
-	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(s.timeoutSecs),
-		tls_client.WithClientProfile(profile),
-		tls_client.WithCookieJar(tls_client.NewCookieJar()),
-		tls_client.WithDisableHttp3(),
-		tls_client.WithCatchPanics(),
+	limit := s.maxSessions
+	if limit == 0 {
+		limit = defaultMaxSessions
 	}
-	if upstream := s.pool.ActiveURL(); upstream != "" {
-		options = append(options, tls_client.WithProxyUrl(upstream))
+	if len(s.clients) >= limit {
+		oldestKey := ""
+		var oldest time.Time
+		for key, entry := range s.clients {
+			if entry.inflight == 0 && (oldest.IsZero() || entry.lastUsed.Before(oldest)) {
+				oldestKey, oldest = key, entry.lastUsed
+			}
+		}
+		if oldest.IsZero() {
+			return nil, errors.New("proxy session capacity exhausted")
+		}
+		evicted = s.clients[oldestKey].client
+		delete(s.clients, oldestKey)
+	}
+	options, err := s.clientOptions()
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
@@ -548,7 +619,8 @@ func (s *server) getClient(sessionKey string) (tls_client.HttpClient, error) {
 		return nil, err
 	}
 
-	s.clients[key] = &sessionClient{client: client, lastUsed: time.Now()}
+	client = controlClient(client)
+	s.clients[key] = &sessionClient{client: client, lastUsed: time.Now(), inflight: 1}
 	return client, nil
 }
 
@@ -556,14 +628,18 @@ func (s *server) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
+		var expired []tls_client.HttpClient
 		s.mu.Lock()
 		for key, item := range s.clients {
-			if time.Since(item.lastUsed) > defaultIdleTTL {
-				item.client.CloseIdleConnections()
+			if item.inflight == 0 && time.Since(item.lastUsed) > defaultIdleTTL {
+				expired = append(expired, item.client)
 				delete(s.clients, key)
 			}
 		}
 		s.mu.Unlock()
+		for _, client := range expired {
+			client.CloseIdleConnections()
+		}
 	}
 }
 
@@ -571,10 +647,14 @@ func (s *server) cleanupLoop() {
 // 建连时的代理出口，旧 client 会继续走已中毒的旧出口。下次请求按需重建。
 func (s *server) resetSessionClients() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var stale []tls_client.HttpClient
 	for key, item := range s.clients {
-		item.client.CloseIdleConnections()
+		stale = append(stale, item.client)
 		delete(s.clients, key)
+	}
+	s.mu.Unlock()
+	for _, client := range stale {
+		client.CloseIdleConnections()
 	}
 }
 
@@ -583,9 +663,11 @@ func (s *server) resetSessionClients() {
 func resetClearance() {
 	clrMu.Lock()
 	defer clrMu.Unlock()
+	clrGeneration++
 	clrUA = ""
 	clrCookies = nil
 	clrExpires = time.Time{}
+	clrRetryAfter = time.Time{}
 }
 
 func readLimited(reader io.Reader, limit int64) ([]byte, error) {
@@ -613,9 +695,16 @@ func mapHeaders(headers fhttp.Header) map[string][]string {
 }
 
 func writeJSON(w stdhttp.ResponseWriter, status int, payload any) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		raw = []byte(`{"error":"response encoding failed"}`)
+		status = 500
+	}
+	raw = append(raw, '\n')
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
+	if _, err := w.Write(raw); err != nil {
 		log.Printf("write json failed: %v", err)
 	}
 }

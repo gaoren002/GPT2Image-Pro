@@ -9,12 +9,13 @@
  * 关键依赖：super-resolution.ts（独立 Real-ESRGAN Worker 客户端）、sharp。
  *
  * 设计：校准模式由纯函数 getResolutionCalibrationMode 决定，便于 DB-free 单测；实际
- *   放大/缩放有副作用（CPU + IO），由 calibrateImageResolution 编排。失败时回退原图。
+ *   放大/缩放有副作用（CPU + IO），由 calibrateImageResolution 编排。非取消失败回退原图。
  */
-import sharp, { type Sharp } from "sharp";
 
 import { logWarn } from "@repo/shared/logger";
+import sharp, { type Sharp } from "sharp";
 
+import type { InferenceOptions } from "./inference-worker";
 import { parseImageSize } from "./resolution";
 import { superResolve } from "./super-resolution";
 
@@ -58,20 +59,24 @@ export function getResolutionCalibrationMode(
  *
  * @param image 上游返回的图片字节
  * @param requestedSize 请求尺寸字符串（如 "1024x1024"，"auto" 等无法解析时不校准）
+ * @param options 可选 caller signal，贯通 SR 请求；本地轻量缩放在异步边界检查取消
  * @returns { buffer, applied }：applied=true 表示做了超分或轻量缩放；失败/不需要时返回原图
  *
  * 边界：明显偏小时先超分，轻微不足时直接缩放；最终都按比例（fit:inside，不裁剪）
- *   对齐目标边界并保留原图格式。任何异常都回退原图，不阻断出图管线。
+ *   对齐目标边界并保留原图格式。非取消异常回退原图；显式取消上抛，不能报告 applied 成功。
  */
 export async function calibrateImageResolution(
   image: Buffer,
-  requestedSize: string
+  requestedSize: string,
+  options: InferenceOptions = {}
 ): Promise<{ buffer: Buffer; applied: boolean }> {
+  options.signal?.throwIfAborted();
   const target = parseImageSize(requestedSize);
   if (!target) return { buffer: image, applied: false };
 
   try {
     const meta = await sharp(image).metadata();
+    options.signal?.throwIfAborted();
     if (!meta.width || !meta.height) return { buffer: image, applied: false };
     const actual = { width: meta.width, height: meta.height };
     const mode = getResolutionCalibrationMode(actual, target);
@@ -80,7 +85,8 @@ export async function calibrateImageResolution(
     }
 
     const source =
-      mode === "super-resolution" ? await superResolve(image) : image;
+      mode === "super-resolution" ? await superResolve(image, options) : image;
+    options.signal?.throwIfAborted();
     const format = meta.format;
     const pipeline = sharp(source).resize(target.width, target.height, {
       fit: "inside",
@@ -88,8 +94,10 @@ export async function calibrateImageResolution(
     });
     // 保留原图格式，避免改变后续 resolveStoredImageFormat 的判定。
     const calibrated = await encodeAs(pipeline, format).toBuffer();
+    options.signal?.throwIfAborted();
     return { buffer: calibrated, applied: true };
   } catch (error) {
+    if (options.signal?.aborted) throw error;
     logWarn("分辨率超分校准失败，回退原图", {
       error: error instanceof Error ? error.message : String(error),
       requestedSize,

@@ -1,45 +1,42 @@
+/** PSD adapter 协议测试：模拟 worker 返回透明 PNG，不验证真实 ISNet 质量。 */
 import sharp from "sharp";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeBackground } from "./matte";
 
-// 合成测试图:纯蓝背景 + 中心红色实心圆。验证抠图输出带 alpha、背景透明、前景保留。
-// 注:纯色块上 saliency 模型边缘会有少量噪点,故阈值取宽松值。
-function testImage(size: number) {
-  const svg = `<svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#2244aa"/><circle cx="${size / 2}" cy="${size / 2}" r="${size / 3}" fill="#dd3322"/></svg>`;
-  return sharp(Buffer.from(svg)).png().toBuffer();
-}
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
-describe("removeBackground (ISNet 抠图)", () => {
-  it(
-    "输出带 alpha 的 PNG:背景四角透明、前景中心保留",
-    async () => {
-      const input = await testImage(512);
-      const out = await removeBackground(input);
-
-      const meta = await sharp(out).metadata();
-      expect(meta.hasAlpha).toBe(true);
-      expect(meta.width).toBe(512);
-      expect(meta.height).toBe(512);
-
-      const { data, info } = await sharp(out)
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-      const alphaAt = (x: number, y: number) =>
-        data[(y * info.width + x) * 4 + 3] ?? 0;
-      const corner = Math.max(
-        alphaAt(2, 2),
-        alphaAt(info.width - 3, 2),
-        alphaAt(2, info.height - 3),
-        alphaAt(info.width - 3, info.height - 3)
-      );
-      const center = alphaAt(
-        Math.floor(info.width / 2),
-        Math.floor(info.height / 2)
-      );
-      expect(center).toBeGreaterThan(200);
-      expect(corner).toBeLessThan(80);
-    },
-    30000
-  );
+describe("removeBackground (worker relay)", () => {
+  it("PSD 入口使用同一 matte worker，保留透明 PNG 字节", async () => {
+    const input = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: "red" },
+    })
+      .png()
+      .toBuffer();
+    const output = await sharp(input).ensureAlpha(0.5).png().toBuffer();
+    const fetchMock = vi.fn(
+      async (_url: unknown, _init?: RequestInit) =>
+        new Response(new Uint8Array(output), {
+          headers: {
+            "content-type": "image/png",
+            "content-length": String(output.length),
+          },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await removeBackground(input);
+    expect(result).toEqual(output);
+    expect((await sharp(result).metadata()).hasAlpha).toBe(true);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:3310/v1/matte"
+    );
+  });
+  it("worker 关闭时 PSD 抠图显式失败，不返回原图冒充透明结果", async () => {
+    vi.stubEnv("MATTE_WORKER_ENABLED", "false");
+    await expect(removeBackground(Buffer.from("x"))).rejects.toMatchObject({
+      code: "disabled",
+    });
+  });
 });

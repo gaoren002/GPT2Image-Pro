@@ -1,5 +1,6 @@
 import sharp from "sharp";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { superResolve } from "./super-resolution";
 
 vi.mock("./super-resolution", () => ({
   superResolve: vi.fn(async (image: Buffer) => {
@@ -153,5 +154,112 @@ describe("calibrateImageResolution", () => {
     expect(result.applied).toBe(true);
     expect(metadata.width).toBe(512);
     expect(metadata.height).toBe(512);
+  });
+});
+
+// 仅清理调用计数；一次性故障/取消替身由对应测试消费，不改动默认小图4x替身。
+afterEach(() => {
+  vi.mocked(superResolve).mockClear();
+});
+
+/** 小图 fixture：SR 替身返回 PNG，校准必须按原图格式重新编码。 */
+async function calibrationInput(
+  format: "png" | "jpeg" | "webp",
+  edge = 4
+): Promise<Buffer> {
+  return sharp({
+    create: { width: edge, height: edge, channels: 3, background: "white" },
+  })
+    .toFormat(format)
+    .toBuffer();
+}
+
+describe("calibration signal and format compatibility", () => {
+  it.each([
+    "png",
+    "jpeg",
+    "webp",
+  ] as const)("SR输出PNG后仍保留%s存图格式和applied metadata", async (format) => {
+    const input = await calibrationInput(format);
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    const result = await calibrateImageResolution(input, "24x24", options);
+    expect(superResolve).toHaveBeenCalledWith(input, options);
+    expect(result.applied).toBe(true);
+    expect(await sharp(result.buffer).metadata()).toMatchObject({
+      width: 24,
+      height: 24,
+      format,
+    });
+  });
+  it("预取消覆盖SR、轻量resize、无需校准和auto分支", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const input = await calibrationInput("png", 8);
+    for (const target of ["24x24", "10x10", "8x8", "auto"]) {
+      const outcome = await calibrateImageResolution(input, target, {
+        signal: controller.signal,
+      }).then(
+        () => "accepted",
+        () => "rejected"
+      );
+      expect(outcome).toBe("rejected");
+    }
+    expect(superResolve).not.toHaveBeenCalled();
+  });
+  it("等待worker期间取消显式上抛，不被原图降级吞掉", async () => {
+    const controller = new AbortController();
+    const abort = new Error("fixture caller cancellation");
+    vi.mocked(superResolve).mockImplementationOnce(async () => {
+      controller.abort(abort);
+      throw abort;
+    });
+    await expect(
+      calibrateImageResolution(await calibrationInput("png"), "24x24", {
+        signal: controller.signal,
+      })
+    ).rejects.toBe(abort);
+  });
+  it("worker返回时已取消也不上报applied成功", async () => {
+    const controller = new AbortController();
+    vi.mocked(superResolve).mockImplementationOnce(async (input: Buffer) => {
+      controller.abort();
+      return input;
+    });
+    const outcome = await calibrateImageResolution(
+      await calibrationInput("png"),
+      "24x24",
+      { signal: controller.signal }
+    ).then(
+      () => "accepted",
+      () => "rejected"
+    );
+    expect(outcome).toBe("rejected");
+  });
+  it("普通worker故障仍返回原图applied=false，未取消请求不改变契约", async () => {
+    const input = await calibrationInput("png");
+    vi.mocked(superResolve).mockRejectedValueOnce(
+      new Error("图像处理服务失败 (http_503)")
+    );
+    expect(await calibrateImageResolution(input, "24x24", {})).toEqual({
+      buffer: input,
+      applied: false,
+    });
+  });
+  it("轻量resize与无需校准保留原契约且不调用SR", async () => {
+    const input = await calibrationInput("jpeg", 8);
+    const options = { signal: new AbortController().signal };
+    const resized = await calibrateImageResolution(input, "10x10", options);
+    expect(resized.applied).toBe(true);
+    expect(await sharp(resized.buffer).metadata()).toMatchObject({
+      width: 10,
+      height: 10,
+      format: "jpeg",
+    });
+    expect(await calibrateImageResolution(input, "8x8", options)).toEqual({
+      buffer: input,
+      applied: false,
+    });
+    expect(superResolve).not.toHaveBeenCalled();
   });
 });

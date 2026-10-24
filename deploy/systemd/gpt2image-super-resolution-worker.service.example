@@ -1,5 +1,5 @@
 [Unit]
-Description=GPT2Image Real-ESRGAN worker
+Description=GPT2Image isolated ONNX image worker
 After=network.target
 
 [Service]
@@ -11,6 +11,9 @@ Environment=NODE_ENV=production
 Environment=SUPER_RESOLUTION_WORKER_BIND=127.0.0.1
 Environment=SUPER_RESOLUTION_WORKER_PORT=3310
 Environment=SUPER_RESOLUTION_WORKER_CONCURRENCY=1
+Environment=SUPER_RESOLUTION_WORKER_MAX_QUEUE=2
+Environment=SUPER_RESOLUTION_WORKER_MAX_BODY_MB=32
+Environment=SUPER_RESOLUTION_WORKER_TIMEOUT_MS=300000
 Environment=SUPER_RESOLUTION_INTRA_OP_THREADS=24
 Environment=SUPER_RESOLUTION_SHARP_CONCURRENCY=2
 Environment=UV_THREADPOOL_SIZE=4
@@ -22,6 +25,13 @@ RestartSec=2
 Nice=10
 CPUAccounting=true
 CPUQuota=2400%
+# 示例预算必须与宿主机及 Web 的内存余量一同验收；不是本机推理通过声明。
+# native ONNX 内存不受 V8 heap 限额约束，必须由独立 cgroup 执行硬限制。
+MemoryAccounting=true
+MemoryMax=6G
+MemorySwapMax=0
+OOMPolicy=kill
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

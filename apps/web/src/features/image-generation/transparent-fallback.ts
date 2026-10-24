@@ -8,6 +8,12 @@
  * 使用方:image-generation/operations.ts 的 runGenerationAttempt。纯逻辑(抠图本身无 DB),
  * isTransparentUnsupportedError 可单测。
  */
+import { MAX_INPUT_BYTES } from "../../../worker/inference-protocol.mjs";
+import { removeBackground } from "../psd-export/matte";
+import {
+  type InferenceOptions,
+  InferenceWorkerError,
+} from "./inference-worker";
 import type { GenerateImageResult } from "./types";
 
 /** 判断错误是否为"后端不支持透明背景"(用于触发回退)。 */
@@ -16,41 +22,70 @@ export function isTransparentUnsupportedError(error: unknown): boolean {
   return /transparent background is not supported/i.test(message);
 }
 
-/** 去掉可能的 data URI 前缀,返回纯 base64。 */
-function stripDataUri(base64: string): string {
-  return base64.includes(",") ? (base64.split(",").pop() ?? base64) : base64;
-}
-
 /**
- * 对一段(可能带 data URI 前缀的)base64 图片抠图,返回抠图后 PNG 的纯 base64。
- * 懒加载 matte(onnxruntime 原生):只在透明回退真触发时才载入,避免拖垮核心管线启动。
+ * 有界解码一张 base64，不接受路径/URL。拒绝非法编码，避免 Buffer 静默截断。
+ * 仅转发独立 worker；不落盘、不加载 ONNX。
  */
-async function matteBase64(base64: string): Promise<string> {
-  const { removeBackground } = await import("@/features/psd-export/matte");
-  const input = Buffer.from(stripDataUri(base64), "base64");
-  const out = await removeBackground(input);
+async function matteBase64(
+  base64: string,
+  options: InferenceOptions
+): Promise<string> {
+  const comma = base64.indexOf(",");
+  const raw =
+    base64.startsWith("data:") && comma >= 0 ? base64.slice(comma + 1) : base64;
+  if (
+    !raw.length ||
+    raw.length > Math.ceil(MAX_INPUT_BYTES / 3) * 4 ||
+    raw.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(raw)
+  ) {
+    throw new InferenceWorkerError("input_base64");
+  }
+  const input = Buffer.from(raw, "base64");
+  if (input.toString("base64") !== raw)
+    throw new InferenceWorkerError("input_base64");
+  const out = await removeBackground(input, options);
   return out.toString("base64");
 }
 
 /**
- * 对生成结果里的各路图片做抠图,返回透明背景版本。
- * 仅处理带 base64 的产物(透明回退场景下后端返回的就是 base64);imageUrl-only 产物原样保留。
+ * 逐张处理透明回退，最多四张；相同 legacy 首图复用数组结果，避免重复推理。
+ * URL-only 仍保留既有契约；worker 故障显式上抛，不伪装为透明成功。
  */
 export async function applyTransparentMatte(
-  result: GenerateImageResult
+  result: GenerateImageResult,
+  options: InferenceOptions = {}
 ): Promise<GenerateImageResult> {
+  options.signal?.throwIfAborted();
+  const outputs = result.imageOutputs;
+  const mirrored = result.imageBase64
+    ? (outputs?.findIndex(
+        (output) => output.imageBase64 === result.imageBase64
+      ) ?? -1)
+    : -1;
+  const count =
+    (outputs?.length ?? 0) + (result.imageBase64 && mirrored < 0 ? 1 : 0);
+  if (count > 4) throw new InferenceWorkerError("output_count");
   const next: GenerateImageResult = { ...result };
-  if (next.imageBase64) {
-    next.imageBase64 = await matteBase64(next.imageBase64);
-  }
-  if (next.imageOutputs) {
-    next.imageOutputs = await Promise.all(
-      next.imageOutputs.map(async (output) =>
+  if (outputs) {
+    next.imageOutputs = [];
+    for (const output of outputs) {
+      options.signal?.throwIfAborted();
+      next.imageOutputs.push(
         output.imageBase64
-          ? { ...output, imageBase64: await matteBase64(output.imageBase64) }
+          ? {
+              ...output,
+              imageBase64: await matteBase64(output.imageBase64, options),
+            }
           : output
-      )
-    );
+      );
+    }
+  }
+  if (result.imageBase64) {
+    next.imageBase64 =
+      mirrored >= 0
+        ? next.imageOutputs?.[mirrored]?.imageBase64
+        : await matteBase64(result.imageBase64, options);
   }
   return next;
 }

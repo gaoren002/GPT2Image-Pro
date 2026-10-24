@@ -180,6 +180,17 @@ beforeEach(() => {
 });
 
 describe("统一生成任务原子认领", () => {
+  it("运行中的上游收到调用方断连信号，不能只取消排队", async () => {
+    const caller = new AbortController();
+    let upstreamSawAbort = false;
+    state.upstream.mockImplementation(async (_config, params: { signal?: AbortSignal }) => {
+      caller.abort();
+      upstreamSawAbort = params.signal?.aborted === true;
+      return { error: "fixture caller cancelled" };
+    });
+    await runImageGenerationForUser({ ...input, signal: caller.signal });
+    expect(upstreamSawAbort).toBe(true);
+  });
   it("重复ID第二次在扣费和上游调用前被拒绝", async () => {
     expect((await runImageGenerationForUser(input)).error).toBeUndefined();
     const debitCalls = state.debit.mock.calls.length;

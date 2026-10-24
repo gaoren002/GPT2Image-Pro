@@ -882,7 +882,10 @@ async function storeGeneratedImageOutput(params: {
     params.hdRepair === true &&
     (await getRuntimeSettingBoolean("IMAGE_RESTORATION_ENABLED", false))
   ) {
-    const restored = await restoreImage(imageBuffer);
+    const restored = await restoreImage(
+      imageBuffer,
+      params.signal ? { signal: params.signal } : undefined
+    );
     imageBuffer = restored.buffer;
   }
   // Web 多候选图标记为 choice，同样是用户可查看/下载的成品；分辨率校准只排除
@@ -893,7 +896,8 @@ async function storeGeneratedImageOutput(params: {
   ) {
     const calibrated = await calibrateImageResolution(
       imageBuffer,
-      params.requestedSize || DEFAULT_IMAGE_SIZE
+      params.requestedSize || DEFAULT_IMAGE_SIZE,
+      params.signal ? { signal: params.signal } : undefined
     );
     imageBuffer = calibrated.buffer;
   }
@@ -2072,9 +2076,13 @@ async function runQueuedImageGenerationForUser({
         Math.floor(configuredRepairRetries)
       )
     : 0;
-  const generationSignal = AbortSignal.timeout(
+  const deadlineSignal = AbortSignal.timeout(
     Math.max(1, IMAGE_GENERATION_PENDING_TIMEOUT_MS - (Date.now() - startedAt))
   );
+  // 排队取消后还必须贯通运行中的上游与 worker；async 后台不绑定 HTTP 断连信号。
+  const generationSignal = input.signal
+    ? AbortSignal.any([deadlineSignal, input.signal])
+    : deadlineSignal;
   let currentPrompt = input.prompt;
   let currentApiPrompt = apiPrompt;
   let currentModerationPrompt = moderationPrompt;
@@ -2242,7 +2250,7 @@ async function runQueuedImageGenerationForUser({
     if (opaque.error) {
       return opaque;
     }
-    return applyTransparentMatte(opaque);
+    return applyTransparentMatte(opaque, { signal: generationSignal });
   };
   const runGenerationAttempt = async () => {
     if (!transparentMatteEnabled) {

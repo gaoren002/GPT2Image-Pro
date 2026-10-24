@@ -3,7 +3,7 @@ import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import type { NextRequest } from "next/server";
 import {
   getAsyncImageTask,
-  toAsyncImageTaskResponse,
+  resolveAsyncImageTaskResponse,
   toGenerationImageTaskResponse,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
@@ -36,7 +36,7 @@ export const getExternalImageTask = withApiLogging(
       task.userId === auth.userId &&
       (!task.apiKeyId || task.apiKeyId === auth.apiKeyId)
     ) {
-      return Response.json(toAsyncImageTaskResponse(task), {
+      return Response.json(await resolveAsyncImageTaskResponse(task, request), {
         headers: { "Cache-Control": "no-store" },
       });
     }

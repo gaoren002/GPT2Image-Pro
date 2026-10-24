@@ -256,7 +256,7 @@ describe("bounded async task retention", () => {
         userId: "a",
         generationIds: ["g1", "g2", "g3"],
       })
-    ).toThrow(/capacity exceeded/i);
+    ).toThrow(/Reduce n/);
     const first = tasks.createAsyncImageTask({ userId: "a" });
     const second = tasks.createAsyncImageTask({ userId: "b" });
     expect(() => tasks.createAsyncImageTask({ userId: "c" })).toThrow(

@@ -14,6 +14,21 @@ import { z } from "zod";
 import { defineOperation } from "./uol/registry";
 import { getStorageProvider } from "./storage/providers";
 import { getRuntimeSettingNumber } from "./system-settings";
+import {
+  generationCompletionRecovery,
+  repairGenerationCompletion,
+  withoutReadyGenerationCompletion,
+  recoverGenerationCompletionRefunds,
+} from "./generation-completion";
+export {
+  prepareGenerationCompletion,
+  publishGenerationCompletion,
+  claimGenerationCompletionFailure,
+  readGenerationNetCredits,
+  readGenerationCompletionState,
+  withoutReadyGenerationCompletion,
+  readGenerationCompletionRefundPlan,
+} from "./generation-completion";
 
 // PG 验收及内部维护从既有公开包入口访问，无需改共享 package.json 的 exports。
 export { enqueueGenerationRefund, processGenerationRefundOutbox };
@@ -307,6 +322,7 @@ export async function refundGenerationCredits(params: {
 export async function recoverFailedGenerationRefunds(
   options: { limit?: number } = {}
 ) {
+  const completionRecovery = await recoverGenerationCompletionRefunds(options);
   const limit = z
     .number()
     .int()
@@ -330,6 +346,7 @@ export async function recoverFailedGenerationRefunds(
     .where(
       and(
         eq(generation.status, "failed"),
+        sql`COALESCE(${generation.metadata}::jsonb->'asyncCompletion'->>'version', '') <> '1'`,
         // 无法证明费用目标的旧行继续留在 failed/账本待审计，不创建虚假的已结算意图。
         sql`(jsonb_typeof(COALESCE(${generation.metadata}::jsonb->'timeout'->'targetCredits',
           ${generation.metadata}::jsonb->'settlement'->'targetCredits')) = 'number'
@@ -342,9 +359,14 @@ export async function recoverFailedGenerationRefunds(
     )
     .orderBy(asc(generation.createdAt), asc(generation.id))
     .limit(limit);
-  let enqueued = 0;
-  let recoveryFailed = 0;
+  let enqueued = completionRecovery.enqueued;
+  let recoveryFailed = completionRecovery.recoveryFailed;
   for (const row of rows) {
+    if (
+      generationCompletionRecovery(row.metadata, Number(row.creditsConsumed))
+        .isCompletion
+    )
+      continue;
     try {
       const chargedCredits = Math.max(0, Number(row.creditsConsumed) || 0);
       const target = row.metadata?.targetCredits;
@@ -475,13 +497,28 @@ export async function expireStalePendingGenerations(
 
   for (const row of staleRows) {
     const chargedCredits = Math.max(0, Number(row.creditsConsumed) || 0);
+    const completion = generationCompletionRecovery(
+      row.metadata,
+      chargedCredits
+    );
+    if (completion.ready) {
+      try {
+        await repairGenerationCompletion(row.userId, row.id);
+      } catch {
+        logWarn("Image completion projection pending repair", {
+          generationId: row.id,
+          source: "generation-maintenance",
+        });
+      }
+      continue;
+    }
     const targetCredits = getFailedGenerationTargetCreditsFromMetadata({
       reason: "generation_error",
       chargedCredits,
       metadata: row.metadata,
     });
     const creditsToRefund = computeTimeoutRefund({
-      chargedCredits,
+      chargedCredits: completion.maxRefundAmount,
       targetCredits,
     });
     const sourceRef = `${row.id}:timeout-refund`;
@@ -517,7 +554,8 @@ export async function expireStalePendingGenerations(
       .where(
         and(
           eq(generation.id, row.id),
-          eq(generation.status, "pending" as const)
+          eq(generation.status, "pending" as const),
+          withoutReadyGenerationCompletion()
         )
       )
       .returning({ id: generation.id });

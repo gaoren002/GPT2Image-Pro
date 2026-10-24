@@ -12,6 +12,7 @@ import {
   creditsBatch,
   creditsTransaction,
   externalApiKey,
+  generation,
 } from "@repo/database/schema";
 import {
   and,
@@ -221,6 +222,8 @@ export interface ConsumeCreditsParams {
   sourceRef?: string;
   /** 显式传入时与钱包同事务 capture；不能再由调用方独立预留同一笔 Key 额度。 */
   externalApiKeyId?: string;
+  /** 普通 async 的终态补扣：与退款同锁，并在事务内锁定 settling 行，关闭后禁止迟到消费。 */
+  generationSettlement?: { generationId: string };
   /** 元数据 */
   metadata?: Record<string, unknown>;
 }
@@ -875,17 +878,65 @@ export async function consumeCredits(
     metadata,
     sourceRef,
     externalApiKeyId,
+    generationSettlement,
   } = params;
   const amount = normalizeCreditAmount(params.amount);
 
   if (amount <= 0) {
     throw new Error("消费数量必须大于 0");
   }
+  if (
+    generationSettlement &&
+    (!sourceRef?.startsWith(`${generationSettlement.generationId}:`) ||
+      metadata?.generationId !== generationSettlement.generationId)
+  ) {
+    throw new Error("Invalid generation settlement capture");
+  }
 
   await processExpiredBatches({ userId });
 
   try {
     return await db.transaction(async (tx) => {
+      if (generationSettlement) {
+        await tx.setTransaction({ isolationLevel: "read committed" });
+        // 同 R11 task 锁先于 generation/batch/key/wallet；COMMIT ACK 丢失也不能跨过失败围栏。
+        const lockKey = JSON.stringify([
+          "generation-refund",
+          userId,
+          generationSettlement.generationId,
+        ]);
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`
+        );
+        const [row] = await tx
+          .select({
+            status: generation.status,
+            metadata: generation.metadata,
+          })
+          .from(generation)
+          .where(
+            and(
+              eq(generation.id, generationSettlement.generationId),
+              eq(generation.userId, userId)
+            )
+          )
+          .limit(1)
+          .for("update");
+        const marker = row?.metadata?.asyncCompletion;
+        if (
+          row?.status !== "pending" ||
+          !marker ||
+          typeof marker !== "object" ||
+          Array.isArray(marker) ||
+          (marker as Record<string, unknown>).version !== 1 ||
+          (marker as Record<string, unknown>).state !== "settling"
+        ) {
+          throw Object.assign(
+            new Error("Image generation settlement is closed"),
+            { code: "generation_settlement_closed" }
+          );
+        }
+      }
       // 幂等快路：已存在相同 (userId, consumption, sourceRef) 的交易 → 不重复扣费。
       // 覆盖串行重试场景；并发场景由下方偏唯一索引兜底。
       // WHY 必须按 userId 归属：sourceRef 派生自服务端随机 generationId，理论上全局

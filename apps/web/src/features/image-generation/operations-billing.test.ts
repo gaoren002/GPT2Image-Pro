@@ -11,6 +11,10 @@ const state = vi.hoisted(() => ({
   web: vi.fn(),
   fetch: vi.fn(),
   resolve: vi.fn(),
+  readImage: vi.fn(),
+  putObject: vi.fn(),
+  expandAsyncImage: false,
+  failCompletionUpdate: false,
   inserts: [] as Record<string, unknown>[],
   updates: [] as Record<string, unknown>[],
 }));
@@ -38,9 +42,21 @@ vi.mock("@repo/database", () => ({
     update: () => ({
       set: (row: Record<string, unknown>) => ({
         where: () => {
+          if (state.failCompletionUpdate && row.status === "completed")
+            throw new Error("completion database unavailable");
           state.updates.push(row);
           return Object.assign(Promise.resolve([]), {
-            returning: async () => [],
+            returning: async () =>
+              row.metadata &&
+              new PgDialect()
+                .sqlToQuery(row.metadata as SQL)
+                .params.some(
+                  (value) =>
+                    typeof value === "string" &&
+                    value.includes("asyncCompletion")
+                )
+                ? [{ id: "billing-task" }]
+                : [],
           });
         },
       }),
@@ -49,7 +65,10 @@ vi.mock("@repo/database", () => ({
 }));
 vi.mock("@repo/shared/logger", () => ({ logWarn: vi.fn(), logError: vi.fn() }));
 vi.mock("@repo/shared/credits/core", () => ({ consumeCredits: state.debit }));
-vi.mock("@repo/shared/generation-maintenance", () => ({
+vi.mock("@repo/shared/generation-maintenance", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@repo/shared/generation-maintenance")
+  >()),
   IMAGE_GENERATION_PENDING_TIMEOUT_MS: 1_200_000,
   refundGenerationCredits: state.refund,
   resolveImageGenerationTimeoutError: () => "timeout",
@@ -58,7 +77,7 @@ vi.mock("@repo/shared/moderation", () => ({
   isContentModerationEnabled: async () => false,
 }));
 vi.mock("@repo/shared/storage/providers", () => ({
-  getStorageProvider: async () => ({ putObject: vi.fn() }),
+  getStorageProvider: async () => ({ putObject: state.putObject }),
 }));
 vi.mock("@repo/shared/subscription/services/user-plan", () => ({
   getUserPlan: async () => ({ plan: "pro" }),
@@ -77,7 +96,8 @@ vi.mock("@repo/shared/subscription/services/plan-capabilities", () => ({
   normalizePlanModerationBlockRiskLevel: async () => "low",
 }));
 vi.mock("@repo/shared/system-settings", () => ({
-  getRuntimeSettingBoolean: async () => false,
+  getRuntimeSettingBoolean: async (name: string) =>
+    name === "IMAGE_SUPER_RESOLUTION_ENABLED" && state.expandAsyncImage,
   getRuntimeSettingNumber: async (_key: string, fallback: number) => fallback,
   getRuntimeSettingString: async () => "",
 }));
@@ -111,6 +131,8 @@ vi.mock("./chatgpt-web", () => ({
 }));
 vi.mock("./generated-image", () => ({
   readGeneratedImage: async () => {
+    const replacement = await state.readImage();
+    if (replacement) return replacement;
     const buffer = Buffer.alloc(24);
     buffer.writeUInt32BE(0x89504e47, 0);
     buffer.writeUInt32BE(0x0d0a1a0a, 4);
@@ -120,7 +142,11 @@ vi.mock("./generated-image", () => ({
   },
 }));
 vi.mock("./image-restoration", () => ({}));
-vi.mock("./resolution-calibration", () => ({}));
+vi.mock("./resolution-calibration", () => ({
+  calibrateImageResolution: async () => ({
+    buffer: Buffer.alloc(32 * 1024 * 1024 + 1),
+  }),
+}));
 vi.mock("./transparent-fallback", () => ({
   isTransparentUnsupportedError: () => false,
 }));
@@ -188,6 +214,9 @@ function finalMetadata(): Record<string, unknown> {
 beforeEach(() => {
   vi.clearAllMocks();
   state.inserts.length = 0;
+  state.readImage.mockReset();
+  state.expandAsyncImage = false;
+  state.failCompletionUpdate = false;
   state.updates.length = 0;
   state.initial = member("web", 2);
   state.debit.mockReset().mockResolvedValue({ success: true });
@@ -218,6 +247,101 @@ beforeEach(() => {
   );
   vi.stubGlobal("fetch", state.fetch);
   vi.stubEnv("BETTER_AUTH_SECRET", "billing-test-secret");
+});
+
+describe("async 结果在成功结算之前检查交付边界", () => {
+  it("普通 async 完成状态 UPDATE 失败仍交付已付费引用与真实扣费，保留持久投影意图", async () => {
+    state.failCompletionUpdate = true;
+    state.web.mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
+    const result = await runImageGenerationForUser({
+      ...input,
+      asyncDelivery: true,
+    });
+    expect(state.putObject).toHaveBeenCalledOnce();
+    expect(result.error).toBeUndefined();
+    expect(result.imageUrl).toContain("/api/storage/");
+    expect(result.creditsConsumed).toBeGreaterThan(0);
+    expect(state.refund).not.toHaveBeenCalled();
+    expect(
+      state.updates.some(
+        (row) =>
+          row.metadata &&
+          new PgDialect()
+            .sqlToQuery(row.metadata as SQL)
+            .params.some(
+              (value) =>
+                typeof value === "string" && value.includes("asyncCompletion")
+            )
+      )
+    ).toBe(true);
+  });
+  it("relay 没有 generation 行，成功结算后不能因无意义完成态 UPDATE 丢掉付费图片", async () => {
+    state.failCompletionUpdate = true;
+    state.web.mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
+    const result = await runImageGenerationForUser({
+      ...input,
+      relayOnly: true,
+      asyncDelivery: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.imageBase64).toEqual(expect.any(String));
+  });
+  it("普通任务的超分输出超 32 MiB 时在保存/成功结算前失败并退款", async () => {
+    state.expandAsyncImage = true;
+    state.web.mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
+    const result = await runImageGenerationForUser({
+      ...input,
+      asyncDelivery: true,
+    });
+    expect(result.error).toBeDefined();
+    expect(result.creditsConsumed).toBe(0);
+    expect(state.refund).toHaveBeenCalled();
+    expect(state.putObject).not.toHaveBeenCalled();
+    expect(state.updates.some((row) => row.status === "completed")).toBe(false);
+  });
+  it.each([
+    "count",
+    "metadata",
+    "bytes",
+  ])("relay %s 超界走失败结算，不能保留图片扣费", async (kind) => {
+    const output = { imageBase64: "aW1hZ2U=", outputRole: "final" as const };
+    state.web.mockResolvedValueOnce(
+      kind === "count"
+        ? { imageOutputs: Array.from({ length: 5 }, () => output) }
+        : {
+            ...output,
+            revisedPrompt:
+              kind === "metadata" ? "图".repeat(40_000) : undefined,
+          }
+    );
+    if (kind === "bytes")
+      state.readImage.mockRejectedValueOnce(new Error("oversized base64"));
+    const result = await runImageGenerationForUser({
+      ...input,
+      relayOnly: true,
+      asyncDelivery: true,
+    });
+    expect(result.error).toBeDefined();
+    expect(result.creditsConsumed).toBe(0);
+    expect(state.refund).toHaveBeenCalled();
+    expect(state.inserts).toHaveLength(0);
+    expect(state.updates.some((row) => row.status === "completed")).toBe(false);
+  });
+
+  it("relay 在执行期解析 URL 到内存，返回后无需再下载，且不落内容", async () => {
+    state.web.mockResolvedValueOnce({
+      imageUrl: "https://example.com/result.png",
+    });
+    const result = await runImageGenerationForUser({
+      ...input,
+      relayOnly: true,
+      asyncDelivery: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.imageBase64).toEqual(expect.any(String));
+    expect(state.readImage).toHaveBeenCalledOnce();
+    expect(state.inserts).toHaveLength(0);
+  });
 });
 
 describe("按最终实际成员计价", () => {

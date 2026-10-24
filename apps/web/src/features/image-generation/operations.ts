@@ -6,11 +6,21 @@ import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
   refundGenerationCredits,
   resolveImageGenerationTimeoutError,
+  prepareGenerationCompletion,
+  publishGenerationCompletion,
+  claimGenerationCompletionFailure,
+  readGenerationNetCredits,
+  readGenerationCompletionRefundPlan,
 } from "@repo/shared/generation-maintenance";
 import { getFailedGenerationTargetCredits } from "@repo/shared/generation-settlement";
 import { logWarn } from "@repo/shared/logger";
 import { toClientErrorMessage } from "./error-sanitize";
 import { readGeneratedImage } from "./generated-image";
+import {
+  assertAsyncImageOutputs,
+  assertAsyncStoredImageBytes,
+  prepareAsyncRelayOutput,
+} from "./async-image-delivery";
 import {
   isContentModerationEnabled,
   moderateContent,
@@ -119,6 +129,8 @@ type RunImageGenerationInput =
       generationId?: string;
       apiKeyId?: string;
       relayOnly?: boolean;
+      /** 仅外部 images async：成功结算前验证可交付上界，纯中转不持久化。 */
+      asyncDelivery?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
       preferredBackendMemberType?: "api" | "account";
@@ -134,6 +146,7 @@ type RunImageGenerationInput =
       generationId?: string;
       apiKeyId?: string;
       relayOnly?: boolean;
+      asyncDelivery?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
       preferredBackendMemberType?: "api" | "account";
@@ -149,6 +162,7 @@ type RunImageGenerationInput =
       generationId?: string;
       apiKeyId?: string;
       relayOnly?: boolean;
+      asyncDelivery?: boolean;
       backendRequestKind?: ImageBackendRequestKind;
       preferredBackendMemberId?: string;
       preferredBackendMemberType?: "api" | "account";
@@ -344,6 +358,11 @@ export type ImageGenerationOperationResult = {
   backendMember?: GenerateImageResult["backendMember"];
   responsesPreviousResponse?: GenerateImageResult["responsesPreviousResponse"];
   creditsConsumed?: number;
+  historyPending?: boolean;
+  deliveryAvailable?: boolean;
+  settlementStatus?: "refund_pending" | "refunded";
+  creditsLastKnown?: number;
+  refundTargetCredits?: number;
 };
 
 async function getStoredImageUrl(bucket: string, storageKey: string) {
@@ -498,7 +517,9 @@ function isPendingGeneration(generationId: string, userId: string) {
   return and(
     eq(generation.id, generationId),
     eq(generation.userId, userId),
-    eq(generation.status, "pending")
+    eq(generation.status, "pending"),
+    // ready 已持久登记可交付成品，迟到的 timeout 不能再抢占退款。
+    sql`COALESCE(${generation.metadata}::jsonb->'asyncCompletion'->>'state', '') <> 'ready'`
   );
 }
 
@@ -866,6 +887,7 @@ async function storeGeneratedImageOutput(params: {
   /** 高清修复开关(请求级):true 且主开关开时用 SCUNet 盲复原最终图(不改分辨率);其余不修复。 */
   hdRepair?: boolean;
   signal?: AbortSignal;
+  asyncDelivery?: boolean;
 }) {
   let imageBuffer: Buffer = await readGeneratedImage(params.output, {
     publicBaseUrl:
@@ -901,6 +923,7 @@ async function storeGeneratedImageOutput(params: {
     );
     imageBuffer = calibrated.buffer;
   }
+  if (params.asyncDelivery) assertAsyncStoredImageBytes(imageBuffer);
   const storedFormat = resolveStoredImageFormat(
     imageBuffer,
     params.requestedFormat
@@ -1799,6 +1822,7 @@ async function runQueuedImageGenerationForUser({
   let chargedCredits = 0;
   const refundChargedCredits = async (
     amount: number,
+    targetCredits: number,
     sourceRef: string,
     description: string,
     metadata?: Record<string, unknown>
@@ -1809,6 +1833,7 @@ async function runQueuedImageGenerationForUser({
       generationId,
       userId: input.userId,
       amount: roundedAmount,
+      targetCredits: roundCreditAmount(Math.max(0, targetCredits)),
       sourceRef,
       description,
       metadata,
@@ -1826,11 +1851,18 @@ async function runQueuedImageGenerationForUser({
   ) => {
     if (!billingPolicy.chargesCredits || amount <= 0) return;
     const roundedAmount = roundCreditAmount(amount);
-    await reserveExternalApiKeyCredits({
-      apiKeyId: input.apiKeyId,
-      userId: input.userId,
-      amount: roundedAmount,
-    });
+    // 只围栏存图后的终态补扣；Key 与钱包一起提交，确认丢失不能释放已消费的 Key。
+    const terminalCapture =
+      input.asyncDelivery === true &&
+      !relayOnly &&
+      sourceRef === `${generationId}:image-actual-size:charge`;
+    if (!terminalCapture) {
+      await reserveExternalApiKeyCredits({
+        apiKeyId: input.apiKeyId,
+        userId: input.userId,
+        amount: roundedAmount,
+      });
+    }
     let userCreditsConsumed = false;
     try {
       const consumption = await consumeCredits({
@@ -1839,6 +1871,12 @@ async function runQueuedImageGenerationForUser({
         serviceName,
         description,
         sourceRef,
+        ...(terminalCapture
+          ? {
+              externalApiKeyId: input.apiKeyId,
+              generationSettlement: { generationId },
+            }
+          : {}),
         metadata: {
           ...metadata,
           externalApiKeyId: input.apiKeyId,
@@ -1853,7 +1891,7 @@ async function runQueuedImageGenerationForUser({
       }
       userCreditsConsumed = true;
     } finally {
-      if (!userCreditsConsumed) {
+      if (!userCreditsConsumed && !terminalCapture) {
         await refundExternalApiKeyCredits({
           apiKeyId: input.apiKeyId,
           userId: input.userId,
@@ -1892,13 +1930,19 @@ async function runQueuedImageGenerationForUser({
     }
 
     if (delta < 0) {
-      await refundChargedCredits(Math.abs(delta), sourceRef, description, {
-        ...billingMetadata,
-        actualBilling,
-        ...metadata,
-        previousCredits: chargedCredits,
-        targetCredits: roundedTarget,
-      });
+      await refundChargedCredits(
+        Math.abs(delta),
+        roundedTarget,
+        sourceRef,
+        description,
+        {
+          ...billingMetadata,
+          actualBilling,
+          ...metadata,
+          previousCredits: chargedCredits,
+          targetCredits: roundedTarget,
+        }
+      );
     }
     // 同价换号不会新建补扣或退款流水，仍须把实际快照回填到原始扣费账本。
     // 只追加审计字段，不修改金额；按用户、类型及完整阶段键限制更新范围。
@@ -2017,6 +2061,7 @@ async function runQueuedImageGenerationForUser({
         try {
           await refundChargedCredits(
             creditsToRefund,
+            targetCredits,
             refundSourceRef,
             `Refund timed out image generation charge: ${input.prompt.slice(
               0,
@@ -2647,7 +2692,7 @@ async function runQueuedImageGenerationForUser({
 
   let storedOutputs: StoredGeneratedImageOutput[] = [];
   try {
-    const imageOutputs = getResultImageOutputs(result).map(
+    let imageOutputs = getResultImageOutputs(result).map(
       (output, index, items) => ({
         ...output,
         outputRole: resolveOutputRole({
@@ -2660,6 +2705,19 @@ async function runQueuedImageGenerationForUser({
     ) satisfies NonNullable<GenerateImageResult["imageOutputs"]>;
     if (imageOutputs.length === 0) {
       throw new Error("Missing image data");
+    }
+    if (input.asyncDelivery) {
+      assertAsyncImageOutputs(result, imageOutputs, relayOnly);
+      if (relayOnly) {
+        // 顺序读取限制临时解码 Buffer；结果必须在成功结算前就绪，不能完成后依赖上游 URL。
+        const prepared = [];
+        for (const output of imageOutputs) {
+          prepared.push(
+            await prepareAsyncRelayOutput(output, generationSignal)
+          );
+        }
+        imageOutputs = prepared;
+      }
     }
     if (isAgentChatInput) {
       await emitAgentOperationEvent(callbacks, {
@@ -2722,6 +2780,7 @@ async function runQueuedImageGenerationForUser({
             requestedFormat: input.outputFormat,
             hdRepair: input.hdRepair,
             signal: generationSignal,
+            asyncDelivery: input.asyncDelivery,
           })
         );
         if (isAgentChatInput) {
@@ -2738,6 +2797,8 @@ async function runQueuedImageGenerationForUser({
         }
       }
     }
+    if (input.asyncDelivery)
+      assertAsyncImageOutputs(result, storedOutputs, relayOnly);
   } catch (storageError: unknown) {
     const message =
       storageError instanceof Error
@@ -2900,6 +2961,74 @@ async function runQueuedImageGenerationForUser({
     actualImageCredits,
     creditCost: actualCreditCost,
   });
+  const failAsyncCompletion =
+    async (): Promise<ImageGenerationOperationResult> => {
+      const lastKnownCredits = chargedCredits;
+      let targetCredits = getFailedGenerationTargetCredits({
+        reason: "storage_error",
+        moderationFailureCredits,
+        moderationOnlyCredits: creditCost.moderationOnlyCredits,
+      });
+      const decision = await claimGenerationCompletionFailure(
+        input.userId,
+        generationId,
+        lastKnownCredits,
+        targetCredits
+      );
+      if (decision === "ready") return completedResult(true);
+      let targetConfirmed = false;
+      try {
+        const plan = await readGenerationCompletionRefundPlan(
+          input.userId,
+          generationId,
+          lastKnownCredits,
+          targetCredits
+        );
+        targetCredits = plan.targetCredits;
+        targetConfirmed = true;
+        if (decision === "failed") {
+          try {
+            await refundChargedCredits(
+              plan.amount,
+              targetCredits,
+              `${generationId}:completion-error-refund`,
+              "Refund image completion registration failure"
+            );
+          } catch {
+            // R11 已持久保存意图，下面只按真实净额确认，不能把 phase 成功当全退。
+          }
+        }
+      } catch {
+        // 目标/账本不可读时保留 pending 与引用。
+      }
+      // R11 返回成功仅代表该 phase 执行过；未达到目标净额就不能撤掉仍付费的引用。
+      const net = await readGenerationNetCredits(input.userId, generationId);
+      const refundPending =
+        !targetConfirmed || net === undefined || net > targetCredits;
+      return {
+        ...completedResult(),
+        error: refundPending
+          ? "Image completion registration failed; refund pending."
+          : "Image completion registration failed; refund settled.",
+        // 净额尚未确认退回时保留已付费引用；真实补偿完成后不把失败成员默默免费交付。
+        deliveryAvailable: refundPending,
+        creditsConsumed: net,
+        creditsLastKnown: lastKnownCredits,
+        refundTargetCredits: targetConfirmed ? targetCredits : undefined,
+        settlementStatus: refundPending ? "refund_pending" : "refunded",
+      };
+    };
+  if (input.asyncDelivery && !relayOnly) {
+    try {
+      await prepareGenerationCompletion(
+        input.userId,
+        generationId,
+        Math.max(chargedCredits, targetSuccessCredits)
+      );
+    } catch {
+      return failAsyncCompletion();
+    }
+  }
   try {
     if (isAgentChatInput) {
       await emitAgentOperationEvent(callbacks, {
@@ -2944,6 +3073,7 @@ async function runQueuedImageGenerationForUser({
       });
     }
   } catch (error) {
+    if (input.asyncDelivery && !relayOnly) return failAsyncCompletion();
     const message =
       error instanceof Error ? error.message : "Insufficient credits";
     try {
@@ -2987,125 +3117,146 @@ async function runQueuedImageGenerationForUser({
   }
 
   if (isTimedOut()) {
+    if (input.asyncDelivery && !relayOnly) return failAsyncCompletion();
     return failTimedOutGeneration();
   }
 
-  await db
-    .update(generation)
-    .set({
-      status: "completed",
-      storageKey: primaryOutput.storageKey,
-      fileSize: primaryOutput.fileSize,
-      size: primaryOutput.size,
-      revisedPrompt: result.revisedPrompt || primaryOutput.revisedPrompt,
-      creditsConsumed: chargedCredits,
-      metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
-        metadataWithPromptRepair({
-          ...buildRevisedPromptMetadata({
-            input,
-            apiPrompt: currentApiPrompt,
-            result,
-          }),
-          ...buildResponseOutputMetadata(result),
-          webConversation: result.webConversation || null,
-          outputImage: {
-            requestedSize: size,
-            actualSize: primaryOutput.size,
-            actualSizeDetected: primaryOutput.actualSizeDetected,
-            actualSizeMatchesRequested: primaryOutput.size === size,
-            requestedFormat: input.outputFormat || null,
-            requestedCompression: input.outputCompression ?? null,
-            actualFormat: primaryOutput.actualOutputFormat,
-            actualFormatDetected: primaryOutput.actualOutputFormatDetected,
-            requestedCreditCost: creditCost,
-            actualCreditCost,
-            perOutputCreditCosts,
-            chatRoundCredits: isChatInput ? actualChatRoundCredits : 0,
-            chatRoundCount,
-            billableImageOutputCount,
-            upstreamImageOutputCount,
-            imageOutputs: storedOutputs.map((output, index) => ({
-              generationId: output.generationId,
-              imageUrl: output.imageUrl,
-              imageFileId: output.imageFileId,
-              webImageMessageId: output.webImageMessageId,
-              webImageGroupId: output.webImageGroupId,
-              storageKey: output.storageKey,
-              size: output.size,
-              revisedPrompt: output.revisedPrompt,
-              upstreamRevisedPrompt: output.upstreamRevisedPrompt,
-              actualFormat: output.actualOutputFormat,
-              actualFormatDetected: output.actualOutputFormatDetected,
-              actualSizeDetected: output.actualSizeDetected,
-              role: resolveOutputRole({
-                input,
-                outputRole: output.outputRole,
-                index,
-                total: storedOutputs.length,
-              }),
-              primary: output.generationId === primaryOutput.generationId,
-            })),
-            layered: isLayeredRun
-              ? {
-                  version: 1,
-                  layers: storedOutputs.map((output, index) => ({
-                    storageKey: output.storageKey,
-                    size: output.size,
-                    // 0=整图合成(预览),1=背景(不透明),>=2=前景元素(抠白底)
-                    role:
-                      index === 0
-                        ? "composite"
-                        : index === 1
-                          ? "background"
-                          : "element",
-                    order: index,
-                  })),
-                }
-              : undefined,
-          },
-        })
-      )}::jsonb`,
-      completedAt: new Date(),
-    })
-    .where(isPendingGeneration(generationId, input.userId));
-
-  return {
-    generationId,
-    imageUrl: primaryOutput.imageUrl,
-    imageBase64: primaryOutput.imageBase64,
-    imageFileId: primaryOutput.imageFileId,
-    imageOutputs: storedOutputs.map((output, index) => ({
-      generationId: output.generationId,
-      imageUrl: output.imageUrl,
-      imageBase64: output.imageBase64,
-      imageFileId: output.imageFileId,
-      webImageMessageId: output.webImageMessageId,
-      webImageGroupId: output.webImageGroupId,
-      size: output.size,
-      revisedPrompt: output.revisedPrompt,
-      upstreamRevisedPrompt: output.upstreamRevisedPrompt,
-      promptRepairNotice: getPromptRepairNotice(repairAttempts),
-      index,
-      outputRole: resolveOutputRole({
-        input,
-        outputRole: output.outputRole,
-        index,
-        total: storedOutputs.length,
-      }),
-    })),
-    model: recordModel,
+  const completionProjection = {
+    storageKey: primaryOutput.storageKey,
+    fileSize: primaryOutput.fileSize,
     size: primaryOutput.size,
     revisedPrompt: result.revisedPrompt || primaryOutput.revisedPrompt,
-    promptRepairNotice: getPromptRepairNotice(repairAttempts),
-    responseText: result.responseText,
-    responseThinking: result.responseThinking,
-    responseAgent: result.responseAgent,
-    agentEvents: result.agentEvents,
-    agentRoundCount: result.agentRoundCount,
-    layered: isLayeredRun,
-    webConversation: result.webConversation,
-    backendMember: result.backendMember,
-    responsesPreviousResponse: result.responsesPreviousResponse,
     creditsConsumed: chargedCredits,
+    metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
+      metadataWithPromptRepair({
+        ...buildRevisedPromptMetadata({
+          input,
+          apiPrompt: currentApiPrompt,
+          result,
+        }),
+        ...buildResponseOutputMetadata(result),
+        webConversation: result.webConversation || null,
+        outputImage: {
+          requestedSize: size,
+          actualSize: primaryOutput.size,
+          actualSizeDetected: primaryOutput.actualSizeDetected,
+          actualSizeMatchesRequested: primaryOutput.size === size,
+          requestedFormat: input.outputFormat || null,
+          requestedCompression: input.outputCompression ?? null,
+          actualFormat: primaryOutput.actualOutputFormat,
+          actualFormatDetected: primaryOutput.actualOutputFormatDetected,
+          requestedCreditCost: creditCost,
+          actualCreditCost,
+          perOutputCreditCosts,
+          chatRoundCredits: isChatInput ? actualChatRoundCredits : 0,
+          chatRoundCount,
+          billableImageOutputCount,
+          upstreamImageOutputCount,
+          imageOutputs: storedOutputs.map((output, index) => ({
+            generationId: output.generationId,
+            imageUrl: output.imageUrl,
+            imageFileId: output.imageFileId,
+            webImageMessageId: output.webImageMessageId,
+            webImageGroupId: output.webImageGroupId,
+            storageKey: output.storageKey,
+            size: output.size,
+            revisedPrompt: output.revisedPrompt,
+            upstreamRevisedPrompt: output.upstreamRevisedPrompt,
+            actualFormat: output.actualOutputFormat,
+            actualFormatDetected: output.actualOutputFormatDetected,
+            actualSizeDetected: output.actualSizeDetected,
+            role: resolveOutputRole({
+              input,
+              outputRole: output.outputRole,
+              index,
+              total: storedOutputs.length,
+            }),
+            primary: output.generationId === primaryOutput.generationId,
+          })),
+          layered: isLayeredRun
+            ? {
+                version: 1,
+                layers: storedOutputs.map((output, index) => ({
+                  storageKey: output.storageKey,
+                  size: output.size,
+                  // 0=整图合成(预览),1=背景(不透明),>=2=前景元素(抠白底)
+                  role:
+                    index === 0
+                      ? "composite"
+                      : index === 1
+                        ? "background"
+                        : "element",
+                  order: index,
+                })),
+              }
+            : undefined,
+        },
+      })
+    )}::jsonb`,
+    completedAt: new Date(),
   };
+  let historyPending = false;
+  if (input.asyncDelivery && !relayOnly) {
+    try {
+      ({ historyPending } = await publishGenerationCompletion(
+        input.userId,
+        generationId,
+        completionProjection
+      ));
+    } catch {
+      return failAsyncCompletion();
+    }
+  } else if (!relayOnly || !input.asyncDelivery) {
+    await db
+      .update(generation)
+      .set({ ...completionProjection, status: "completed" })
+      .where(isPendingGeneration(generationId, input.userId));
+  }
+
+  return completedResult(historyPending);
+
+  function completedResult(
+    historyPending = false
+  ): ImageGenerationOperationResult {
+    return {
+      historyPending,
+      generationId,
+      imageUrl: primaryOutput.imageUrl,
+      imageBase64: primaryOutput.imageBase64,
+      imageFileId: primaryOutput.imageFileId,
+      imageOutputs: storedOutputs.map((output, index) => ({
+        generationId: output.generationId,
+        imageUrl: output.imageUrl,
+        imageBase64: output.imageBase64,
+        imageFileId: output.imageFileId,
+        webImageMessageId: output.webImageMessageId,
+        webImageGroupId: output.webImageGroupId,
+        size: output.size,
+        revisedPrompt: output.revisedPrompt,
+        upstreamRevisedPrompt: output.upstreamRevisedPrompt,
+        promptRepairNotice: getPromptRepairNotice(repairAttempts),
+        index,
+        outputRole: resolveOutputRole({
+          input,
+          outputRole: output.outputRole,
+          index,
+          total: storedOutputs.length,
+        }),
+      })),
+      model: recordModel,
+      size: primaryOutput.size,
+      revisedPrompt: result.revisedPrompt || primaryOutput.revisedPrompt,
+      promptRepairNotice: getPromptRepairNotice(repairAttempts),
+      responseText: result.responseText,
+      responseThinking: result.responseThinking,
+      responseAgent: result.responseAgent,
+      agentEvents: result.agentEvents,
+      agentRoundCount: result.agentRoundCount,
+      layered: isLayeredRun,
+      webConversation: result.webConversation,
+      backendMember: result.backendMember,
+      responsesPreviousResponse: result.responsesPreviousResponse,
+      creditsConsumed: chargedCredits,
+    };
+  }
 }

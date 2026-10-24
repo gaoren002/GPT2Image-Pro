@@ -1,9 +1,20 @@
 /**
- * v1 图像/PPT/PSD 的进程内异步任务与公网回调；不依赖数据库或文件存储。
- * 处理态预留完整结果预算，终态按实际字节记账并从完成起计 TTL；超预留仍保交付。
+ * v1 图像/PPT/PSD 的进程内异步任务与公网回调。
+ * 普通图像仅留存对象引用，投递时编码；纯中转执行前预留完整交付上界，完成起计 TTL。
  */
 import { randomUUID } from "node:crypto";
 import { logError, logWarn } from "@repo/shared/logger";
+import {
+  ASYNC_IMAGE_RELAY_RESERVATION_BYTES,
+  ASYNC_IMAGE_STORAGE_RESERVATION_BYTES,
+} from "@/features/image-generation/async-image-limits";
+import {
+  type AsyncImageResult,
+  type AsyncImageResultReference,
+  renderAsyncImageResult,
+  toAsyncImageResultReference,
+  toAsyncGenerationUsage,
+} from "./async-image-result";
 import {
   assertPublicCallbackUrl,
   fetchPublicCallback,
@@ -32,11 +43,13 @@ type CreateAsyncImageTaskParams = {
   apiKeyId?: string;
   model?: string;
   generationIds?: string[];
+  retention?: "storage" | "relay";
 };
 
 type CompleteAsyncImageTaskParams = {
   result?: unknown;
   error?: unknown;
+  imageResult?: AsyncImageResult;
   // 完成后的 object 类型。图像任务从 image.generation 转为 image(默认);可编辑文件任务
   // 传 "editable_file_task" 以保持类型不变(不被误标成 image)。
   completedObject?: AsyncImageTask["object"];
@@ -47,18 +60,31 @@ type TaskEntry = {
   task: AsyncImageTask;
   bytes: number;
   reservationBytes: number;
+  retention?: "storage" | "relay";
+  imageResult?: AsyncImageResultReference;
   expiresAt?: number;
   timeout?: ReturnType<typeof setTimeout>;
 };
 const asyncImageTasks = new Map<string, TaskEntry>();
 
-/** 准入失败在 handler 中直接映射 429，不能作为后台任务接受后悄悄丢弃。 */
+/** 单笔无法放下为 413，当前占用导致暂满为 429；均须在启动后台付费工作前返回。 */
 export class AsyncImageTaskCapacityError extends Error {
-  readonly status = 429;
-  readonly code = "async_image_task_capacity_exceeded";
+  readonly status: 413 | 429;
+  readonly code:
+    | "async_image_task_reservation_too_large"
+    | "async_image_task_capacity_exceeded";
 
-  constructor() {
-    super("Async image task capacity exceeded. Please retry shortly.");
+  constructor(status: 413 | 429 = 429) {
+    super(
+      status === 413
+        ? "Async image task reservation exceeds the result byte budget. Reduce n."
+        : "Async image task capacity exceeded. Please retry shortly."
+    );
+    this.status = status;
+    this.code =
+      status === 413
+        ? "async_image_task_reservation_too_large"
+        : "async_image_task_capacity_exceeded";
     this.name = "AsyncImageTaskCapacityError";
   }
 }
@@ -71,7 +97,8 @@ export function toAsyncImageTaskCapacityResponse(
     {
       error: {
         message: error.message,
-        type: "rate_limit_error",
+        type:
+          error.status === 413 ? "invalid_request_error" : "rate_limit_error",
         code: error.code,
         status: error.status,
       },
@@ -111,6 +138,26 @@ function retainedBytes(task: AsyncImageTask) {
  * 创建时把完整结果预留计入预算，所有检查和更新均无 await，避免并发穿透。
  */
 function hasTaskCapacity(task: AsyncImageTask, bytes: number) {
+  const totalLimit = getTaskLimit(
+    "ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES",
+    512 * 1024 * 1024
+  );
+  const userLimit = getTaskLimit(
+    "ASYNC_IMAGE_TASK_MAX_RESULT_BYTES_PER_USER",
+    256 * 1024 * 1024
+  );
+  const keyLimit = getTaskLimit(
+    "ASYNC_IMAGE_TASK_MAX_RESULT_BYTES_PER_KEY",
+    256 * 1024 * 1024
+  );
+  // 先忽略所有现有占用核对单笔完整预留；永久放不下不能让客户端无限重试。
+  if (
+    bytes > totalLimit ||
+    bytes > userLimit ||
+    (task.apiKeyId && bytes > keyLimit)
+  ) {
+    throw new AsyncImageTaskCapacityError(413);
+  }
   let count = 0;
   let userCount = 0;
   let keyCount = 0;
@@ -133,34 +180,37 @@ function hasTaskCapacity(task: AsyncImageTask, bytes: number) {
     userCount < getTaskLimit("ASYNC_IMAGE_TASK_MAX_COUNT_PER_USER", 16) &&
     (!task.apiKeyId ||
       keyCount < getTaskLimit("ASYNC_IMAGE_TASK_MAX_COUNT_PER_KEY", 8)) &&
-    totalBytes + bytes <=
-      getTaskLimit(
-        "ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES",
-        64 * 1024 * 1024
-      ) &&
-    userBytes + bytes <=
-      getTaskLimit(
-        "ASYNC_IMAGE_TASK_MAX_RESULT_BYTES_PER_USER",
-        32 * 1024 * 1024
-      ) &&
-    (!task.apiKeyId ||
-      keyBytes + bytes <=
-        getTaskLimit(
-          "ASYNC_IMAGE_TASK_MAX_RESULT_BYTES_PER_KEY",
-          32 * 1024 * 1024
-        ))
+    totalBytes + bytes <= totalLimit &&
+    userBytes + bytes <= userLimit &&
+    (!task.apiKeyId || keyBytes + bytes <= keyLimit)
   );
 }
 
 /** 开始工作前按批次预留完整结果预算；元数据也计费，不能只为小型错误占位。 */
-function retainProcessingTask(task: AsyncImageTask) {
+function retainProcessingTask(
+  task: AsyncImageTask,
+  retention?: "storage" | "relay"
+) {
   removeExpiredTasks();
   const imageCount = task.generationIds?.length || 1;
+  const perGenerationBytes =
+    retention === "storage"
+      ? ASYNC_IMAGE_STORAGE_RESERVATION_BYTES
+      : retention === "relay"
+        ? Math.max(
+            ASYNC_IMAGE_RELAY_RESERVATION_BYTES,
+            getTaskLimit(
+              "ASYNC_IMAGE_TASK_RESULT_RESERVATION_BYTES",
+              16 * 1024 * 1024
+            )
+          )
+        : getTaskLimit(
+            "ASYNC_IMAGE_TASK_RESULT_RESERVATION_BYTES",
+            16 * 1024 * 1024
+          );
   const reservationBytes = Math.max(
-    getTaskLimit(
-      "ASYNC_IMAGE_TASK_RESULT_RESERVATION_BYTES",
-      16 * 1024 * 1024
-    ) * imageCount,
+    perGenerationBytes * imageCount +
+      (retention ? retainedBytes(task) + 4096 : 0),
     retainedBytes(task) + 512
   );
   if (!hasTaskCapacity(task, reservationBytes))
@@ -169,6 +219,7 @@ function retainProcessingTask(task: AsyncImageTask) {
     task,
     bytes: reservationBytes,
     reservationBytes,
+    retention,
   });
   return task;
 }
@@ -205,7 +256,7 @@ export function createAsyncImageTask(params: CreateAsyncImageTaskParams) {
           }
         : {}),
   };
-  return retainProcessingTask(task);
+  return retainProcessingTask(task, params.retention);
 }
 
 type CreateAsyncEditableFileTaskParams = {
@@ -249,6 +300,26 @@ export function getAsyncImageTask(id: string) {
 export function toAsyncImageTaskResponse(task: AsyncImageTask) {
   const { userId: _userId, apiKeyId: _apiKeyId, ...publicTask } = task;
   return publicTask;
+}
+
+/** 归属由 handler 先验证；普通图在 poll/callback 时才读取内容，不缓存编码后的响应。 */
+export async function resolveAsyncImageTaskResponse(
+  task: AsyncImageTask,
+  request: Request
+) {
+  const reference = asyncImageTasks.get(task.id)?.imageResult;
+  const publicTask = toAsyncImageTaskResponse(task);
+  if (!reference) return publicTask;
+  const {
+    history_pending: _history,
+    settlement_status: _settlement,
+    settlements: _settlements,
+    ...identity
+  } = publicTask;
+  return {
+    ...identity,
+    ...(await renderAsyncImageResult(request, reference)),
+  };
 }
 
 /** 一条 generation 记录(DB 回退查询用的最小字段集)。 */
@@ -316,9 +387,9 @@ export function toGenerationImageTaskResponse(
 }
 
 /**
- * 幂等完成任务并从此刻起计 TTL；正常结果即使超过预留也保留可轮询/回调的原内容。
- * 超预留只阻止后续准入，不把已扣费结果改成失败；因此字节预算是准入预算而非硬堆上限。
- * 不改 URL 模式、不落盘/落库；处理中任务即使超过 30min 也保留完成入口。
+ * 幂等完成并从此刻计 TTL；普通图仅保存引用，relay 图片已在成功结算前限制交付上界。
+ * 兼容的 editable 路径或调用契约异常仍保付费交付并阻止后续准入，不在此丢弃结果。
+ * 字节记账衡量留存 JSON，不声称 V8/RSS 硬上限；处理态超过 30min 仍保留完成入口。
  */
 export function completeAsyncImageTask(
   id: string,
@@ -332,7 +403,15 @@ export function completeAsyncImageTask(
 
   const now = new Date();
   const completedAt = now.toISOString();
-  const payload = params.error ?? params.result;
+  const imageResult = params.imageResult
+    ? toAsyncImageResultReference(params.imageResult, existing.userId)
+    : undefined;
+  const resultFailed =
+    imageResult?.results.some((result) => result.error) === true;
+  const payload =
+    params.error && entry.retention && !params.result
+      ? boundedTaskError(params.error)
+      : (params.error ?? params.result);
   const payloadFields =
     payload && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as Record<string, unknown>)
@@ -342,16 +421,24 @@ export function completeAsyncImageTask(
   let task: AsyncImageTask = {
     ...existing,
     ...payloadFields,
+    ...(imageResult
+      ? {
+          created: imageResult.created,
+          ...toAsyncGenerationUsage(imageResult.results),
+        }
+      : {}),
     id: existing.id,
     userId: existing.userId,
     apiKeyId: existing.apiKeyId,
     created_at: existing.created_at,
     object: params.completedObject ?? "image",
-    status: params.error ? "failed" : "completed",
+    status: params.error || resultFailed ? "failed" : "completed",
     completed: Math.floor(now.getTime() / 1000),
     completed_at: completedAt,
   };
-  let bytes = retainedBytes(task);
+  let bytes =
+    retainedBytes(task) +
+    (imageResult ? Buffer.byteLength(JSON.stringify(imageResult)) : 0);
   if (!Number.isFinite(bytes)) {
     task = {
       ...existing,
@@ -380,6 +467,7 @@ export function completeAsyncImageTask(
     );
   }
   entry.task = task;
+  entry.imageResult = imageResult;
   entry.bytes = bytes;
   const ttl = Math.min(
     getTaskLimit("ASYNC_IMAGE_TASK_RESULT_TTL_MS", 30 * 60_000),
@@ -391,6 +479,30 @@ export function completeAsyncImageTask(
   }, ttl);
   entry.timeout.unref?.();
   return task;
+}
+
+/** 失败只留有限错误标量，防上游把整段正文当异常消息挂在 30 分钟任务中。 */
+function boundedTaskError(payload: unknown) {
+  const record =
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : {};
+  const error =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : record;
+  return {
+    error: {
+      message: String(error.message ?? payload).slice(0, 4096),
+      ...(typeof error.type === "string"
+        ? { type: error.type.slice(0, 128) }
+        : {}),
+      ...(typeof error.code === "string"
+        ? { code: error.code.slice(0, 128) }
+        : {}),
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+    },
+  };
 }
 
 /** 逐跳校验公网地址并在 10 秒内尝试回调；失败只记录元信息，不改变任务终态。 */
@@ -408,7 +520,17 @@ export async function postAsyncImageCallback(
         "Content-Type": "application/json",
         "X-Tokens-Callback": "true",
       },
-      body: JSON.stringify(toAsyncImageTaskResponse(payload)),
+      body: JSON.stringify(
+        await resolveAsyncImageTaskResponse(
+          payload,
+          new Request(
+            process.env.NEXT_PUBLIC_APP_URL ||
+              process.env.BETTER_AUTH_URL ||
+              callbackUrl,
+            { signal: controller.signal }
+          )
+        )
+      ),
     });
     if (!response.ok) {
       logError(new Error(`Callback returned HTTP ${response.status}`), {

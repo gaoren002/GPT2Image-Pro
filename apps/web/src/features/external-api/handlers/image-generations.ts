@@ -20,6 +20,10 @@ import {
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
+import {
+  toAsyncImageResultPayload,
+  runAsyncImageGeneration,
+} from "@/features/external-api/async-image-result";
 import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
@@ -37,6 +41,7 @@ import {
 } from "@/features/external-api/images";
 import { runBatchImageGeneration } from "@/features/image-generation/batch-runner";
 import { runImageGenerationForUser } from "@/features/image-generation/operations";
+import { ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT } from "@/features/image-generation/async-image-limits";
 import {
   estimateImageGenerationQueueBytes,
   ImageGenerationQueueError,
@@ -199,10 +204,24 @@ export const postExternalImageGenerations = withApiLogging(
     }
 
     const imageModel = normalizeExternalImageModelInput(parsed.data.model);
+    const useAsync =
+      parsed.data.async === true ||
+      request.nextUrl.searchParams.get("async") === "true";
+    const count = parsed.data.n || 1;
+    if (
+      useAsync &&
+      auth.relayOnly &&
+      count > ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT
+    ) {
+      return openAIImageError(
+        `Relay async n must be between 1 and ${ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT}.`,
+        413,
+        "async_image_batch_too_large"
+      );
+    }
 
     const plan = await getUserPlan(auth.userId);
     const limits = await getPlanLimits(plan.plan);
-    const count = parsed.data.n || 1;
     if (
       count > 1 &&
       !(await canUsePlanCapability(plan.plan, "imageGeneration.batch"))
@@ -228,9 +247,6 @@ export const postExternalImageGenerations = withApiLogging(
         "insufficient_plan"
       );
     }
-    const useAsync =
-      parsed.data.async === true ||
-      request.nextUrl.searchParams.get("async") === "true";
     const useStreamResponse = wantsImageStreamResponse(
       request,
       parsed.data.stream
@@ -258,6 +274,7 @@ export const postExternalImageGenerations = withApiLogging(
       signal: useAsync ? undefined : request.signal,
       apiKeyId: auth.apiKeyId,
       relayOnly: auth.relayOnly,
+      asyncDelivery: useAsync,
       backendRequestKind: "image_generation" as const,
       prompt: parsed.data.prompt,
       promptOptimization:
@@ -358,6 +375,7 @@ export const postExternalImageGenerations = withApiLogging(
           apiKeyId: auth.apiKeyId,
           model: imageModel,
           generationIds,
+          retention: auth.relayOnly ? "relay" : "storage",
         });
       } catch (error) {
         for (const reservation of reservations) reservation.release();
@@ -385,26 +403,31 @@ export const postExternalImageGenerations = withApiLogging(
             const reservation = reservationByGenerationId.get(generationId);
             if (!reservation)
               throw new Error("Missing image queue reservation");
-            return runWithImageGenerationQueueReservation(reservation, () =>
-              runImageGenerationForUser({ ...input, generationId })
+            return runAsyncImageGeneration(generationId, () =>
+              runWithImageGenerationQueueReservation(reservation, () =>
+                runImageGenerationForUser({ ...input, generationId })
+              )
             );
           },
         }).finally(() => {
           for (const reservation of reservations) reservation.release();
         });
-        const resultPayload = await toOpenAIImagesResponse(
-          request,
-          results,
-          responseFormat,
-          created,
-          {
-            route: "/v1/images/generations",
-            async: true,
-            model: imageModel,
-            size: input.size,
-          }
-        );
+        const resultPayload = auth.relayOnly
+          ? await toAsyncImageResultPayload(request, {
+              results,
+              responseFormat,
+              created,
+            })
+          : undefined;
         const completedTask = completeAsyncImageTask(task.id, {
+          imageResult: auth.relayOnly
+            ? undefined
+            : {
+                results,
+                responseFormat,
+                created,
+                publicBaseUrl: new URL(request.url).origin,
+              },
           error:
             resultPayload &&
             typeof resultPayload === "object" &&

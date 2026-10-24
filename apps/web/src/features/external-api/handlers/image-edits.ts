@@ -21,6 +21,10 @@ import {
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
+import {
+  toAsyncImageResultPayload,
+  runAsyncImageGeneration,
+} from "@/features/external-api/async-image-result";
 import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
@@ -43,6 +47,7 @@ import {
 } from "@/features/external-api/safe-image-fetch";
 import { runBatchImageGeneration } from "@/features/image-generation/batch-runner";
 import { runImageGenerationForUser } from "@/features/image-generation/operations";
+import { ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT } from "@/features/image-generation/async-image-limits";
 import {
   estimateImageGenerationQueueBytes,
   ImageGenerationQueueError,
@@ -664,12 +669,32 @@ export const postExternalImageEdits = withApiLogging(
     // 高清修复:显式 false 走轻量 general-x4v3;undefined/true 由后端选 SwinIR 超分。
     const hdRepair = getOptionalBoolean(formData, "hdRepair", "hd_repair");
 
+    const useAsync =
+      getOptionalBoolean(formData, "async") === true ||
+      request.nextUrl.searchParams.get("async") === "true";
     let count = 1;
     try {
-      count = getCount(formData, planLimits.maxBatchCount);
+      // relay async 的硬批次界先于套餐界，保证超 4 在任何合法套餐下均为预付费前 413。
+      count = getCount(
+        formData,
+        useAsync && auth.relayOnly
+          ? Number.MAX_SAFE_INTEGER
+          : planLimits.maxBatchCount
+      );
     } catch (error) {
       return openAIImageError(
         error instanceof Error ? error.message : "Invalid n."
+      );
+    }
+    if (
+      useAsync &&
+      auth.relayOnly &&
+      count > ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT
+    ) {
+      return openAIImageError(
+        `Relay async n must be between 1 and ${ASYNC_IMAGE_MAX_RELAY_BATCH_COUNT}.`,
+        413,
+        "async_image_batch_too_large"
       );
     }
     if (
@@ -734,9 +759,6 @@ export const postExternalImageEdits = withApiLogging(
       request,
       getBoolean(formData, "stream")
     );
-    const useAsync =
-      getOptionalBoolean(formData, "async") === true ||
-      request.nextUrl.searchParams.get("async") === "true";
     if (useAsync && useStreamResponse) {
       return openAIImageError("async cannot be used with stream.");
     }
@@ -798,6 +820,7 @@ export const postExternalImageEdits = withApiLogging(
             generationId,
             apiKeyId: auth.apiKeyId,
             relayOnly: auth.relayOnly,
+            asyncDelivery: useAsync,
             backendRequestKind: "image_edit" as const,
             prompt,
             promptOptimization,
@@ -897,6 +920,7 @@ export const postExternalImageEdits = withApiLogging(
             apiKeyId: auth.apiKeyId,
             model,
             generationIds,
+            retention: auth.relayOnly ? "relay" : "storage",
           });
         } catch (error) {
           for (const reservation of reservations) reservation.release();
@@ -915,26 +939,31 @@ export const postExternalImageEdits = withApiLogging(
               const reservation = reservationByGenerationId.get(generationId);
               if (!reservation)
                 throw new Error("Missing image queue reservation");
-              return runWithImageGenerationQueueReservation(reservation, () =>
-                runEdit(generationId)
+              return runAsyncImageGeneration(generationId, () =>
+                runWithImageGenerationQueueReservation(reservation, () =>
+                  runEdit(generationId)
+                )
               );
             },
           }).finally(() => {
             for (const reservation of reservations) reservation.release();
           });
-          const resultPayload = await toOpenAIImagesResponse(
-            request,
-            results,
-            responseFormat,
-            created,
-            {
-              route: "/v1/images/edits",
-              async: true,
-              model,
-              size,
-            }
-          );
+          const resultPayload = auth.relayOnly
+            ? await toAsyncImageResultPayload(request, {
+                results,
+                responseFormat,
+                created,
+              })
+            : undefined;
           const completedTask = completeAsyncImageTask(task.id, {
+            imageResult: auth.relayOnly
+              ? undefined
+              : {
+                  results,
+                  responseFormat,
+                  created,
+                  publicBaseUrl: new URL(request.url).origin,
+                },
             error:
               resultPayload &&
               typeof resultPayload === "object" &&

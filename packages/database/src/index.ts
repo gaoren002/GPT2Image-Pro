@@ -4,6 +4,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
 import { buildPgPoolConfig } from "./pool-config";
+import { observePoolErrors } from "./pool-errors";
 import * as schema from "./schema";
 
 /**
@@ -55,12 +56,14 @@ function createDatabaseConnection() {
 
     // 使用 WebSocket 连接池，支持事务
     const pool = new NeonPool({ connectionString: databaseUrl });
+    observePoolErrors(pool);
     return drizzleNeonWs(pool, { schema });
   }
 
   // 标准 PostgreSQL 连接池 (本地开发/Docker)。池大小与取连接超时见 pool-config.ts：
   // 不设取连接超时时，池占满后请求会无限排队，循环等待即整站挂起。
   const pool = new Pool(buildPgPoolConfig(databaseUrl));
+  observePoolErrors(pool);
   return drizzlePg(pool, { schema });
 }
 

@@ -1,3 +1,4 @@
+/** 外接 API Key 鉴权与套餐复核；使用时间最多每分钟写一次，不缓存授权状态。 */
 import { db } from "@repo/database";
 import { externalApiKey, user } from "@repo/database/schema";
 import {
@@ -6,10 +7,13 @@ import {
 } from "@repo/shared/config/subscription-plan";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import { canUsePlanCapability } from "@repo/shared/subscription/services/plan-capabilities";
-import { and, eq } from "drizzle-orm";
+import { describeErrorForLog } from "@repo/shared/db/error-summary";
+import { logWarn } from "@repo/shared/logger";
+import { and, eq, isNull, lt, or } from "drizzle-orm";
 
 import { getBearerToken, hashApiKey, safeEqual } from "./auth-token";
 
+/** 返回已核验身份和额度快照或 null；鉴权读失败上抛，遥测写失败只告警。 */
 export async function authenticateExternalApiRequest(request: Request) {
   const token = getBearerToken(request);
   if (!token) {
@@ -25,13 +29,17 @@ export async function authenticateExternalApiRequest(request: Request) {
       moderationBlockRiskLevel: externalApiKey.moderationBlockRiskLevel,
       creditLimit: externalApiKey.creditLimit,
       creditsUsed: externalApiKey.creditsUsed,
+      lastUsedAt: externalApiKey.lastUsedAt,
       relayOnly: externalApiKey.relayOnly,
       userBanned: user.banned,
     })
     .from(externalApiKey)
     .innerJoin(user, eq(user.id, externalApiKey.userId))
     .where(
-      and(eq(externalApiKey.keyHash, keyHash), eq(externalApiKey.isActive, true))
+      and(
+        eq(externalApiKey.keyHash, keyHash),
+        eq(externalApiKey.isActive, true)
+      )
     )
     .limit(1);
 
@@ -48,20 +56,42 @@ export async function authenticateExternalApiRequest(request: Request) {
     apiKey.relayOnly === true &&
     (await canUsePlanCapability(plan.plan, "externalApi.relay"));
 
-  await db
-    .update(externalApiKey)
-    .set({ lastUsedAt: new Date(), updatedAt: new Date() })
-    .where(eq(externalApiKey.id, apiKey.id));
+  const now = new Date();
+  const usageCutoff = new Date(now.getTime() - 60_000);
+  if (!apiKey.lastUsedAt || apiKey.lastUsedAt < usageCutoff) {
+    // 高频轮询不应每次改同一行。SQL 再检时间，避免并发请求的旧快照重复写入。
+    // 这是遥测，不是授权条件；写失败必须告警，但不能拒绝已核验的 Key。
+    try {
+      await db
+        .update(externalApiKey)
+        .set({ lastUsedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(externalApiKey.id, apiKey.id),
+            eq(externalApiKey.isActive, true),
+            or(
+              isNull(externalApiKey.lastUsedAt),
+              lt(externalApiKey.lastUsedAt, usageCutoff)
+            )
+          )
+        );
+    } catch (error) {
+      logWarn("API Key 使用时间记录失败", {
+        apiKeyId: apiKey.id,
+        error: describeErrorForLog(error),
+      });
+    }
+  }
 
   return {
     apiKeyId: apiKey.id,
     userId: apiKey.userId,
     plan: plan.plan,
-    moderationBlockRiskLevel: (
-      isModerationBlockRiskLevel(apiKey.moderationBlockRiskLevel)
-        ? apiKey.moderationBlockRiskLevel
-        : "low"
-    ) satisfies ModerationBlockRiskLevel,
+    moderationBlockRiskLevel: (isModerationBlockRiskLevel(
+      apiKey.moderationBlockRiskLevel
+    )
+      ? apiKey.moderationBlockRiskLevel
+      : "low") satisfies ModerationBlockRiskLevel,
     creditLimit: apiKey.creditLimit ?? null,
     creditsUsed: Number(apiKey.creditsUsed || 0),
     relayOnly,

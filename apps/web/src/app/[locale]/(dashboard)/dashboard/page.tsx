@@ -1,6 +1,6 @@
 import { db } from "@repo/database";
 import { creditsBalance, generation } from "@repo/database/schema";
-import { auth } from "@repo/shared/auth";
+import { getServerSession } from "@repo/shared/auth/server";
 import { formatCredits } from "@repo/shared/credits/format";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
@@ -13,7 +13,6 @@ import {
 } from "@repo/ui/components/card";
 import { and, count, desc, eq } from "drizzle-orm";
 import { Coins, Image as ImageIcon, ImagePlus } from "lucide-react";
-import { headers } from "next/headers";
 import { getLocale } from "next-intl/server";
 import { redirect } from "next/navigation";
 import { ImagePricingChartCardLazy } from "@/features/dashboard/components/image-pricing-chart-card-lazy";
@@ -27,7 +26,7 @@ import { getRuntimeImageBaseCreditPricing } from "@/features/image-generation/pr
 import { getImageBaseCreditPricing } from "@/features/image-generation/resolution";
 import { Link } from "@/i18n/routing";
 import { getPlanCapabilitySnapshot } from "@repo/shared/subscription/services/plan-capabilities";
-import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
+import { getDashboardUserPlan } from "@/features/dashboard/server-reads";
 import { cn } from "@repo/ui/utils";
 
 /**
@@ -42,11 +41,10 @@ const sectionEnterClass =
  * 卡片 hover 抬升:轻位移 + whisper 阴影 + 边框提亮。
  * Tailwind v4 的 -translate-y-* 产出原生 CSS translate 属性,过渡列表须写 translate 而非 transform。
  */
-const cardLiftClass =
-  "lift-hover motion-reduce:transition-none";
+const cardLiftClass = "lift-hover motion-reduce:transition-none";
 
 export default async function DashboardPage() {
-  const session = await auth.api.getSession({ headers: await headers() });
+  const session = await getServerSession();
   const locale = await getLocale();
   if (!session?.user) {
     redirect(`/${locale}/sign-in`);
@@ -58,7 +56,7 @@ export default async function DashboardPage() {
   const copy = (en: string, zh: string) => (isZh ? zh : en);
 
   // 依赖 plan 的第二组查询挂在 planPromise 链上与第一组并发,消除串行等待。
-  const planPromise = getUserPlan(userId);
+  const planPromise = getDashboardUserPlan(userId);
   const [
     balanceData,
     recentGenerations,
@@ -90,9 +88,7 @@ export default async function DashboardPage() {
     planPromise,
     planPromise.then((p) => getPlanCapabilitySnapshot(p.plan)),
     planPromise.then((p) => listImageBackendGroupOptions({ plan: p.plan })),
-    planPromise.then((p) =>
-      getUserImageBackendPreference(userId, p.plan)
-    ),
+    planPromise.then((p) => getUserImageBackendPreference(userId, p.plan)),
   ]);
 
   const balance = formatCredits(balanceData?.balance ?? 0);
@@ -144,7 +140,10 @@ export default async function DashboardPage() {
               <CardTitle className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                 {copy("Credits Balance", "积分余额")}
               </CardTitle>
-              <Coins className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
+              <Coins
+                className="h-4 w-4 text-muted-foreground"
+                strokeWidth={1.5}
+              />
             </CardHeader>
             <CardContent>
               <div className="font-serif text-3xl font-medium tracking-tight">
@@ -173,7 +172,10 @@ export default async function DashboardPage() {
               <CardTitle className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
                 {copy("Images Generated", "已生成图片")}
               </CardTitle>
-              <ImageIcon className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
+              <ImageIcon
+                className="h-4 w-4 text-muted-foreground"
+                strokeWidth={1.5}
+              />
             </CardHeader>
             <CardContent>
               <div className="font-serif text-3xl font-medium tracking-tight">
@@ -215,7 +217,8 @@ export default async function DashboardPage() {
               chatRoundCredits: capabilities.billing.chatRoundCredits,
               groupMultiplier: activeBackendGroup?.billingMultiplier ?? 1,
               groupName: activeBackendGroup?.name ?? null,
-              qualityMultipliers: activeBackendGroup?.qualityMultipliers ?? null,
+              qualityMultipliers:
+                activeBackendGroup?.qualityMultipliers ?? null,
               modelQualityMultipliers:
                 activeBackendGroup?.modelQualityMultipliers ?? null,
               moderationBlockingEnabled:

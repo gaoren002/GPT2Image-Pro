@@ -2,10 +2,12 @@
 // 这些组件及其依赖一并拖进每页必载的公共 bundle(tree-shaking 被 barrel 破坏)。
 
 import { countUnreadAnnouncementsForUser } from "@repo/shared/announcements/service";
-import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { getServerSession } from "@repo/shared/auth/server";
-import { getSidebarCreditsBalance } from "@repo/shared/credits/core";
-import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
+import {
+  getDashboardCreditsBalance,
+  getDashboardUserPlan,
+  getDashboardUserRole,
+} from "@/features/dashboard/server-reads";
 import { countUnreadTicketsForUser } from "@repo/shared/support/services/ticket-unread";
 import { DashboardMainWrapper } from "@/features/dashboard/components/main-wrapper";
 import { DashboardSidebar } from "@/features/dashboard/components/sidebar";
@@ -29,11 +31,11 @@ export default async function DashboardLayout({
 }) {
   const serverSession = await getServerSession();
   const userId = serverSession?.user?.id;
-  // 余额/套餐/未读数并行预取(与 getUserRoleById 互不依赖);
+  // 余额/未读数并行预取；套餐共用角色 bootstrap 后的单次渲染快照。
   // 未登录时全空,走登录页重定向,不阻塞。
   const [initialSession, sidebarPrefetch] = await Promise.all([
     userId
-      ? getUserRoleById(userId).then((role) => ({
+      ? getDashboardUserRole(userId).then((role) => ({
           user: {
             id: userId,
             name: serverSession.user.name || "",
@@ -45,8 +47,8 @@ export default async function DashboardLayout({
       : Promise.resolve(null),
     userId
       ? Promise.all([
-          getSidebarCreditsBalance(userId).then((b) => b.balance),
-          getUserPlan(userId).then((p) => p.plan),
+          getDashboardCreditsBalance(userId).then((b) => b.balance),
+          getDashboardUserPlan(userId).then((p) => p.plan),
           countUnreadTicketsForUser(userId).then((n) => Math.max(0, Number(n))),
           countUnreadAnnouncementsForUser(userId).then((n) =>
             Math.max(0, Number(n))

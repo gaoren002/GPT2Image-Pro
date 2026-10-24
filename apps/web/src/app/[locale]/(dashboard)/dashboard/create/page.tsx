@@ -1,11 +1,13 @@
 import { getCurrentUser } from "@repo/shared/auth/server";
 
-import { getCreditsBalance } from "@repo/shared/credits/core";
+import {
+  getDashboardCreditsBalance,
+  getDashboardUserPlan,
+} from "@/features/dashboard/server-reads";
 import { isContentModerationEnabled } from "@repo/shared/moderation";
 import { buildSignedStorageImageUrl } from "@repo/shared/storage/signed-url";
 import { getPlanCapabilitySnapshot } from "@repo/shared/subscription/services/plan-capabilities";
 import { getPlanUploadLimits } from "@repo/shared/subscription/services/upload-limits";
-import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import { getRuntimeSettingNumber } from "@repo/shared/system-settings";
 import { getAppTimeZone } from "@repo/shared/time-zone/server";
 import { getLocale } from "next-intl/server";
@@ -31,7 +33,7 @@ export default async function CreatePage() {
   // 三组查询此前为三段串行 await,相互独立时可并行;plan 本身只查一次,
   // 依赖它的下游(uploadLimits/backendGroups/preference/capabilities)挂在
   // 同一个 planPromise 链上,与无依赖查询并发执行。
-  const planPromise = getUserPlan(user.id);
+  const planPromise = getDashboardUserPlan(user.id);
   const [
     creditsData,
     recentGenerations,
@@ -47,7 +49,7 @@ export default async function CreatePage() {
     forceWebMinPixels,
     forceWebMaxPixels,
   ] = await Promise.all([
-    getCreditsBalance(user.id),
+    getDashboardCreditsBalance(user.id),
     getUserRecentGenerations(user.id, 6),
     planPromise,
     getUserApiConfig(user.id),
@@ -56,9 +58,7 @@ export default async function CreatePage() {
     // 报价需要看到 mixed 父组的全部可用子组（包括不允许用户直接选择的隐藏组），
     // 否则页面无法预测服务端实际命中的子组倍率。
     planPromise.then((p) => listImageBackendGroupOptions({ plan: p.plan })),
-    planPromise.then((p) =>
-      getUserImageBackendPreference(user.id, p.plan)
-    ),
+    planPromise.then((p) => getUserImageBackendPreference(user.id, p.plan)),
     isContentModerationEnabled(),
     planPromise.then((p) => getPlanCapabilitySnapshot(p.plan)),
     getRuntimeImageBaseCreditPricing(),

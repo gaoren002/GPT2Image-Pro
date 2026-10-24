@@ -138,9 +138,29 @@ func (p *upstreamPool) Status() []map[string]any {
 	return out
 }
 
+// maskProxyCredential 脱敏上游 URL 中的口令，用于 /healthz 状态与日志。
+// 解析失败时不回显原文：/healthz 不鉴权，而非法转义（如口令含 % 字面量）恰恰
+// 会让 url.Parse 失败，原样返回等于把明文口令直接输出。
 func maskProxyCredential(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
+	if err != nil {
+		// 无法结构化解析：按 userinfo 分隔符做字符串级兜底，仍不输出口令。
+		if at := strings.LastIndex(raw, "@"); at >= 0 {
+			scheme := ""
+			rest := raw[:at]
+			if sep := strings.Index(rest, "://"); sep >= 0 {
+				scheme = rest[:sep+3]
+				rest = rest[sep+3:]
+			}
+			user := rest
+			if colon := strings.Index(rest, ":"); colon >= 0 {
+				user = rest[:colon]
+			}
+			return scheme + user + ":***@" + raw[at+1:]
+		}
+		return raw
+	}
+	if u.User == nil {
 		return raw
 	}
 	// 手工拼串而非 u.String()：后者会把 *** 百分号编码成 %2A%2A%2A。
@@ -158,19 +178,25 @@ func (p *upstreamPool) probeUpstream(proxyURL string) error {
 	return probeViaProfile(defaultProfile, proxyURL, p.probeURL, defaultProbeTimeoutSec)
 }
 
+// probeResult 单个上游的探测结果，idx 为其在 entries 中的下标。
+type probeResult struct {
+	idx int
+	err error
+}
+
 // checkOnce 执行一轮探测：逐个探测池内全部上游（active 与备胎，保持 /healthz
 // 状态新鲜、切换时无需现探），active 连续 failLimit 次失败且存在健康备胎时切换。
 // 返回是否发生了切换（供测试断言）。
+// WHY onSwitch 必须在释放 p.mu 之后调用：回调会去拿 server.mu（重建会话 client），
+// 而 getClient 持有 server.mu 时会调用 ActiveURL() 拿 p.mu。两条路径加锁顺序相反，
+// 交错即永久死锁，/request 与 /healthz 全部挂起且不会自愈（出口被封时切换与新建
+// 会话同时发生，正是最可能的时机）。
 func (p *upstreamPool) checkOnce() bool {
 	if p == nil || len(p.entries) == 0 {
 		return false
 	}
 
 	// 锁外逐个探测（探测含网络 IO，不能持锁）。
-	type probeResult struct {
-		idx int
-		err error
-	}
 	p.mu.Lock()
 	indexes := make([]int, 0, len(p.entries))
 	for i := range p.entries {
@@ -182,8 +208,26 @@ func (p *upstreamPool) checkOnce() bool {
 		results = append(results, probeResult{idx: i, err: p.probeUpstream(p.entries[i].URL)})
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	// 切换信息在锁内记录、锁外回调，避免与 server.mu 形成反向加锁顺序。
+	var switchedFrom, switchedTo string
+	switched := func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.applyProbeResults(results, &switchedFrom, &switchedTo)
+	}()
+	if switched && p.onSwitch != nil {
+		p.onSwitch(switchedFrom, switchedTo)
+	}
+	return switched
+}
+
+// applyProbeResults 在持有 p.mu 的前提下写回探测结果并按阈值切换 active。
+// 发生切换时把旧/新上游写入 switchedFrom/switchedTo，由调用方在锁外触发 onSwitch。
+func (p *upstreamPool) applyProbeResults(
+	results []probeResult,
+	switchedFrom *string,
+	switchedTo *string,
+) bool {
 	now := time.Now()
 	for _, r := range results {
 		e := p.entries[r.idx]
@@ -228,9 +272,8 @@ func (p *upstreamPool) checkOnce() bool {
 	p.active = next
 	log.Printf("[upstream-pool] SWITCH %s -> %s",
 		maskProxyCredential(oldURL), maskProxyCredential(target.URL))
-	if p.onSwitch != nil {
-		p.onSwitch(oldURL, target.URL)
-	}
+	*switchedFrom = oldURL
+	*switchedTo = target.URL
 	return true
 }
 

@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,50 @@ func TestPoolRecoveryClearsFailures(t *testing.T) {
 	}
 }
 
+// onSwitch 必须在释放 p.mu 之后调用：真实回调会去拿 server.mu 重建会话 client，
+// 而 getClient 持 server.mu 时会调用 ActiveURL() 拿 p.mu。若回调在锁内触发，两条
+// 路径加锁顺序相反，交错即永久死锁（/request 与 /healthz 全部挂起，不会自愈）。
+// 这里在回调内部回调 ActiveURL：sync.Mutex 不可重入，锁内触发会卡死而非返回。
+func TestPoolSwitchCallbackRunsWithoutPoolLock(t *testing.T) {
+	p := newUpstreamPool(
+		[]string{"socks5://a:1080", "socks5://b:1080"},
+		1,
+		time.Minute,
+		"https://probe.example/",
+	)
+	p.probe = func(proxyURL string) error {
+		if proxyURL == "socks5://a:1080" {
+			return errors.New("unexpected EOF")
+		}
+		return nil
+	}
+	activeInCallback := make(chan string, 1)
+	p.onSwitch = func(_ string, _ string) {
+		activeInCallback <- p.ActiveURL()
+	}
+
+	switched := make(chan bool, 1)
+	go func() { switched <- p.checkOnce() }()
+
+	select {
+	case active := <-activeInCallback:
+		if active != "socks5://b:1080" {
+			t.Fatalf("回调内读到的 active=%s, 应为切换后的备胎", active)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("onSwitch 在持有池锁时触发: 回调内 ActiveURL 死锁")
+	}
+
+	select {
+	case ok := <-switched:
+		if !ok {
+			t.Fatal("达到阈值应发生切换")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkOnce 未返回")
+	}
+}
+
 func TestMaskProxyCredential(t *testing.T) {
 	got := maskProxyCredential("socks5://warp:secret@1.2.3.4:1080")
 	if got != "socks5://warp:***@1.2.3.4:1080" {
@@ -135,5 +180,20 @@ func TestMaskProxyCredential(t *testing.T) {
 	}
 	if got := maskProxyCredential("socks5://1.2.3.4:1080"); got != "socks5://1.2.3.4:1080" {
 		t.Errorf("无凭据不应改写: %s", got)
+	}
+
+	// /healthz 不鉴权，解析失败时不得回显明文口令：口令含 % 字面量恰好会让
+	// url.Parse 失败（非法转义），原样返回等于把口令输出到未鉴权接口。
+	unparsable := "socks5://warp:p%zzassword@1.2.3.4:1080"
+	got = maskProxyCredential(unparsable)
+	if strings.Contains(got, "p%zzassword") {
+		t.Errorf("解析失败时泄露明文口令: %s", got)
+	}
+	if got != "socks5://warp:***@1.2.3.4:1080" {
+		t.Errorf("解析失败兜底脱敏结果错: %s", got)
+	}
+	// 无 userinfo 的非法 URL 不含口令，保持原样便于排查。
+	if got := maskProxyCredential("socks5://1.2.3.4:10%80"); got != "socks5://1.2.3.4:10%80" {
+		t.Errorf("无凭据的非法 URL 不应改写: %s", got)
 	}
 }

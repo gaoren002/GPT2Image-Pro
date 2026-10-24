@@ -108,6 +108,16 @@ services:
       CHATGPT_WEB_UPSTREAM_PROXY_URL: ${CHATGPT_WEB_UPSTREAM_PROXY_URL:-}
       CHATGPT_WEB_UPSTREAM_PROBE_INTERVAL_SECONDS: ${CHATGPT_WEB_UPSTREAM_PROBE_INTERVAL_SECONDS:-60}
       CHATGPT_WEB_UPSTREAM_PROBE_FAILURES: ${CHATGPT_WEB_UPSTREAM_PROBE_FAILURES:-3}
+    # /healthz 在转发线程被阻塞时也会挂起，因此这个探测能暴露"进程在、但请求全部卡住"
+    # 的状态（compose 的 restart 策略不会因 unhealthy 自动重启，需外部监控或人工介入）。
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -T 5 -O /dev/null http://127.0.0.1:3021/healthz || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   postgres-data:

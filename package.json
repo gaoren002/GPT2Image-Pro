@@ -20,7 +20,9 @@
   "packageManager": "pnpm@10.27.0",
   "pnpm": {
     "overrides": {
-      "kysely": "0.28.17"
+      "kysely": "0.28.17",
+      "next": "16.4.1",
+      "sharp": "0.35.5"
     }
   },
   "license": "AGPL-3.0-only"

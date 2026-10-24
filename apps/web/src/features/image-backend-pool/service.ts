@@ -2851,16 +2851,31 @@ async function selectPoolMember(
 
   let sawStaleCandidate = false;
   for (const member of candidates) {
-    const leaseResult = await acquirePoolMemberInflightLease(member, {
-      enforceLastAcquiredSnapshot:
-        (member.schedulerLayer || "load_balance") === "load_balance",
-      // Web 纯文字借用可能刻意选中仅图片额度受限的账号；租约不能顺手清除其
-      // image_gen 状态，否则该账号会被图片调度误认为已经恢复。
-      preserveAvailabilityState:
-        webRequestMode === "text" &&
-        member.type === "account" &&
-        member.implementationMode === "web",
-    });
+    let leaseResult: Awaited<
+      ReturnType<typeof acquirePoolMemberInflightLease>
+    >;
+    try {
+      leaseResult = await acquirePoolMemberInflightLease(member, {
+        enforceLastAcquiredSnapshot:
+          (member.schedulerLayer || "load_balance") === "load_balance",
+        // Web 纯文字借用可能刻意选中仅图片额度受限的账号；租约不能顺手清除其
+        // image_gen 状态，否则该账号会被图片调度误认为已经恢复。
+        preserveAvailabilityState:
+          webRequestMode === "text" &&
+          member.type === "account" &&
+          member.implementationMode === "web",
+      });
+    } catch (error) {
+      // 租约语句失败（语句超时、锁等待、取连接超时、连接中断）只跳过该候选：
+      // 既不像从前那样当成"缺表"静默放弃跨实例并发控制，也不让单点抖动打死整次
+      // 请求——候选全部失败时按下方逻辑返回 null，上层报"无可用后端"。
+      logWarn("生图后端候选租约失败，跳过该候选", {
+        memberType: member.type,
+        memberId: member.id,
+        error: describeErrorForLog(error),
+      });
+      continue;
+    }
     if (leaseResult === "stale") {
       sawStaleCandidate = true;
       continue;

@@ -74,6 +74,7 @@ vi.mock("../logger", () => ({
 
 import {
   REGISTRATION_CODE_SEND_FAILED_MESSAGE,
+  RegistrationVerificationError,
   sendRegistrationVerificationCode,
 } from "./registration-verification";
 
@@ -89,7 +90,8 @@ describe("sendRegistrationVerificationCode 发信失败", () => {
       "new-user@example.com"
     ).catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(Error);
+    // 必须是可展示错误类型：路由层只回显该类型，其余转通用文案。
+    expect(error).toBeInstanceOf(RegistrationVerificationError);
     const message = (error as Error).message;
     expect(message).toBe(REGISTRATION_CODE_SEND_FAILED_MESSAGE);
     expect(message).not.toContain("10.0.0.5");

@@ -1,9 +1,9 @@
 /**
  * 内置浏览器 Origin 兼容逻辑测试（纯函数，DB-free）。
  *
- * 约束：只为缺失 Origin/Referer 且未被标记为跨站的认证 POST 补上本站 Origin，
- * 并保留 Cookie（登出、修改密码等依赖会话的端点需要它）；已带来源或明确跨站的请求
- * 一律原样交给 Better Auth 校验。
+ * 约束：只为 JSON 请求体、缺失 Origin/Referer 且未被标记为跨站的认证 POST 补上本站
+ * Origin，并保留 Cookie（登出、修改密码等依赖会话的端点需要它）；已带来源、明确跨站，
+ * 或表单编码的请求一律原样交给 Better Auth 校验。
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -87,6 +87,51 @@ describe("normalizeOriginlessAuthPost", () => {
       expect(
         normalizeOriginlessAuthPost(request).headers.get("origin"),
         site
+      ).toBe(APP);
+    }
+  });
+
+  it("跨站表单在 no-referrer 下发出的 Origin: null 不被补写", () => {
+    // 跨站导航型 POST 在 Referrer-Policy: no-referrer 下 Origin 序列化为 "null"
+    // 且不带 Referer；不发 Sec-Fetch-* 的老客户端无法据此判别，只能靠请求体类型：
+    // HTML 表单只能发 urlencoded/multipart/text-plain，发不出 JSON。
+    for (const contentType of [
+      "application/x-www-form-urlencoded",
+      "multipart/form-data; boundary=x",
+      "text/plain;charset=UTF-8",
+    ]) {
+      const request = new Request(`${APP}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: { "content-type": contentType, origin: "null" },
+        body: "email=victim%40example.com&password=attacker",
+      });
+      expect(normalizeOriginlessAuthPost(request), contentType).toBe(request);
+    }
+  });
+
+  it("缺少 content-type 的请求不被补写", () => {
+    const request = new Request(`${APP}/api/auth/sign-in/email`, {
+      method: "POST",
+      body: "email=a&password=b",
+      headers: { "content-type": "" },
+    });
+    expect(normalizeOriginlessAuthPost(request)).toBe(request);
+  });
+
+  it("JSON 判定忽略参数与大小写", () => {
+    for (const contentType of [
+      "application/json",
+      "Application/JSON; charset=utf-8",
+      " application/json ",
+    ]) {
+      const request = new Request(`${APP}/api/auth/reset-password`, {
+        method: "POST",
+        headers: { "content-type": contentType, cookie: "s=1" },
+        body: "{}",
+      });
+      expect(
+        normalizeOriginlessAuthPost(request).headers.get("origin"),
+        contentType
       ).toBe(APP);
     }
   });

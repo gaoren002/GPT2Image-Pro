@@ -6,6 +6,7 @@
  * 不得按消息子串推断（SQL 文本里必然含表名）。
  */
 
+import { DrizzleQueryError } from "drizzle-orm/errors";
 import { describe, expect, it } from "vitest";
 import {
   describeErrorForLog,
@@ -16,7 +17,12 @@ import {
 
 const ACCESS_TOKEN = "eyJhbGciOiJSUzI1NiJ9.super-secret-access-token";
 
-/** 还原 drizzle-orm 的包装形状：message 带 SQL 与参数，原始错误在 cause。 */
+/**
+ * 用 drizzle-orm 真实的 DrizzleQueryError 构造错误。
+ *
+ * 不手搓包装对象：真实实现不设置 this.name（实例 name 为 "Error"），手搓时若顺手
+ * 补上 name 会掩盖"按 name 判定失效"这一真实缺陷。
+ */
 function drizzleError(params: {
   sql: string;
   bindings: string[];
@@ -25,16 +31,13 @@ function drizzleError(params: {
   table?: string;
 }) {
   const cause = Object.assign(new Error("duplicate key value"), {
-    code: params.code,
-    constraint: params.constraint,
-    table: params.table,
+    ...(params.code === undefined ? {} : { code: params.code }),
+    ...(params.constraint === undefined
+      ? {}
+      : { constraint: params.constraint }),
+    ...(params.table === undefined ? {} : { table: params.table }),
   });
-  const wrapper = new Error(
-    `Failed query: ${params.sql}\nparams: ${params.bindings.join(", ")}`,
-    { cause }
-  );
-  wrapper.name = "DrizzleQueryError";
-  return wrapper;
+  return new DrizzleQueryError(params.sql, params.bindings, cause);
 }
 
 describe("summarizeDatabaseError", () => {
@@ -50,7 +53,8 @@ describe("summarizeDatabaseError", () => {
       code: "23505",
       constraint: "image_backend_account_access_token_hash_unique",
       table: "image_backend_account",
-      name: "DrizzleQueryError",
+      // 真实 DrizzleQueryError 不设置 name，实例 name 即 "Error"。
+      name: "Error",
     });
   });
 
@@ -77,7 +81,7 @@ describe("describeErrorForLog", () => {
     });
     const described = describeErrorForLog(error);
     expect(described).toBe(
-      "DrizzleQueryError(code=23505, constraint=image_backend_account_access_token_hash_unique)"
+      "DatabaseError(code=23505, constraint=image_backend_account_access_token_hash_unique)"
     );
     expect(described).not.toContain(ACCESS_TOKEN);
     expect(described).not.toContain("insert into");
@@ -91,8 +95,22 @@ describe("describeErrorForLog", () => {
       code: "55P03",
     });
     const described = describeErrorForLog(error);
-    expect(described).toBe("DrizzleQueryError(code=55P03)");
+    expect(described).toBe("DatabaseError(code=55P03)");
     expect(described).not.toContain("rt_secret_value");
+  });
+
+  it("底层驱动没有错误码时（断连）仍不回显 SQL 与参数", () => {
+    // 连接被对端关闭、取连接超时等失败的 cause 不带 code；此时只能靠 drizzle 包装层
+    // 自身特征识别，否则会回退成原样返回 message。
+    const error = drizzleError({
+      sql: 'insert into "image_backend_account" ("access_token") values ($1)',
+      bindings: [ACCESS_TOKEN],
+    });
+    expect((error as Error).name).toBe("Error");
+    const described = describeErrorForLog(error);
+    expect(described).toBe("DatabaseError");
+    expect(described).not.toContain(ACCESS_TOKEN);
+    expect(described).not.toContain("insert into");
   });
 
   it("非数据库错误保留原始信息便于排查", () => {
@@ -123,10 +141,10 @@ describe("hasDatabaseErrorCode", () => {
   });
 
   it("无错误码的连接中断同样不被误判", () => {
-    const disconnect = new Error(
-      'Failed query: insert into "image_backend_inflight_lease" ...'
-    );
-    disconnect.name = "DrizzleQueryError";
+    const disconnect = drizzleError({
+      sql: 'insert into "image_backend_inflight_lease" ("id") values ($1)',
+      bindings: ["lease-1"],
+    });
     expect(hasDatabaseErrorCode(disconnect, PG_UNDEFINED_TABLE)).toBe(false);
   });
 });

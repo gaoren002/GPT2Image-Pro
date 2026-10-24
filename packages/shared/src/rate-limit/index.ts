@@ -248,7 +248,19 @@ export async function checkRateLimit(
     return checkMemoryRateLimit(identifier, type);
   }
 
-  const result = await limiter.limit(identifier);
+  // Upstash 不可达时回落到单实例内存限流，而不是让异常冒到调用方。
+  // WHY：限流在中间件里对认证路由同步执行，抛错会把登录/注册/找回密码整体变成 500；
+  // 回落后仍有每进程的限额，比既不限流也不可用更好。
+  let result: Awaited<ReturnType<Ratelimit["limit"]>>;
+  try {
+    result = await limiter.limit(identifier);
+  } catch (error) {
+    console.error(
+      "[rate-limit] 限流存储不可用，回落到单实例内存限流",
+      error
+    );
+    return checkMemoryRateLimit(identifier, type);
+  }
 
   return {
     success: result.success,

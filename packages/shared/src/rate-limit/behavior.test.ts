@@ -3,6 +3,8 @@
  *
  * 覆盖审计报告中的覆盖率缺口：
  * - checkRateLimit 在未配置 Upstash 时对所有类型走内存兜底（C-H15 / S-M5）
+ * - checkRateLimit 在 Upstash 不可达时回落内存限流而非抛错（限流在认证中间件里同步
+ *   执行，抛错会把登录/注册整体变成 500）
  * - checkMemoryRateLimit 的窗口滚动 / 命中上限边界 / remaining 钳制（C-H17）
  * - getClientIp 的头优先级与可信代理门控（C-L22 / S-M1）
  * - withRateLimit 的 429 短路与限流头注入（C-L23）
@@ -230,5 +232,51 @@ describe("withRateLimit middleware wrapper", () => {
     expect(response.headers.get("X-RateLimit-Limit")).toBe("1");
     expect(response.headers.get("X-RateLimit-Remaining")).toBe("0");
     expect(response.headers.get("X-RateLimit-Reset")).not.toBeNull();
+  });
+});
+
+describe("checkRateLimit 在限流存储故障时回落", () => {
+  const original: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of UPSTASH_ENV_KEYS) {
+      original[key] = process.env[key];
+    }
+    process.env.UPSTASH_REDIS_REST_URL = "https://stub.upstash.invalid";
+    process.env.UPSTASH_REDIS_REST_TOKEN = "stub-token";
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    for (const key of UPSTASH_ENV_KEYS) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("Upstash 抛错时按内存限额放行而不是抛出", async () => {
+    vi.doMock("@upstash/ratelimit", () => {
+      class Ratelimit {
+        static slidingWindow = () => ({});
+        limit() {
+          return Promise.reject(new Error("upstash unreachable"));
+        }
+      }
+      return { Ratelimit };
+    });
+    // 仅用于构造限流器，不发起请求。
+    vi.doMock("@upstash/redis", () => ({ Redis: class {} }));
+
+    vi.resetModules();
+    const { checkRateLimit } = await import("./index");
+
+    const first = await checkRateLimit("fallback-id", "auth");
+    expect(first.success).toBe(true);
+    expect(first.skipped).toBe(false);
+    expect(first.limit).toBeGreaterThan(0);
+
+    vi.doUnmock("@upstash/ratelimit");
+    vi.doUnmock("@upstash/redis");
   });
 });

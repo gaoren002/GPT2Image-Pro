@@ -23,7 +23,10 @@ export type DatabaseErrorSummary = {
   constraint: string | null;
   /** 涉及的表名；未知时为 null。 */
   table: string | null;
-  /** 错误类名（如 DrizzleQueryError、error），用于区分包装层。 */
+  /**
+   * 错误类名。注意 drizzle 的查询包装错误不设置 name，这里会是 "Error"；
+   * 驱动原始错误（pg）通常为 "error"。仅作辅助信息，不用于判定。
+   */
   name: string | null;
 };
 
@@ -33,6 +36,9 @@ type ErrorLike = {
   constraint?: unknown;
   table?: unknown;
   cause?: unknown;
+  /** drizzle DrizzleQueryError 的自有属性，用于识别包装层。 */
+  query?: unknown;
+  params?: unknown;
 };
 
 function asErrorLike(value: unknown): ErrorLike | null {
@@ -90,12 +96,22 @@ export function summarizeDatabaseError(error: unknown): DatabaseErrorSummary {
 
 /**
  * 判断是否为数据库层错误：带驱动错误码，或为 drizzle 的查询包装错误。
+ *
+ * WHY 不按 name 判断：drizzle-orm 0.45.2 的 DrizzleQueryError 构造器不设置 this.name
+ * （见 drizzle-orm/errors.js），实例的 name 就是 "Error"。它可靠的特征是自有属性
+ * query（SQL 文本）与 params（绑定参数数组），以及固定的 message 前缀；底层驱动错误
+ * 没有 code 时（连接被对端关闭、取连接超时等）只能靠这些特征识别，否则会回退成
+ * 原样返回 message，把 SQL 与明文参数写进日志。
  */
 function isDatabaseError(error: unknown): boolean {
   return collectErrorChain(error).some((link) => {
     if (readString(link.code)) return true;
-    const name = readString(link.name);
-    return name === "DrizzleQueryError";
+    if (typeof link.query === "string" && Array.isArray(link.params)) {
+      return true;
+    }
+    return (
+      link instanceof Error && link.message.startsWith("Failed query:")
+    );
   });
 }
 
@@ -103,8 +119,9 @@ function isDatabaseError(error: unknown): boolean {
  * 把错误转成可安全写入日志、管理端响应与监控的短描述。
  *
  * @param error 任意抛出值。
- * @returns 数据库错误返回 `名称(code=..., constraint=..., table=...)` 形式的摘要；
- *   其他错误返回原始 message（这些路径不含语句参数）。
+ * @returns 数据库错误返回 `DatabaseError(code=..., constraint=..., table=...)` 形式的
+ *   摘要（取不到任何字段时只返回 `DatabaseError`）；其他错误返回原始 message
+ *   （这些路径不含语句参数）。
  * @remarks 数据库错误绝不回显 message：drizzle 的 message 带 SQL 与全部参数，
  *   导入与同步路径的参数即明文令牌。
  */
@@ -118,8 +135,11 @@ export function describeErrorForLog(error: unknown): string {
     summary.constraint ? `constraint=${summary.constraint}` : null,
     summary.table ? `table=${summary.table}` : null,
   ].filter((part): part is string => part !== null);
-  const label = summary.name ?? "DatabaseError";
-  return parts.length > 0 ? `${label}(${parts.join(", ")})` : label;
+  // 固定用 DatabaseError 作前缀：drizzle 包装层的 name 是 "Error"、驱动是 "error"，
+  // 都不具备区分价值，拼进去只会让日志更难读。
+  return parts.length > 0
+    ? `DatabaseError(${parts.join(", ")})`
+    : "DatabaseError";
 }
 
 /**

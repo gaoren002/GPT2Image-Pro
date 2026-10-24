@@ -188,9 +188,10 @@ export const auth = betterAuth({
    * WHY:曾为修复微信/QQ 内置浏览器重置密码 403 而全局关闭 CSRF 校验,但那同时
    * 关掉了"跨站导航登录"拦截,第三方页面可用普通表单让访客登录到他人账号
    * (Login CSRF,2026-10-24 审查以真实配置复现)。内置浏览器兼容改在路由层处理:
-   * 对缺失 Origin 的会话无关 POST(重置密码、登录、注册等)去掉 Cookie 后再交给
-   * Better Auth,见 ./origin-compat.ts。也不要改用 disableOriginCheck:它会连带
-   * 跳过 callbackURL/redirectTo 校验,带来开放重定向风险。
+   * 只为"JSON 请求体、无可校验来源且未标记跨站"的认证 POST 补上本站 Origin,
+   * Cookie 保持不动(登出、修改密码等依赖会话的端点因此仍可用),见 ./origin-compat.ts。
+   * 也不要改用 disableOriginCheck:它会连带跳过 callbackURL/redirectTo 校验,
+   * 带来开放重定向风险。
    */
 });
 

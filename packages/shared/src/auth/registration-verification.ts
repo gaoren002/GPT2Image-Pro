@@ -28,6 +28,20 @@ const CODE_LENGTH = 6;
 export const REGISTRATION_CODE_SEND_FAILED_MESSAGE =
   "Failed to send verification code, please try again later";
 
+/**
+ * 可直接展示给调用方的发码错误（自用模式关闭注册、邮箱不合规、已注册、冷却中、发信失败）。
+ *
+ * WHY 单独定义类型：发码接口对匿名调用方开放，而本函数内部还会访问数据库，
+ * drizzle 的错误消息带完整 SQL 与绑定参数（其中包括明文验证码）。路由层只回显本类型的
+ * 消息，其余一律转通用文案，避免把内部细节暴露给未鉴权调用方。
+ */
+export class RegistrationVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RegistrationVerificationError";
+  }
+}
+
 function getIdentifier(email: string) {
   return `${PURPOSE}:${normalizeEmail(email)}`;
 }
@@ -38,13 +52,15 @@ function generateCode() {
 
 export async function sendRegistrationVerificationCode(email: string) {
   if (await isSelfUseModeEnabled()) {
-    throw new Error("Registration is disabled in self-use mode");
+    throw new RegistrationVerificationError(
+      "Registration is disabled in self-use mode"
+    );
   }
 
   const normalizedEmail = normalizeEmail(email);
 
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    throw new Error("Invalid email address");
+    throw new RegistrationVerificationError("Invalid email address");
   }
 
   const emailPolicy = await getRuntimeRegistrationEmailPolicy();
@@ -53,13 +69,13 @@ export async function sendRegistrationVerificationCode(email: string) {
     emailPolicy
   );
   if (rejectionReason) {
-    throw new Error(
+    throw new RegistrationVerificationError(
       getRegistrationEmailRejectionMessage(rejectionReason, emailPolicy)
     );
   }
 
   if (await isRegistrationEmailTaken(normalizedEmail)) {
-    throw new Error("Email already registered");
+    throw new RegistrationVerificationError("Email already registered");
   }
 
   // 固定邀请码模式仍执行邮箱格式、域名与重复账号检查，但不创建一次性验证码，
@@ -83,7 +99,7 @@ export async function sendRegistrationVerificationCode(email: string) {
     new Date()
   );
   if (cooldownRemaining > 0) {
-    throw new Error(
+    throw new RegistrationVerificationError(
       `Please wait ${cooldownRemaining} seconds before requesting another code`
     );
   }
@@ -118,7 +134,9 @@ export async function sendRegistrationVerificationCode(email: string) {
       provider: result.provider,
       error: result.error,
     });
-    throw new Error(REGISTRATION_CODE_SEND_FAILED_MESSAGE);
+    throw new RegistrationVerificationError(
+      REGISTRATION_CODE_SEND_FAILED_MESSAGE
+    );
   }
 
   return { simulated: result.simulated ?? false };

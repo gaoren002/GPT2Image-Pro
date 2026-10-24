@@ -67,7 +67,8 @@ export const recoverEditableFileTasks = defineOperation({
   description: "有界扫描过期任务并投递既有退款 outbox；不恢复或重发上游请求。",
   input: z.object({ limit: z.number().int().min(1).max(500).default(100) }),
   output: z.object({ scanned: z.number(), recovered: z.number() }),
-  access: { kind: "system" },
+  // images-maintenance 以 cron 身份调用；cron 准入同样放行 system。
+  access: { kind: "cron" },
   readOnly: false,
   destructive: false,
   hasMaintenanceWrite: true,

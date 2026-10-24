@@ -653,3 +653,16 @@ it.each([
 ])("本地队列错误保留客户端可处理的状态: %s", (message, status, code) => {
   expect(toOpenAIErrorPayload(message).error).toMatchObject({ status, code });
 });
+
+it("真实队列容量异常也映射为413", async () => {
+  const { ImageGenerationQueueInputTooLargeError } = await import(
+    "../image-generation/queue"
+  );
+  expect(
+    toOpenAIErrorPayload(new ImageGenerationQueueInputTooLargeError().message)
+      .error
+  ).toMatchObject({
+    status: 413,
+    code: "image_generation_input_too_large",
+  });
+});

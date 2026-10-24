@@ -449,7 +449,11 @@ function parseLooseUpstreamStatusError(message: string) {
 }
 
 function classifyExternalApiError(message: string) {
-  if (message === "Image generation input exceeds the request memory budget.") {
+  if (
+    message.startsWith(
+      "Image generation input exceeds the request memory budget."
+    )
+  ) {
     return {
       type: "invalid_request_error",
       code: "image_generation_input_too_large",

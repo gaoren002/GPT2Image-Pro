@@ -48,7 +48,7 @@ services:
       CHATGPT_WEB_PROXY_URL: http://chatgpt-web-proxy:3021
       CHATGPT_WEB_PROXY_SECRET: ${CHATGPT_WEB_PROXY_SECRET:?set a random non-placeholder secret of at least 32 bytes}
       SUPER_RESOLUTION_WORKER_URL: http://super-resolution-worker:3310
-      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
+      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:?set a random worker secret shared by web and worker}
       GPT2IMAGE_BOOTSTRAP_CREDENTIALS_PATH: /app/.gpt2image/super-admin-credentials.txt
     ports:
       - "${WEB_PORT:-3000}:3000"
@@ -74,7 +74,7 @@ services:
     environment:
       SUPER_RESOLUTION_WORKER_BIND: 0.0.0.0
       SUPER_RESOLUTION_WORKER_PORT: 3310
-      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
+      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:?set a random worker secret shared by web and worker}
       SUPER_RESOLUTION_WORKER_CONCURRENCY: ${SUPER_RESOLUTION_WORKER_CONCURRENCY:-1}
       SUPER_RESOLUTION_INTRA_OP_THREADS: ${SUPER_RESOLUTION_INTRA_OP_THREADS:-24}
       SUPER_RESOLUTION_SHARP_CONCURRENCY: ${SUPER_RESOLUTION_SHARP_CONCURRENCY:-2}
@@ -91,6 +91,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    # 原生 ONNX 不受 V8 heap 限制，独立容器必须有物理内存上界。
+    mem_limit: "${SUPER_RESOLUTION_WORKER_MEMORY_LIMIT:-6g}"
+    memswap_limit: "${SUPER_RESOLUTION_WORKER_MEMORY_LIMIT:-6g}"
     cpus: "${SUPER_RESOLUTION_WORKER_CPUS:-24.0}"
 
   chatgpt-web-proxy:

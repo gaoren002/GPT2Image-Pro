@@ -52,7 +52,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-gpt2image}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gpt2image}
       CHATGPT_WEB_PROXY_URL: ""
       SUPER_RESOLUTION_WORKER_URL: http://super-resolution-worker:3310
-      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
+      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:?set a random worker secret shared by web and worker}
       GPT2IMAGE_BOOTSTRAP_CREDENTIALS_PATH: /app/.gpt2image/super-admin-credentials.txt
       THUMB_CACHE_DIR: /app/thumb-cache
     ports:
@@ -91,7 +91,7 @@ services:
     environment:
       SUPER_RESOLUTION_WORKER_BIND: 0.0.0.0
       SUPER_RESOLUTION_WORKER_PORT: 3310
-      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:-}
+      SUPER_RESOLUTION_WORKER_SECRET: ${SUPER_RESOLUTION_WORKER_SECRET:?set a random worker secret shared by web and worker}
       SUPER_RESOLUTION_WORKER_CONCURRENCY: 1
       SUPER_RESOLUTION_INTRA_OP_THREADS: ${SEOUL_SUPER_RESOLUTION_INTRA_OP_THREADS:-1}
       SUPER_RESOLUTION_SHARP_CONCURRENCY: 1
@@ -109,6 +109,7 @@ services:
       retries: 5
       start_period: 10s
     mem_limit: 1536m
+    memswap_limit: 1536m
     cpus: "${SEOUL_SUPER_RESOLUTION_WORKER_CPUS:-1.0}"
     logging: *default-logging
 

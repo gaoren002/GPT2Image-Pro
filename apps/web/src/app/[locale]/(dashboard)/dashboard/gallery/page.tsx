@@ -1,3 +1,4 @@
+/** 图库服务端页面；按应用时区筛选，按标签读取实体并保留多图展开的分页语义。 */
 import { db } from "@repo/database";
 import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
@@ -21,9 +22,9 @@ import { GalleryClient } from "@/features/image-generation/components/gallery-cl
 import {
   type GenerationListSearchParams,
   getSingleGenerationListParam,
-  normalizeGenerationListDate,
   normalizeGenerationListPage,
 } from "@/features/image-generation/generation-list-filters";
+import { parseGenerationListDates } from "@/features/image-generation/generation-list-dates";
 import {
   extractGenerationReferenceImages,
   extractPromptRepairNotice,
@@ -142,7 +143,10 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   const isZh = locale === "zh";
   const copy = (en: string, zh: string) => (isZh ? zh : en);
 
-  const params = await searchParams;
+  const [params, timeZone] = await Promise.all([
+    searchParams,
+    getAppTimeZone(),
+  ]);
   const PAGE_SIZE = 20;
   const tab = getSingleGenerationListParam(params.tab);
   const activeTab: GalleryTab =
@@ -157,8 +161,10 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
   // 模型精确筛选 + 日期范围一并并入公共条件。
   const keyword = getSingleGenerationListParam(params.q).trim().slice(0, 120);
   const modelFilter = getSingleGenerationListParam(params.model).trim();
-  const fromInput = normalizeGenerationListDate(params.from);
-  const toInput = normalizeGenerationListDate(params.to);
+  const { fromInput, toInput, fromDate, toDate } = parseGenerationListDates(
+    params,
+    timeZone
+  );
   const keywordCondition = and(
     keyword
       ? or(
@@ -168,12 +174,8 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
         )
       : undefined,
     modelFilter ? eq(generation.model, modelFilter) : undefined,
-    fromInput
-      ? gte(generation.createdAt, new Date(`${fromInput}T00:00:00`))
-      : undefined,
-    toInput
-      ? lte(generation.createdAt, new Date(`${toInput}T23:59:59.999`))
-      : undefined
+    fromDate ? gte(generation.createdAt, fromDate) : undefined,
+    toDate ? lte(generation.createdAt, toDate) : undefined
   );
   const finalCondition = and(
     eq(generation.userId, user.id),
@@ -230,7 +232,6 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     uploadParentRows,
     draftCountResult,
     uploadCountResult,
-    timeZone,
     modelRows,
   ] = await Promise.all([
     isFinalTab
@@ -267,7 +268,6 @@ export default async function GalleryPage({ searchParams }: GalleryPageProps) {
     // extractAgentDraftGenerations 展开为多个子项，但作为徽章计数足够
     db.select({ count: count() }).from(generation).where(draftCondition),
     db.select({ count: count() }).from(generation).where(uploadCondition),
-    getAppTimeZone(),
     // 模型下拉选项:该用户完成生成的历史里实际用过的模型
     db
       .selectDistinct({ model: generation.model })

@@ -1,3 +1,4 @@
+/** 历史记录服务端页面；按应用时区生成筛选边界，并查询当前用户的记录及分页总数。 */
 import { db } from "@repo/database";
 import { generation } from "@repo/database/schema";
 import { getCurrentUser } from "@repo/shared/auth/server";
@@ -20,9 +21,9 @@ import { HistoryClient } from "@/features/image-generation/components/history-cl
 import {
   type GenerationListSearchParams,
   getSingleGenerationListParam,
-  normalizeGenerationListDate,
   normalizeGenerationListPage,
 } from "@/features/image-generation/generation-list-filters";
+import { parseGenerationListDates } from "@/features/image-generation/generation-list-dates";
 import { extractGenerationCreditDetails } from "@/features/image-generation/credit-calculation-details";
 import {
   extractGenerationReferenceImages,
@@ -44,8 +45,8 @@ function buildHistoryWhere(
     q?: string;
     status?: string;
     model?: string;
-    from?: string;
-    to?: string;
+    fromDate: Date | null;
+    toDate: Date | null;
   }
 ): SQL | undefined {
   const conditions: Array<SQL | undefined> = [eq(generation.userId, userId)];
@@ -71,14 +72,12 @@ function buildHistoryWhere(
   if (filters.model?.trim()) {
     conditions.push(eq(generation.model, filters.model.trim()));
   }
-  // 日期范围含当天(to 取当日末尾)
-  const fromDate = filters.from ? new Date(`${filters.from}T00:00:00`) : null;
-  const toDate = filters.to ? new Date(`${filters.to}T23:59:59.999`) : null;
-  if (fromDate && !Number.isNaN(fromDate.getTime())) {
-    conditions.push(gte(generation.createdAt, fromDate));
+  // 日期范围含结束日；调用方已按应用时区解析，不能再依赖进程 TZ。
+  if (filters.fromDate) {
+    conditions.push(gte(generation.createdAt, filters.fromDate));
   }
-  if (toDate && !Number.isNaN(toDate.getTime())) {
-    conditions.push(lte(generation.createdAt, toDate));
+  if (filters.toDate) {
+    conditions.push(lte(generation.createdAt, filters.toDate));
   }
   return and(...conditions);
 }
@@ -90,27 +89,32 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
   const isZh = locale === "zh";
   const copy = (en: string, zh: string) => (isZh ? zh : en);
 
-  const params = await searchParams;
+  const [params, timeZone] = await Promise.all([
+    searchParams,
+    getAppTimeZone(),
+  ]);
   const PAGE_SIZE = 20;
   const page = normalizeGenerationListPage(params.page, PAGE_SIZE);
   const offset = (page - 1) * PAGE_SIZE;
   const queryInput = getSingleGenerationListParam(params.q).trim();
   const statusInput = getSingleGenerationListParam(params.status);
   const modelInput = getSingleGenerationListParam(params.model);
-  const fromInput = normalizeGenerationListDate(params.from);
-  const toInput = normalizeGenerationListDate(params.to);
+  const { fromInput, toInput, fromDate, toDate } = parseGenerationListDates(
+    params,
+    timeZone
+  );
 
   const where = buildHistoryWhere(user.id, {
     q: queryInput,
     status: statusInput,
     model: modelInput,
-    from: fromInput,
-    to: toInput,
+    fromDate,
+    toDate,
   });
 
   // 模型下拉选项:该用户实际用过的模型(排除被关键词/状态过滤干扰,
   // 独立查询全量 distinct,通常个位数)
-  const [generations, totalResult, timeZone, modelRows] = await Promise.all([
+  const [generations, totalResult, modelRows] = await Promise.all([
     db
       .select()
       .from(generation)
@@ -119,7 +123,6 @@ export default async function HistoryPage({ searchParams }: HistoryPageProps) {
       .limit(PAGE_SIZE)
       .offset(offset),
     db.select({ count: count() }).from(generation).where(where),
-    getAppTimeZone(),
     db
       .selectDistinct({ model: generation.model })
       .from(generation)

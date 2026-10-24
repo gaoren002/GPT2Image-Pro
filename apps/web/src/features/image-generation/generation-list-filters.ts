@@ -24,7 +24,7 @@ export function normalizeGenerationListPage(
 
 /**
  * 校验 date 输入框的 YYYY-MM-DD 值；非法日期视为未筛选。
- * UTC 仅用于检查日历日是否存在，查询仍由页面按原有本地日界构造。
+ * UTC 仅用于检查日历日是否存在，查询边界由 dates 模块按应用时区构造。
  */
 export function normalizeGenerationListDate(value: unknown): string {
   const date = getSingleGenerationListParam(value).trim();

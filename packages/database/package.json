@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema.ts",
-    "./pool-config": "./src/pool-config.ts"
+    "./pool-config": "./src/pool-config.ts",
+    "./session-advisory-lock": "./src/session-advisory-lock.ts"
   },
   "scripts": {
     "db:generate": "drizzle-kit generate",

@@ -46,8 +46,9 @@ function readPositiveInteger(value: string | undefined): number | undefined {
  *   - DATABASE_STATEMENT_TIMEOUT_MS：单语句超时，默认不设置；
  *   - DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS：事务空闲超时，默认不设置。
  * @returns 传给 pg Pool 的参数。
- * @remarks 后两项默认不启用：内部任务调度器会在整个任务期间保持一个持锁事务，
- *   且部分维护查询耗时较长，统一的语句/空闲超时可能中断它们；需要时按部署显式开启。
+ * @remarks 后两项默认不启用：部分维护语句和业务事务可能较长，需要时按部署显式开启。
+ *   内部调度器使用独立会话 advisory 锁，不再为整个任务持有应用池事务；
+ *   任务自身的数据库操作仍遵循各自的事务边界。
  */
 export function buildPgPoolConfig(
   connectionString: string,

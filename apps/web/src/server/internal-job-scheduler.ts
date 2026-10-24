@@ -1,9 +1,12 @@
+/** 内置任务调度：独立会话持锁、全局 db 短提交状态；任务不处于 scheduler 事务内。 */
 import { db, systemSetting } from "@repo/database";
+import { withSessionAdvisoryLock } from "@repo/database/session-advisory-lock";
+import { describeErrorForLog } from "@repo/shared/db/error-summary";
 import {
   getRuntimeSettingBoolean,
   getRuntimeSettingNumber,
 } from "@repo/shared/system-settings";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { runGenerationDailyStatsJob } from "./generation-daily-stats";
 import {
@@ -93,20 +96,6 @@ function getSchedulerState() {
   return schedulerGlobal.__gpt2imageInternalJobScheduler;
 }
 
-function firstRow(result: unknown): Record<string, unknown> | undefined {
-  if (Array.isArray(result)) {
-    return result[0] as Record<string, unknown> | undefined;
-  }
-  const rows = (result as { rows?: unknown[] } | undefined)?.rows;
-  return Array.isArray(rows)
-    ? (rows[0] as Record<string, unknown> | undefined)
-    : undefined;
-}
-
-function readBooleanResult(result: unknown, key: string) {
-  return firstRow(result)?.[key] === true;
-}
-
 function getJobStateKey(job: InternalJob) {
   return `__internal_job_scheduler:${job.name}`;
 }
@@ -121,131 +110,92 @@ function readLastStartedAt(value: unknown) {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-async function withJobLock<T>(
+/** 单条 upsert 独立提交状态，不与任务的事务或锁连接绑定。 */
+async function writeJobState(
+  job: InternalJob,
+  state: {
+    status: "running" | "success" | "error";
+    lastStartedAt: string;
+    lastFinishedAt?: string;
+    error?: string;
+  }
+) {
+  const value = { job: job.name, ...state };
+  const updatedAt = new Date();
+  await db
+    .insert(systemSetting)
+    .values({ key: getJobStateKey(job), value, isSecret: false, updatedAt })
+    .onConflictDoUpdate({
+      target: systemSetting.key,
+      set: { value, isSecret: false, updatedAt },
+    });
+}
+
+/**
+ * 持独立会话锁检查间隔并执行任务；状态通过全局 db 单条提交。
+ * running 提交后才启动 run，任务失败则先提交 error 再上抛，不回滚已经完成的业务步骤。
+ * 断线检查只覆盖已观察到的事件，无法撤回任务副作用或保证断线期间的跨进程互斥。
+ */
+export async function withJobLock<T>(
   job: InternalJob,
   intervalMs: number,
   run: () => Promise<T>
 ) {
-  return await db.transaction(async (tx) => {
-    const lockResult = await tx.execute(
-      sql`select pg_try_advisory_xact_lock(${LOCK_NAMESPACE}, ${job.lockKey}) as locked`
-    );
-    if (!readBooleanResult(lockResult, "locked")) {
-      return { locked: false as const };
-    }
+  const locked = await withSessionAdvisoryLock(
+    LOCK_NAMESPACE,
+    job.lockKey,
+    async (assertHeld) => {
+      const [state] = await db
+        .select({ value: systemSetting.value })
+        .from(systemSetting)
+        .where(eq(systemSetting.key, getJobStateKey(job)))
+        .limit(1);
+      assertHeld();
+      const now = new Date();
+      const lastStartedAt = readLastStartedAt(state?.value);
+      if (
+        lastStartedAt !== undefined &&
+        now.getTime() - lastStartedAt < intervalMs
+      ) {
+        return { skipped: true as const, reason: "interval_not_reached" };
+      }
 
-    const stateKey = getJobStateKey(job);
-    const now = new Date();
-    const [state] = await tx
-      .select({ value: systemSetting.value })
-      .from(systemSetting)
-      .where(eq(systemSetting.key, stateKey))
-      .limit(1);
-    const lastStartedAt = readLastStartedAt(state?.value);
-    if (
-      lastStartedAt !== undefined &&
-      now.getTime() - lastStartedAt < intervalMs
-    ) {
-      return {
-        locked: true as const,
-        skipped: true as const,
-        reason: "interval_not_reached",
-      };
-    }
-
-    await tx
-      .insert(systemSetting)
-      .values({
-        key: stateKey,
-        value: {
-          job: job.name,
-          status: "running",
-          lastStartedAt: now.toISOString(),
-        },
-        isSecret: false,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: systemSetting.key,
-        set: {
-          value: {
-            job: job.name,
-            status: "running",
-            lastStartedAt: now.toISOString(),
-          },
-          isSecret: false,
-          updatedAt: now,
-        },
+      const lastStarted = now.toISOString();
+      await writeJobState(job, {
+        status: "running",
+        lastStartedAt: lastStarted,
       });
-
-    try {
-      const result = await run();
-      const finishedAt = new Date();
-      await tx
-        .insert(systemSetting)
-        .values({
-          key: stateKey,
-          value: {
-            job: job.name,
-            status: "success",
-            lastStartedAt: now.toISOString(),
-            lastFinishedAt: finishedAt.toISOString(),
-          },
-          isSecret: false,
-          updatedAt: finishedAt,
-        })
-        .onConflictDoUpdate({
-          target: systemSetting.key,
-          set: {
-            value: {
-              job: job.name,
-              status: "success",
-              lastStartedAt: now.toISOString(),
-              lastFinishedAt: finishedAt.toISOString(),
-            },
-            isSecret: false,
-            updatedAt: finishedAt,
-          },
+      try {
+        assertHeld();
+        const result = await run();
+        assertHeld();
+        await writeJobState(job, {
+          status: "success",
+          lastStartedAt: lastStarted,
+          lastFinishedAt: new Date().toISOString(),
         });
-
-      return {
-        locked: true as const,
-        skipped: false as const,
-        result,
-      };
-    } catch (error) {
-      const finishedAt = new Date();
-      await tx
-        .insert(systemSetting)
-        .values({
-          key: stateKey,
-          value: {
-            job: job.name,
+        assertHeld();
+        return { skipped: false as const, result };
+      } catch (error) {
+        try {
+          await writeJobState(job, {
             status: "error",
-            lastStartedAt: now.toISOString(),
-            lastFinishedAt: finishedAt.toISOString(),
-            error: error instanceof Error ? error.message : "Unknown error",
-          },
-          isSecret: false,
-          updatedAt: finishedAt,
-        })
-        .onConflictDoUpdate({
-          target: systemSetting.key,
-          set: {
-            value: {
-              job: job.name,
-              status: "error",
-              lastStartedAt: now.toISOString(),
-              lastFinishedAt: finishedAt.toISOString(),
-              error: error instanceof Error ? error.message : "Unknown error",
-            },
-            isSecret: false,
-            updatedAt: finishedAt,
-          },
-        });
-      throw error;
+            lastStartedAt: lastStarted,
+            lastFinishedAt: new Date().toISOString(),
+            error: describeErrorForLog(error),
+          });
+        } catch (stateError) {
+          // 状态库也不可用时不能声称失败已落盘；保留任务和写状态两个独立失败。
+          throw new AggregateError(
+            [error, stateError],
+            "Internal job failed and error state could not be saved"
+          );
+        }
+        throw error;
+      }
     }
-  });
+  );
+  return locked.locked ? { locked: true as const, ...locked.value } : locked;
 }
 
 async function getIntervalMs(job: InternalJob) {
@@ -258,14 +208,13 @@ async function getIntervalMs(job: InternalJob) {
 }
 
 async function runJob(job: InternalJob) {
-  const enabled = await getRuntimeSettingBoolean(
-    "INTERNAL_JOB_SCHEDULER_ENABLED",
-    true
-  );
-  if (!enabled) return;
-
   const startedAt = Date.now();
   try {
+    const enabled = await getRuntimeSettingBoolean(
+      "INTERNAL_JOB_SCHEDULER_ENABLED",
+      true
+    );
+    if (!enabled) return;
     const intervalMs = await getIntervalMs(job);
     const result = await withJobLock(job, intervalMs, job.run);
     if (!result.locked) return;
@@ -274,7 +223,10 @@ async function runJob(job: InternalJob) {
       `[internal-jobs] ${job.name} completed in ${Date.now() - startedAt}ms`
     );
   } catch (error) {
-    console.warn(`[internal-jobs] ${job.name} failed`, error);
+    console.warn(
+      `[internal-jobs] ${job.name} failed`,
+      describeErrorForLog(error)
+    );
   }
 }
 
@@ -283,7 +235,13 @@ async function scheduleJob(job: InternalJob) {
 
   const scheduleNext = (delayMs: number) => {
     const timer = setTimeout(() => {
-      void tick();
+      // 最外层兜底捕获 tick 的意外失败，不留下无人接收的 Promise rejection。
+      void tick().catch((error: unknown) => {
+        console.warn(
+          `[internal-jobs] ${job.name} tick failed`,
+          describeErrorForLog(error)
+        );
+      });
     }, delayMs);
     timer.unref?.();
   };
@@ -330,6 +288,9 @@ export async function startInternalJobScheduler() {
     console.info("[internal-jobs] scheduler started");
   } catch (error) {
     state.started = false;
-    console.warn("[internal-jobs] scheduler failed to start", error);
+    console.warn(
+      "[internal-jobs] scheduler failed to start",
+      describeErrorForLog(error)
+    );
   }
 }

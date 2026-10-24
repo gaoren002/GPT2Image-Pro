@@ -422,6 +422,18 @@ export async function grantCredits(params: GrantCreditsParams) {
     throw new Error("积分数量必须大于 0");
   }
 
+  // 到期日必须在开启事务之前算好。设置读取走全局 db 连接(缓存过期时查
+  // system_setting):若放在事务回调内,就会在持有一条池连接的同时再借一条;
+  // 并发发放占满连接池时,所有事务都在等那条借不到的连接,全站数据库访问
+  // 永久挂起(2026-10-24 审查以真实 pg-pool 复现:池 10 连接、10 个并发退款即卡死)。
+  const issuedAt = new Date();
+  const effectiveExpiresAt =
+    expiresAt === undefined
+      ? sourceType === "bonus"
+        ? await getFreeCreditsExpiryDate(issuedAt)
+        : await getDefaultCreditsExpiryDate(issuedAt)
+      : expiresAt;
+
   return await db.transaction(async (tx) => {
     const [balanceRecord] = await tx
       .select()
@@ -455,13 +467,6 @@ export async function grantCredits(params: GrantCreditsParams) {
       throw new AccountFrozenError(userId);
     }
 
-    const issuedAt = new Date();
-    const effectiveExpiresAt =
-      expiresAt === undefined
-        ? sourceType === "bonus"
-          ? await getFreeCreditsExpiryDate(issuedAt)
-          : await getDefaultCreditsExpiryDate(issuedAt)
-        : expiresAt;
     // refund 批次合并:退款按 generation 逐笔发放,若每笔一条批次行,单用户
     // 可积累数万条 active 批次(2026-10 生产实测 42615 条/用户),扣费挑选
     // 与余额列举成本随批次数线性放大。退款改为并入该用户已有的"退款池批次"

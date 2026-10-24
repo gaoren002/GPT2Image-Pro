@@ -12,10 +12,12 @@ import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import type { NextRequest } from "next/server";
 
 import {
+  AsyncImageTaskCapacityError,
   completeAsyncImageTask,
   createAsyncImageTask,
   postAsyncImageCallback,
   toAsyncImageTaskResponse,
+  toAsyncImageTaskCapacityResponse,
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
@@ -41,6 +43,15 @@ import {
 } from "@/features/external-api/safe-image-fetch";
 import { runBatchImageGeneration } from "@/features/image-generation/batch-runner";
 import { runImageGenerationForUser } from "@/features/image-generation/operations";
+import {
+  estimateImageGenerationQueueBytes,
+  ImageGenerationQueueError,
+  ImageGenerationQueueCancelledError,
+  type ImageGenerationQueueReservation,
+  reserveAsyncImageGenerationQueueBatch,
+  runWithImageGenerationQueueReservation,
+  toImageGenerationQueueErrorResponse,
+} from "@/features/image-generation/queue";
 import {
   normalizeImageBackground,
   normalizeOutputCompression,
@@ -570,7 +581,9 @@ export const postExternalImageEdits = withApiLogging(
         maskReference = getJsonMaskReference(body);
       } else {
         formData = await request.formData();
-        if (formData.getAll("model").some((value) => typeof value !== "string")) {
+        if (
+          formData.getAll("model").some((value) => typeof value !== "string")
+        ) {
           return openAIImageError("model must be a string.");
         }
         imageReferences = getFormImageReferences(formData);
@@ -606,7 +619,9 @@ export const postExternalImageEdits = withApiLogging(
     );
 
     const requestedSize = getText(formData, "size") || undefined;
-    const size = requestedSize ? alignImageSizeToStep(requestedSize) : undefined;
+    const size = requestedSize
+      ? alignImageSizeToStep(requestedSize)
+      : undefined;
     if (size) {
       const sizeCheck = validateImageSize(size);
       if (!sizeCheck.valid) {
@@ -779,6 +794,7 @@ export const postExternalImageEdits = withApiLogging(
           {
             mode: "edit",
             userId: auth.userId,
+            signal: useAsync ? undefined : request.signal,
             generationId,
             apiKeyId: auth.apiKeyId,
             relayOnly: auth.relayOnly,
@@ -859,20 +875,52 @@ export const postExternalImageEdits = withApiLogging(
 
       if (useAsync) {
         const created = Math.floor(Date.now() / 1000);
-        const generationIds = Array.from({ length: count }, () => randomUUID());
-        const task = createAsyncImageTask({
-          userId: auth.userId,
-          apiKeyId: auth.apiKeyId,
-          model,
-          generationIds,
-        });
+        const generationIds: string[] = Array.from({ length: count }, () =>
+          randomUUID()
+        );
+        let reservations: ImageGenerationQueueReservation[] = [];
+        let task: ReturnType<typeof createAsyncImageTask>;
+        try {
+          reservations = reserveAsyncImageGenerationQueueBatch({
+            userId: auth.userId,
+            apiKeyId: auth.apiKeyId,
+            count,
+            estimatedBytes: estimateImageGenerationQueueBytes({
+              prompt,
+              sourceFiles,
+              maskFile,
+            }),
+            signal: request.signal,
+          });
+          task = createAsyncImageTask({
+            userId: auth.userId,
+            apiKeyId: auth.apiKeyId,
+            model,
+            generationIds,
+          });
+        } catch (error) {
+          for (const reservation of reservations) reservation.release();
+          throw error;
+        }
+        const reservationByGenerationId = new Map(
+          generationIds.map((id, index) => [id, reservations[index]])
+        );
 
         void (async () => {
           const results = await runBatchImageGeneration({
             count,
             concurrency: planLimits.imageGenerationConcurrency,
             generationIds,
-            run: runEdit,
+            run: (generationId) => {
+              const reservation = reservationByGenerationId.get(generationId);
+              if (!reservation)
+                throw new Error("Missing image queue reservation");
+              return runWithImageGenerationQueueReservation(reservation, () =>
+                runEdit(generationId)
+              );
+            },
+          }).finally(() => {
+            for (const reservation of reservations) reservation.release();
           });
           const resultPayload = await toOpenAIImagesResponse(
             request,
@@ -938,6 +986,15 @@ export const postExternalImageEdits = withApiLogging(
         { initialWaitMs: IMAGE_JSON_KEEP_ALIVE_INITIAL_WAIT_MS }
       );
     } catch (error) {
+      if (
+        error instanceof ImageGenerationQueueError ||
+        error instanceof ImageGenerationQueueCancelledError
+      ) {
+        return toImageGenerationQueueErrorResponse(error);
+      }
+      if (error instanceof AsyncImageTaskCapacityError) {
+        return toAsyncImageTaskCapacityResponse(error);
+      }
       if (error instanceof ImageReferenceError) {
         return openAIImageError(error.message, error.status);
       }

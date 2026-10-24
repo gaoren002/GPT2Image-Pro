@@ -89,7 +89,9 @@ const chatCompletionSchema = z
       .refine((value) => !value || validateImageSize(value).valid, {
         message: "Invalid image size",
       }),
-    quality: z.enum(["auto", "low", "medium", "high", "xhigh", "max"]).optional(),
+    quality: z
+      .enum(["auto", "low", "medium", "high", "xhigh", "max"])
+      .optional(),
     moderation: z.enum(["auto", "low"]).optional(),
     response_format: z
       .union([
@@ -476,6 +478,7 @@ export const postExternalChatCompletions = withApiLogging(
       requiresResponsesBackend !== true;
     const sharedInput = {
       userId: auth.userId,
+      signal: request.signal,
       apiKeyId: auth.apiKeyId,
       relayOnly: auth.relayOnly,
       prompt,

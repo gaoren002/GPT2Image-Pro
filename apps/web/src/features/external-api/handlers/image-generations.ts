@@ -11,10 +11,12 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 
 import {
+  AsyncImageTaskCapacityError,
   completeAsyncImageTask,
   createAsyncImageTask,
   postAsyncImageCallback,
   toAsyncImageTaskResponse,
+  toAsyncImageTaskCapacityResponse,
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
@@ -35,6 +37,15 @@ import {
 } from "@/features/external-api/images";
 import { runBatchImageGeneration } from "@/features/image-generation/batch-runner";
 import { runImageGenerationForUser } from "@/features/image-generation/operations";
+import {
+  estimateImageGenerationQueueBytes,
+  ImageGenerationQueueError,
+  ImageGenerationQueueCancelledError,
+  type ImageGenerationQueueReservation,
+  reserveAsyncImageGenerationQueueBatch,
+  runWithImageGenerationQueueReservation,
+  toImageGenerationQueueErrorResponse,
+} from "@/features/image-generation/queue";
 import {
   normalizeOutputCompression,
   normalizeOutputFormat,
@@ -244,6 +255,7 @@ export const postExternalImageGenerations = withApiLogging(
     const input = {
       mode: "generate" as const,
       userId: auth.userId,
+      signal: useAsync ? undefined : request.signal,
       apiKeyId: auth.apiKeyId,
       relayOnly: auth.relayOnly,
       backendRequestKind: "image_generation" as const,
@@ -328,21 +340,57 @@ export const postExternalImageGenerations = withApiLogging(
 
     if (useAsync) {
       const created = Math.floor(Date.now() / 1000);
-      const generationIds = Array.from({ length: count }, () => randomUUID());
-      const task = createAsyncImageTask({
-        userId: auth.userId,
-        apiKeyId: auth.apiKeyId,
-        model: imageModel,
-        generationIds,
-      });
+      const generationIds: string[] = Array.from({ length: count }, () =>
+        randomUUID()
+      );
+      let task: ReturnType<typeof createAsyncImageTask>;
+      let reservations: ImageGenerationQueueReservation[] = [];
+      try {
+        reservations = reserveAsyncImageGenerationQueueBatch({
+          userId: auth.userId,
+          apiKeyId: auth.apiKeyId,
+          count,
+          estimatedBytes: estimateImageGenerationQueueBytes(input),
+          signal: request.signal,
+        });
+        task = createAsyncImageTask({
+          userId: auth.userId,
+          apiKeyId: auth.apiKeyId,
+          model: imageModel,
+          generationIds,
+        });
+      } catch (error) {
+        for (const reservation of reservations) reservation.release();
+        if (
+          error instanceof ImageGenerationQueueError ||
+          error instanceof ImageGenerationQueueCancelledError
+        ) {
+          return toImageGenerationQueueErrorResponse(error);
+        }
+        if (error instanceof AsyncImageTaskCapacityError) {
+          return toAsyncImageTaskCapacityResponse(error);
+        }
+        throw error;
+      }
+      const reservationByGenerationId = new Map(
+        generationIds.map((id, index) => [id, reservations[index]])
+      );
 
       void (async () => {
         const results = await runBatchImageGeneration({
           count,
           concurrency: limits.imageGenerationConcurrency,
           generationIds,
-          run: (generationId) =>
-            runImageGenerationForUser({ ...input, generationId }),
+          run: (generationId) => {
+            const reservation = reservationByGenerationId.get(generationId);
+            if (!reservation)
+              throw new Error("Missing image queue reservation");
+            return runWithImageGenerationQueueReservation(reservation, () =>
+              runImageGenerationForUser({ ...input, generationId })
+            );
+          },
+        }).finally(() => {
+          for (const reservation of reservations) reservation.release();
         });
         const resultPayload = await toOpenAIImagesResponse(
           request,

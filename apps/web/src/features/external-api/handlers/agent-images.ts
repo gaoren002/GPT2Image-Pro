@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { withApiLogging } from "@repo/shared/api-logger";
-import { buildPublicImageUrl } from "@repo/shared/storage/signed-url";
+import {
+  buildPublicImageUrl,
+  StorageImageAccessError,
+} from "@repo/shared/storage/signed-url";
 import {
   canUsePlanCapability,
   getPlanLimits,
@@ -803,22 +806,29 @@ function getRequestBaseUrl(request: NextRequest) {
   );
 }
 
-function toPublicImageUrl(request: NextRequest, imageUrl?: string) {
-  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request));
+function toPublicImageUrl(
+  request: NextRequest,
+  userId: string,
+  imageUrl?: string
+) {
+  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request), 3600, {
+    userId,
+  });
 }
 
 function normalizeHistoryImageUrls(
   request: NextRequest,
-  history: ChatHistoryMessage[]
+  history: ChatHistoryMessage[],
+  userId: string
 ) {
   return history.map((message) => ({
     ...message,
     imageUrls: (message.imageUrls || []).map(
-      (url) => toPublicImageUrl(request, url) || url
+      (url) => toPublicImageUrl(request, userId, url) || url
     ),
     variants: message.variants?.map((variant) => ({
       ...variant,
-      imageUrl: toPublicImageUrl(request, variant.imageUrl),
+      imageUrl: toPublicImageUrl(request, userId, variant.imageUrl),
     })),
   }));
 }
@@ -916,7 +926,10 @@ export const postExternalAgentImages = withApiLogging(
         imageReferences = getFormImageReferences(formData);
       }
     } catch (error) {
-      if (error instanceof AgentReferenceError) {
+      if (
+        error instanceof AgentReferenceError ||
+        error instanceof StorageImageAccessError
+      ) {
         return openAIImageError(error.message, error.status);
       }
       return openAIImageError(
@@ -1070,7 +1083,8 @@ export const postExternalAgentImages = withApiLogging(
       return openAIImageError("history must be valid JSON.");
     }
     const preferredBackendMember = getPreferredBackendMember(history);
-    const stickyPreviousResponseId = getLatestResponsesPreviousResponseId(history);
+    const stickyPreviousResponseId =
+      getLatestResponsesPreviousResponseId(history);
 
     const attachmentFiles = getAttachmentFiles(formData);
     if (
@@ -1136,7 +1150,11 @@ export const postExternalAgentImages = withApiLogging(
         maxChatContextChars: planLimits.maxChatContextChars,
       });
       if (limitedContext.error) return openAIImageError(limitedContext.error);
-      history = normalizeHistoryImageUrls(request, limitedContext.history);
+      history = normalizeHistoryImageUrls(
+        request,
+        limitedContext.history,
+        auth.userId
+      );
 
       const batchId = randomUUID();
       const sourceImageUrls = await uploadTemporaryImageUrls(
@@ -1166,6 +1184,7 @@ export const postExternalAgentImages = withApiLogging(
           {
             mode: "chat",
             userId: auth.userId,
+            signal: request.signal,
             generationId: randomUUID(),
             apiKeyId: auth.apiKeyId,
             relayOnly: auth.relayOnly,
@@ -1322,7 +1341,10 @@ export const postExternalAgentImages = withApiLogging(
         };
       });
     } catch (error) {
-      if (error instanceof AgentReferenceError) {
+      if (
+        error instanceof AgentReferenceError ||
+        error instanceof StorageImageAccessError
+      ) {
         return openAIImageError(error.message, error.status);
       }
       return openAIImageError(

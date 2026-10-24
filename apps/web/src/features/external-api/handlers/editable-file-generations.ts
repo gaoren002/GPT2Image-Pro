@@ -10,7 +10,7 @@
  * - 同步(默认):keep-alive JSON 撑住长任务,跑完返回 editable_file_task 结果。
  * - 异步(async:true 或 ?async=true):立即返回 task_<uuid>,后台跑完更新任务;可轮询
  *   GET /v1/editable-file-tasks/{task_id} 或用 callback_url 完成回调。任务为进程内内存态、
- *   30 分钟 TTL、多实例不共享(可编辑文件无 DB generation 行,故不作持久回退)。
+ *   完成后 30 分钟 TTL、多实例不共享(可编辑文件无 DB generation 行,故不作持久回退)。
  * client_task_id 作计费 sourceRef 幂等键(防重复扣;任务级幂等为后续迭代)。
  */
 import { randomUUID } from "node:crypto";
@@ -20,10 +20,12 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 
 import {
+  AsyncImageTaskCapacityError,
   completeAsyncImageTask,
   createAsyncEditableFileTask,
   postAsyncImageCallback,
   toAsyncImageTaskResponse,
+  toAsyncImageTaskCapacityResponse,
   validateCallbackUrl,
 } from "@/features/external-api/async-image-tasks";
 import { authenticateExternalApiRequest } from "@/features/external-api/auth";
@@ -127,12 +129,20 @@ function makeEditableFileHandler(
     };
 
     if (useAsync) {
-      const task = createAsyncEditableFileTask({
-        userId: auth.userId,
-        apiKeyId: auth.apiKeyId,
-        kind,
-        clientTaskId,
-      });
+      let task: ReturnType<typeof createAsyncEditableFileTask>;
+      try {
+        task = createAsyncEditableFileTask({
+          userId: auth.userId,
+          apiKeyId: auth.apiKeyId,
+          kind,
+          clientTaskId,
+        });
+      } catch (error) {
+        if (error instanceof AsyncImageTaskCapacityError) {
+          return toAsyncImageTaskCapacityResponse(error);
+        }
+        throw error;
+      }
       // 后台跑完更新内存任务 + 可选回调;fire-and-forget(常驻进程,promise 随进程存活)。
       void (async () => {
         try {
@@ -151,7 +161,9 @@ function makeEditableFileHandler(
           }
         } catch (error) {
           const errorPayload = toOpenAIErrorPayload(
-            error instanceof Error ? error.message : `${label} generation failed`
+            error instanceof Error
+              ? error.message
+              : `${label} generation failed`
           );
           const completed = completeAsyncImageTask(task.id, {
             completedObject: "editable_file_task",

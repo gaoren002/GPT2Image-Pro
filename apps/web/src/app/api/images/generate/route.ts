@@ -124,6 +124,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
   const input = {
     mode: "generate" as const,
     userId: session.user.id,
+    signal: request.signal,
     backendRequestKind: "image_generation" as const,
     prompt: parsed.data.prompt,
     apiPrompt: parsed.data.apiPrompt,

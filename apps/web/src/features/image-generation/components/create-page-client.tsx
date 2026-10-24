@@ -1,5 +1,7 @@
 "use client";
 
+/** 创作页客户端：编排图像与聊天面板；聊天恢复及异步写入受已确认账号边界保护。 */
+
 import {
   GPT6_ASTRA_CHAT_MODEL,
   GPT55_CHAT_MODEL,
@@ -76,10 +78,21 @@ import {
   normalizeReferenceFetchUrl,
   type ReferenceHandoffMode,
 } from "@/features/image-generation/reference-handoff";
+import {
+  buildChatRetryHistory,
+  type ChatSourceImageReferences,
+  createChatSourceImageReceiver,
+  getMessageImageUrls,
+} from "./chat-input-images";
 import { ChatPanel } from "./chat-panel";
 // 聊天叶子组件(高频状态订阅下沉):chatStream 流式气泡、chatMessages 去抖持久化。
 import { ChatStreamBubble } from "./chat-stream-bubble";
-import { ChatPersistenceAgent } from "./chat-subscriptions";
+import {
+  ChatAccountBoundary,
+  ChatPersistenceAgent,
+  reportChatPersistenceResult,
+  useChatScopeSetter,
+} from "./chat-subscriptions";
 import { ImagePanel } from "./image-panel";
 import {
   ConcurrencyNumberInput,
@@ -125,17 +138,17 @@ export {
 
 import type { BatchCard as BatchCardShared } from "./chat-message-types";
 import {
-  CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY,
-  CHAT_ACTIVE_CONVERSATION_STORAGE_KEY,
   CHAT_CONVERSATION_LIMIT,
-  CHAT_CONVERSATIONS_STORAGE_KEY,
-  CHAT_STORAGE_KEY,
-  chatActiveConversationStorageKey,
+  type ChatStorageScope,
   compactChatConversations,
   getChatConversationTitle,
   inferChatConversationMode,
   isMessageInConversationMode as isMessageInConversationModeFn,
+  persistActiveChatConversation,
   persistChatConversationSnapshot,
+  persistChatConversations,
+  readActiveChatConversation,
+  readChatConversations,
 } from "./chat-persistence";
 import type { ChatStreamState as ChatStreamStateShared } from "./chat-stream-state";
 import type { TextGenerationMode as TextGenerationModeShared } from "./text-panel";
@@ -203,6 +216,7 @@ type ResultState = {
 };
 
 type ImageApiResult = {
+  sourceImageReferences?: ChatSourceImageReferences;
   error?: string;
   status?: "pending" | "completed" | "failed";
   prompt?: string;
@@ -267,6 +281,7 @@ type AgentRunEvent = {
 };
 
 type ImageStreamEvent =
+  | { type: "input_images"; sourceImageReferences: ChatSourceImageReferences }
   | {
       type: "partial_image";
       index?: number;
@@ -1404,23 +1419,6 @@ function sanitizeChatMessages(value: unknown): ChatMessage[] {
   });
 }
 
-function createChatConversation(
-  messages: ChatMessage[],
-  title: string,
-  id = createLocalId(),
-  mode: ConversationMode = inferChatConversationMode(messages)
-): ChatConversation {
-  const now = new Date().toISOString();
-  return {
-    id,
-    mode,
-    title,
-    messages,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
 function activeModeToConversationMode(mode: ActiveMode): ConversationMode {
   return mode === "agent" ? "agent" : mode === "chat-web" ? "web" : "chat";
 }
@@ -1532,22 +1530,6 @@ function replaceChatVariantByGenerationId(
   ];
 }
 
-function getMessageImageUrls(message: ChatMessage) {
-  const urls: string[] = [];
-  for (const attachment of message.attachments || []) {
-    const url = attachment.previewUrl;
-    if (
-      url &&
-      (url.startsWith("data:image/") ||
-        url.startsWith("http://") ||
-        url.startsWith("https://"))
-    ) {
-      urls.push(url);
-    }
-  }
-  return urls;
-}
-
 function toChatHistory(messages: ChatMessage[]) {
   return messages
     .filter(
@@ -1627,7 +1609,24 @@ async function readKeepAliveJson(response: Response): Promise<{
   return JSON.parse(text.slice(start));
 }
 
-export function CreatePageClient({
+/** 等待会话归属确认，再挂载可读写聊天数据的页面。 */
+export function CreatePageClient(props: CreatePageClientProps) {
+  return (
+    <ChatAccountBoundary
+      renderAccount={(scope) => (
+        <AccountCreatePageClient
+          key={scope.userId}
+          {...props}
+          chatStorageScope={scope}
+        />
+      )}
+    />
+  );
+}
+
+/** 同账号导航复用 runtime；所有聊天异步 setter 捕获本次账号 scope。 */
+function AccountCreatePageClient({
+  chatStorageScope,
   balance: initialBalance,
   recentGenerations: initialRecent,
   capabilities,
@@ -1639,7 +1638,7 @@ export function CreatePageClient({
   imageBasePricing,
   forceWebPixelRange,
   timeZone,
-}: CreatePageClientProps) {
+}: CreatePageClientProps & { chatStorageScope: ChatStorageScope }) {
   const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
@@ -1649,6 +1648,23 @@ export function CreatePageClient({
     (en: string, zh: string) => (isZh ? zh : en),
     [isZh]
   );
+  /** 即时快照失败同样可见，不能等待去抖组件代为报告。 */
+  const saveChatConversationSnapshot = (
+    params: Omit<Parameters<typeof persistChatConversationSnapshot>[0], "scope">
+  ) => {
+    reportChatPersistenceResult(
+      persistChatConversationSnapshot({ ...params, scope: chatStorageScope }),
+      isZh,
+      params.messages
+    );
+  };
+  /** 活跃会话切换不因浏览器禁用 localStorage 而中断交互。 */
+  const saveActiveChatConversation = (mode: ConversationMode, id: string) => {
+    reportChatPersistenceResult(
+      persistActiveChatConversation(chatStorageScope, mode, id),
+      isZh
+    );
+  };
   const selectedBackendGroup =
     backendGroups.find((group) => group.id === selectedBackendGroupId) ||
     backendGroups.find((group) => group.isDefault) ||
@@ -1946,9 +1962,13 @@ export function CreatePageClient({
     "promptOptimization",
     true
   );
-  const [getChatPrompt, setChatPrompt] = useCreateRuntimeAccessor(
+  const [getChatPrompt, setChatPromptForAccount] = useCreateRuntimeAccessor(
     "chatPrompt",
     ""
+  );
+  const setChatPrompt = useChatScopeSetter(
+    chatStorageScope,
+    setChatPromptForAccount
   );
   const [chatPromptHasText] = useCreateRuntimeState("chatPromptHasText", () =>
     Boolean(getChatPrompt().trim())
@@ -1966,32 +1986,52 @@ export function CreatePageClient({
     useCreateRuntimeState<MentionState | null>("editMention", null);
   const [chatMention, setChatMention] =
     useCreateRuntimeState<MentionState | null>("chatMention", null);
-  const [chatConversationId, setChatConversationId] = useCreateRuntimeState(
-    "chatConversationId",
-    () => createLocalId()
+  const [chatConversationId, setChatConversationIdForAccount] =
+    useCreateRuntimeState("chatConversationId", () => createLocalId());
+  const setChatConversationId = useChatScopeSetter(
+    chatStorageScope,
+    setChatConversationIdForAccount
   );
-  const [chatConversations, setChatConversations] = useCreateRuntimeState<
-    ChatConversation[]
-  >("chatConversations", []);
+  const [chatConversations, setChatConversationsForAccount] =
+    useCreateRuntimeState<ChatConversation[]>("chatConversations", []);
+  const setChatConversations = useChatScopeSetter(
+    chatStorageScope,
+    setChatConversationsForAccount
+  );
   // WHY 非订阅访问器:chatMessages 在流式期间逐帧变化,订阅式会让 1 万行父组件
   // 每帧全量重渲(生成时卡顿主因)。事件处理器经 getChatMessages() 读最新值;
   // 渲染路径的订阅下沉到叶子组件(ChatMessageList),父组件不再随流式重渲。
-  const [getChatMessages, setChatMessages] = useCreateRuntimeAccessor<
+  const [getChatMessages, setChatMessagesForAccount] = useCreateRuntimeAccessor<
     ChatMessage[]
   >("chatMessages", []);
-  const [chatAttachments, setChatAttachments] = useCreateRuntimeState<
+  const setChatMessages = useChatScopeSetter(
+    chatStorageScope,
+    setChatMessagesForAccount
+  );
+  const [chatAttachments, setChatAttachmentsForAccount] = useCreateRuntimeState<
     ChatAttachment[]
   >("chatAttachments", []);
+  const setChatAttachments = useChatScopeSetter(
+    chatStorageScope,
+    setChatAttachmentsForAccount
+  );
   // chatStream 同理:流式期间每帧变化,渲染订阅已下沉到 ChatStreamBubble /
   // ChatPanelStreamGate,父组件只在请求边界(setChatStream(初始/null))写它,
   // 少数 effect 守卫经 getChatStream() 读即时值。
-  const [getChatStream, setChatStream] =
+  const [getChatStream, setChatStreamForAccount] =
     useCreateRuntimeAccessor<ChatStreamState | null>("chatStream", null);
+  const setChatStream = useChatScopeSetter(
+    chatStorageScope,
+    setChatStreamForAccount
+  );
   // retryingChatMessageId 的订阅已随 ChatPanel/ChatPanelStreamGate 下沉;
   // 父级仅写入(重试开始/结束翻转)。
-  const [, setRetryingChatMessageId] = useCreateRuntimeAccessor<string | null>(
-    "retryingChatMessageId",
-    null
+  const [, setRetryingChatMessageIdForAccount] = useCreateRuntimeAccessor<
+    string | null
+  >("retryingChatMessageId", null);
+  const setRetryingChatMessageId = useChatScopeSetter(
+    chatStorageScope,
+    setRetryingChatMessageIdForAccount
   );
   // WHY 非订阅访问器:batchCards 流式期间逐帧变化(卡片 imageUrl/streamText 更新),
   // 订阅会让父组件每帧全量重渲。写入点(setBatchCards)全在事件/流回调里经函数式
@@ -2088,9 +2128,11 @@ export function CreatePageClient({
     width: number;
     height: number;
   } | null>("chatFirstImageSize", null);
-  const [isChatGenerating, setIsChatGenerating] = useCreateRuntimeState(
-    "isChatGenerating",
-    false
+  const [isChatGenerating, setIsChatGeneratingForAccount] =
+    useCreateRuntimeState("isChatGenerating", false);
+  const setIsChatGenerating = useChatScopeSetter(
+    chatStorageScope,
+    setIsChatGeneratingForAccount
   );
   const [useAutoSize, setUseAutoSize] = useCreateRuntimeState(
     "useAutoSize",
@@ -3545,10 +3587,7 @@ export function CreatePageClient({
     chatMessagesModeRef.current = nextMode;
     setChatConversationId(nextId);
     setChatMessages(conversation?.messages || []);
-    window.localStorage.setItem(
-      chatActiveConversationStorageKey(nextMode),
-      nextId
-    );
+    saveActiveChatConversation(nextMode, nextId);
   };
 
   const setVisualStreamingPreview = (
@@ -3569,7 +3608,6 @@ export function CreatePageClient({
     setChatStream(null);
     setRetryingChatMessageId(null);
     clearStreamingPreview();
-    window.localStorage.removeItem(CHAT_STORAGE_KEY);
   };
 
   const handleNewChat = useCallback(() => {
@@ -3579,10 +3617,7 @@ export function CreatePageClient({
     chatMessagesConversationIdRef.current = nextId;
     chatMessagesModeRef.current = activeConversationMode;
     setChatConversationId(nextId);
-    window.localStorage.setItem(
-      chatActiveConversationStorageKey(activeConversationMode),
-      nextId
-    );
+    saveActiveChatConversation(activeConversationMode, nextId);
     setChatPrompt("");
     clearChatAttachments();
     toast.success(copy("New chat started", "已新建对话"));
@@ -3603,19 +3638,16 @@ export function CreatePageClient({
     );
     chatConversationsRef.current = nextConversations;
     setChatConversations(nextConversations);
-    window.localStorage.setItem(
-      CHAT_CONVERSATIONS_STORAGE_KEY,
-      JSON.stringify(nextConversations)
+    reportChatPersistenceResult(
+      persistChatConversations(chatStorageScope, nextConversations),
+      isZh
     );
     resetChatConversation();
     const nextId = createLocalId();
     chatMessagesConversationIdRef.current = nextId;
     chatMessagesModeRef.current = activeConversationMode;
     setChatConversationId(nextId);
-    window.localStorage.setItem(
-      chatActiveConversationStorageKey(activeConversationMode),
-      nextId
-    );
+    saveActiveChatConversation(activeConversationMode, nextId);
     setChatPrompt("");
     toast.success(copy("Chat history cleared", "对话记录已清理"));
   }, [
@@ -3669,8 +3701,9 @@ export function CreatePageClient({
       return;
     }
 
-    const storedId = window.localStorage.getItem(
-      chatActiveConversationStorageKey(activeConversationMode)
+    const storedId = readActiveChatConversation(
+      chatStorageScope,
+      activeConversationMode
     );
     const conversation = currentModeConversations.find(
       (item) => item.id === storedId
@@ -3696,10 +3729,7 @@ export function CreatePageClient({
       chatMessagesModeRef.current = activeConversationMode;
       setChatConversationId(nextId);
       setChatMessages([]);
-      window.localStorage.setItem(
-        chatActiveConversationStorageKey(activeConversationMode),
-        nextId
-      );
+      saveActiveChatConversation(activeConversationMode, nextId);
     }
     setChatStream(null);
     setRetryingChatMessageId(null);
@@ -3817,6 +3847,7 @@ export function CreatePageClient({
   const runChatRequest = async ({
     prompt,
     attachments = [],
+    sourceMessage,
     fallbackSize,
     historyMessages,
     generationId,
@@ -3827,6 +3858,11 @@ export function CreatePageClient({
   }: {
     prompt: string;
     attachments?: ChatAttachment[];
+    sourceMessage?: {
+      messageId: string;
+      attachmentIds: string[];
+      mode: ConversationMode;
+    };
     fallbackSize: string;
     historyMessages: ChatMessage[];
     generationId?: string;
@@ -3839,6 +3875,7 @@ export function CreatePageClient({
       activeChatRequestGenerationIdsRef.current.add(generationId);
     }
     const executeChatRequest = async (): Promise<ImageApiResult> => {
+      if (!chatStorageScope.active) throw new Error("聊天账号已切换");
       const streamMode: "chat" | "agent" | undefined =
         streamCardId && !streamMessageId
           ? undefined
@@ -3858,6 +3895,29 @@ export function CreatePageClient({
           ? fallbackSize
           : size;
       const formData = new FormData();
+      if (sourceMessage) {
+        formData.set("source_image_message_id", sourceMessage.messageId);
+        formData.set(
+          "source_image_attachment_ids",
+          JSON.stringify(sourceMessage.attachmentIds)
+        );
+      }
+      const receiveSourceImages = sourceMessage
+        ? createChatSourceImageReceiver({
+            scope: chatStorageScope,
+            conversationId: chatConversationId,
+            mode: sourceMessage.mode,
+            messageId: sourceMessage.messageId,
+            attachmentIds: sourceMessage.attachmentIds,
+            getMessages: getChatMessages,
+            setMessages: setChatMessages,
+            conversationsRef: chatConversationsRef,
+            setConversations: setChatConversations,
+            titleFallback: isZh ? "未命名对话" : "Untitled chat",
+            onPersistenceResult: (result) =>
+              reportChatPersistenceResult(result, isZh),
+          })
+        : null;
       formData.append("prompt", prompt);
       if (generationId) formData.append("generation_id", generationId);
       formData.append(
@@ -4086,6 +4146,7 @@ export function CreatePageClient({
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("text/event-stream")) {
         const data = await readImageApiJsonResponse(response);
+        receiveSourceImages?.(data);
         if (!response.ok || data.error) {
           throw createRequestError(
             data.error || `API error: ${response.status}`,
@@ -4133,6 +4194,9 @@ export function CreatePageClient({
         } catch {
           return;
         }
+
+        receiveSourceImages?.(event);
+        if (event.type === "input_images") return;
 
         // 三类纯文本 delta 只累积本地变量,统一由 rAF 攒批提交(见
         // scheduleStreamCommit):每帧最多一次 setState,而不是每个 token
@@ -4274,7 +4338,8 @@ export function CreatePageClient({
     // 卸载时取消排队,避免卸载后 setState。
     let cancelled = false;
     const restore = () => {
-      if (cancelled || didLoadChatRef.current) return;
+      if (cancelled || !chatStorageScope.active || didLoadChatRef.current)
+        return;
       didLoadChatRef.current = true;
       const chatMessages = getChatMessages();
       try {
@@ -4287,51 +4352,19 @@ export function CreatePageClient({
           return;
         }
 
-        const conversationRaw = window.localStorage.getItem(
-          CHAT_CONVERSATIONS_STORAGE_KEY
-        );
-        const conversations = compactChatConversations(
-          sanitizeChatConversations(
-            conversationRaw ? JSON.parse(conversationRaw) : []
-          )
-        );
-
-        const legacyRaw = window.localStorage.getItem(CHAT_STORAGE_KEY);
-        const legacyMessages = sanitizeChatMessages(
-          legacyRaw ? JSON.parse(legacyRaw) : []
-        );
-        // legacy 去重:用 O(1) 签名(条数+末条 id/正文)代替整会话
-        // JSON.stringify 全序列化比较(30 会话 × 80 消息时省数十次全量序列化)。
-        // 语义足够:该判断只为"legacy 消息是否已被某会话收编"。
-        const legacySignature = `${legacyMessages.length}:${
-          legacyMessages[legacyMessages.length - 1]?.id ?? ""
-        }:${legacyMessages[legacyMessages.length - 1]?.text ?? ""}`;
-        const hasLegacyConversation =
-          legacyMessages.length > 0 &&
-          !conversations.some(
-            (conversation) =>
-              conversation.messages.length === legacyMessages.length &&
-              `${conversation.messages.length}:${
-                conversation.messages[conversation.messages.length - 1]?.id ??
-                ""
-              }:${
-                conversation.messages[conversation.messages.length - 1]?.text ??
-                ""
-              }` === legacySignature
+        const restored = readChatConversations(chatStorageScope);
+        if (restored.error) {
+          reportChatPersistenceResult(
+            {
+              status: "failed",
+              reason: restored.error,
+              failedConversationIds: [],
+            },
+            isZh
           );
+        }
         const nextConversations = compactChatConversations(
-          hasLegacyConversation
-            ? [
-                createChatConversation(
-                  legacyMessages,
-                  getChatConversationTitle(
-                    legacyMessages,
-                    isZh ? "历史对话" : "Previous chat"
-                  )
-                ),
-                ...conversations,
-              ]
-            : conversations
+          sanitizeChatConversations(restored.conversations)
         );
 
         if (nextConversations.length > 0) {
@@ -4345,8 +4378,9 @@ export function CreatePageClient({
           const storedConversationMode = activeModeToConversationMode(
             readStoredCreateActiveMode()
           );
-          const activeConversationId = window.localStorage.getItem(
-            chatActiveConversationStorageKey(storedConversationMode)
+          const activeConversationId = readActiveChatConversation(
+            chatStorageScope,
+            storedConversationMode
           );
           const activeConversation =
             sortedConversations.find(
@@ -4366,28 +4400,17 @@ export function CreatePageClient({
           setChatConversationId(activeConversation?.id || createLocalId());
           setChatMessages(activeConversation?.messages || []);
           if (activeConversation) {
-            window.localStorage.setItem(
-              chatActiveConversationStorageKey(activeConversation.mode),
+            saveActiveChatConversation(
+              activeConversation.mode,
               activeConversation.id
             );
           }
         }
-        window.localStorage.setItem(
-          CHAT_CONVERSATIONS_STORAGE_KEY,
-          JSON.stringify(
-            compactChatConversations(nextConversations).slice(
-              0,
-              CHAT_CONVERSATION_LIMIT
-            )
-          )
-        );
-        window.localStorage.removeItem(CHAT_STORAGE_KEY);
       } catch {
-        window.localStorage.removeItem(CHAT_STORAGE_KEY);
-        window.localStorage.removeItem(CHAT_CONVERSATIONS_STORAGE_KEY);
-        window.localStorage.removeItem(CHAT_ACTIVE_CONVERSATION_STORAGE_KEY);
-        window.localStorage.removeItem(
-          CHAT_ACTIVE_AGENT_CONVERSATION_STORAGE_KEY
+        // 恢复失败不删除磁盘上的旧成功快照，用户仍可继续使用当前页面。
+        reportChatPersistenceResult(
+          { status: "failed", reason: "invalid", failedConversationIds: [] },
+          isZh
         );
       } finally {
         didLoadChatRef.current = true;
@@ -4411,6 +4434,7 @@ export function CreatePageClient({
   // 组件,父组件不再因此全量重渲。见 chat-subscriptions.tsx。
   const chatPersistenceAgent = (
     <ChatPersistenceAgent
+      scope={chatStorageScope}
       chatConversationId={chatConversationId}
       isZh={isZh}
       didLoadChatRef={didLoadChatRef}
@@ -4669,6 +4693,7 @@ export function CreatePageClient({
     fallbackSize = size,
     options?: { syncCredits?: boolean }
   ) => {
+    if (!chatStorageScope.active) return [];
     const shouldSyncCredits = options?.syncCredits ?? true;
     const expanded = expandChatImageOutputs(data);
     const variants: ChatVariant[] = [];
@@ -4746,6 +4771,7 @@ export function CreatePageClient({
   };
 
   const syncChargedCredits = (creditsConsumed?: number) => {
+    if (!chatStorageScope.active) return;
     if (!creditsConsumed || creditsConsumed <= 0) return;
     setBalance((b) => Math.round(Math.max(0, b - creditsConsumed) * 100) / 100);
   };
@@ -5012,15 +5038,11 @@ export function CreatePageClient({
     const activeVariant = getActiveChatVariant(assistantMessage);
     const retrySize = activeVariant?.size || size;
     const generationId = createGenerationId();
-    const userIndex = getChatMessages().findIndex(
-      (message) => message.id === userMessage.id
-    );
     const conversationMode =
-      assistantMessage.mode === "agent" ? "agent" : ("chat" as const);
-    const historyMessages = (
-      userIndex >= 0
-        ? getChatMessages().slice(0, userIndex)
-        : getChatMessages().slice(0, assistantIndex)
+      assistantMessage.mode || userMessage.mode || "chat";
+    const historyMessages = buildChatRetryHistory(
+      getChatMessages(),
+      userMessage.id
     ).filter((message) =>
       isMessageInConversationMode(message, conversationMode)
     );
@@ -5051,7 +5073,7 @@ export function CreatePageClient({
     setChatStream(
       createInitialChatStreamState({
         messageId: assistantId,
-        mode: conversationMode,
+        mode: conversationMode === "agent" ? "agent" : "chat",
         agentMode:
           assistantMessage.mode === "agent" || userMessage.mode === "agent",
         generationId,
@@ -5061,7 +5083,7 @@ export function CreatePageClient({
       })
     );
     setChatMessages(pendingMessages);
-    persistChatConversationSnapshot({
+    saveChatConversationSnapshot({
       conversations: chatConversationsRef.current,
       conversationId: chatConversationId,
       mode: conversationMode,
@@ -6329,7 +6351,7 @@ export function CreatePageClient({
       },
     ];
     setChatMessages(pendingMessages);
-    persistChatConversationSnapshot({
+    saveChatConversationSnapshot({
       conversations: chatConversationsRef.current,
       conversationId: chatConversationId,
       mode: conversationMode,
@@ -6355,7 +6377,7 @@ export function CreatePageClient({
         };
       });
       setChatMessages(finalMessages);
-      persistChatConversationSnapshot({
+      saveChatConversationSnapshot({
         conversations: chatConversationsRef.current,
         conversationId: chatConversationId,
         mode: conversationMode,
@@ -6368,6 +6390,7 @@ export function CreatePageClient({
       const base64Images = await Promise.all(
         imageFiles.map((item) => fileToDataUrl(item.file))
       );
+      if (!chatStorageScope.active) return;
       const response = await fetch("/api/editable-file/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -6473,12 +6496,10 @@ export function CreatePageClient({
     }
 
     const attachmentPreviews = attachments.map((item) => ({
-      id: item.sourceId || item.file.name,
+      id: createLocalId(),
       name: item.file.name,
-      // 复用附件已算好的持久 data URL(chatAttachments 在 readFileAsDataUrl 时生成);
-      // 不要用 URL.createObjectURL 重造 blob: URL——blob 只在当前页面存活,持久化到会话
-      // 记录后刷新即失效(参考图消失),且 getMessageImageUrls 只收 data:/http(s) 会把它
-      // 滤掉,导致后续轮次历史也拿不到用户上传的参考图。
+      // 上传确认前保留 data URL；服务端确认已存储后按稳定附件 ID 替换为受控 URL。
+      // 同名文件也各有独立 ID，不能用文件名或响应顺序回填图片。
       previewUrl: item.kind === "image" ? item.previewUrl : undefined,
       kind: item.kind,
     }));
@@ -6537,7 +6558,7 @@ export function CreatePageClient({
       },
     ];
     setChatMessages(pendingMessages);
-    persistChatConversationSnapshot({
+    saveChatConversationSnapshot({
       conversations: chatConversationsRef.current,
       conversationId: chatConversationId,
       mode: conversationMode,
@@ -6565,6 +6586,13 @@ export function CreatePageClient({
       const data = await runChatRequest({
         prompt: currentPrompt,
         attachments,
+        sourceMessage: {
+          messageId: userMessageId,
+          attachmentIds: attachmentPreviews
+            .filter((item) => item.kind === "image")
+            .map((item) => item.id),
+          mode: conversationMode,
+        },
         fallbackSize: fallbackSize || size,
         historyMessages: conversationBeforeSend,
         generationId,

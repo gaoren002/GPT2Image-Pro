@@ -1,6 +1,11 @@
+import type { ChatSourceImageReferences } from "./components/chat-input-images";
 import type { AgentRunEvent } from "./types";
 
 export type ImageStreamEvent =
+  | {
+      type: "input_images";
+      sourceImageReferences: ChatSourceImageReferences;
+    }
   | {
       type: "partial_image";
       index?: number;
@@ -31,6 +36,7 @@ export type ImageStreamEvent =
     }
   | {
       type: "completed";
+      sourceImageReferences?: ChatSourceImageReferences;
       generationId?: string;
       imageUrl?: string;
       imageFileId?: string;
@@ -89,6 +95,7 @@ export type ImageStreamEvent =
     }
   | {
       type: "error";
+      sourceImageReferences?: ChatSourceImageReferences;
       error: string;
       generationId?: string;
       creditsConsumed?: number;

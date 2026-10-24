@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { withApiLogging } from "@repo/shared/api-logger";
 import { auth } from "@repo/shared/auth";
-import { buildPublicImageUrl } from "@repo/shared/storage/signed-url";
+import {
+  buildPublicImageUrl,
+  buildSignedStorageImageUrl,
+  StorageImageAccessError,
+} from "@repo/shared/storage/signed-url";
 import {
   canUsePlanCapability,
   getPlanLimits,
@@ -13,8 +17,8 @@ import {
   firstBatchError,
   runBatchImageGeneration,
 } from "@/features/image-generation/batch-runner";
+import type { ChatSourceImageReferences } from "@/features/image-generation/components/chat-input-images";
 import { runImageGenerationForUser } from "@/features/image-generation/operations";
-import { isFireflyModel } from "@/features/image-generation/resolution";
 import {
   normalizeImageBackground,
   normalizeOutputCompression,
@@ -34,6 +38,7 @@ import {
   DEFAULT_IMAGE_SIZE,
   IMAGE_PROMPT_MAX_CHARACTERS,
   IMAGE_PROMPT_TOO_LONG_MESSAGE,
+  isFireflyModel,
   validateImageSize,
 } from "@/features/image-generation/resolution";
 import { createImageStreamResponse } from "@/features/image-generation/streaming";
@@ -133,7 +138,8 @@ function getPreferredBackendMember(
     const backendMember = variant?.backendMember;
     if (backendMember?.id) return backendMember;
     const accountId = variant?.webConversation?.accountId;
-    if (accountId) return { type: "account", id: accountId, accountBackend: "web" };
+    if (accountId)
+      return { type: "account", id: accountId, accountBackend: "web" };
   }
   return undefined;
 }
@@ -223,22 +229,29 @@ function getRequestBaseUrl(request: NextRequest) {
   );
 }
 
-function toPublicImageUrl(request: NextRequest, imageUrl?: string) {
-  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request));
+function toPublicImageUrl(
+  request: NextRequest,
+  userId: string,
+  imageUrl?: string
+) {
+  return buildPublicImageUrl(imageUrl, getRequestBaseUrl(request), 3600, {
+    userId,
+  });
 }
 
 function normalizeHistoryImageUrls(
   request: NextRequest,
-  history: ChatHistoryMessage[]
+  history: ChatHistoryMessage[],
+  userId: string
 ) {
   return history.map((message) => ({
     ...message,
     imageUrls: (message.imageUrls || []).map(
-      (url) => toPublicImageUrl(request, url) || url
+      (url) => toPublicImageUrl(request, userId, url) || url
     ),
     variants: message.variants?.map((variant) => ({
       ...variant,
-      imageUrl: toPublicImageUrl(request, variant.imageUrl),
+      imageUrl: toPublicImageUrl(request, userId, variant.imageUrl),
     })),
   }));
 }
@@ -256,6 +269,27 @@ function getImageFiles(formData: FormData) {
   }
 
   return images;
+}
+
+/** 图片上传确认的可选客户端标识；顺序必须与 multipart 中的图片文件一致。 */
+function getSourceImageMetadata(formData: FormData, imageCount: number) {
+  const messageId = getText(formData, "source_image_message_id");
+  const rawIds = getText(formData, "source_image_attachment_ids");
+  if (!messageId && !rawIds) return null;
+  const ids: unknown = JSON.parse(rawIds);
+  if (
+    !messageId ||
+    messageId.length > 128 ||
+    !Array.isArray(ids) ||
+    ids.length !== imageCount ||
+    ids.some((id) => typeof id !== "string" || !id.trim() || id.length > 128) ||
+    new Set(ids).size !== ids.length
+  ) {
+    throw new Error(
+      "Source image attachment IDs must uniquely match the uploaded images."
+    );
+  }
+  return { messageId, attachmentIds: ids as string[] };
 }
 
 function getAttachmentFiles(formData: FormData) {
@@ -761,6 +795,15 @@ export const POST = withApiLogging(async (request: NextRequest) => {
     );
   }
 
+  let sourceImageMetadata: ReturnType<typeof getSourceImageMetadata>;
+  try {
+    sourceImageMetadata = getSourceImageMetadata(formData, sourceFiles.length);
+  } catch {
+    return errorResponse(
+      "Source image attachment IDs must uniquely match the uploaded images."
+    );
+  }
+
   let fileContext = "";
   let responseInputFiles: ResponsesInputFile[] = [];
   try {
@@ -812,9 +855,21 @@ export const POST = withApiLogging(async (request: NextRequest) => {
   if (limitedContext.error) {
     return errorResponse(limitedContext.error);
   }
-  history = normalizeHistoryImageUrls(request, limitedContext.history);
+  try {
+    history = normalizeHistoryImageUrls(
+      request,
+      limitedContext.history,
+      session.user.id
+    );
+  } catch (error) {
+    if (error instanceof StorageImageAccessError) {
+      return errorResponse(error.message, error.status);
+    }
+    throw error;
+  }
   const preferredBackendMember = getPreferredBackendMember(history);
-  const stickyPreviousResponseId = getLatestResponsesPreviousResponseId(history);
+  const stickyPreviousResponseId =
+    getLatestResponsesPreviousResponseId(history);
 
   let size = alignImageSizeToStep(
     getText(formData, "size") || DEFAULT_IMAGE_SIZE
@@ -906,6 +961,9 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       400
     );
   }
+  const inputImagePayload: {
+    sourceImageReferences?: ChatSourceImageReferences;
+  } = {};
   try {
     for (const file of sourceFiles) {
       validateImageFile(file, {
@@ -931,6 +989,25 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       sourceFiles,
       { scope: "requests" }
     );
+    // 复用本次已写入的对象键，返回可由 owner 校验续签的站内 URL，不再上传。
+    if (
+      sourceImageMetadata &&
+      sourceImageUrls?.length === sourceFiles.length &&
+      sourceFiles.length
+    ) {
+      const images: ChatSourceImageReferences["images"] = [];
+      for (const [index, image] of sourceImageUrls.entries()) {
+        const attachmentId = sourceImageMetadata.attachmentIds[index];
+        const url = buildSignedStorageImageUrl(image.key, image.bucket);
+        if (attachmentId && url) images.push({ attachmentId, url });
+      }
+      if (images.length === sourceFiles.length) {
+        inputImagePayload.sourceImageReferences = {
+          messageId: sourceImageMetadata.messageId,
+          images,
+        };
+      }
+    }
     const useStreamResponse = wantsStreamResponse(request, formData);
 
     const buildImages = async () =>
@@ -943,6 +1020,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       await runImageGenerationForUser(
         {
           mode: "chat",
+          signal: request.signal,
           userId: session.user.id,
           generationId,
           prompt,
@@ -988,6 +1066,12 @@ export const POST = withApiLogging(async (request: NextRequest) => {
 
     if (useStreamResponse) {
       return createImageStreamResponse(async (emit) => {
+        if (inputImagePayload.sourceImageReferences) {
+          await emit({
+            type: "input_images",
+            sourceImageReferences: inputImagePayload.sourceImageReferences,
+          });
+        }
         await runBatchImageGeneration({
           count,
           concurrency: planLimits.imageGenerationConcurrency,
@@ -1027,11 +1111,12 @@ export const POST = withApiLogging(async (request: NextRequest) => {
                 error: result.error,
                 generationId: result.generationId,
                 creditsConsumed: result.creditsConsumed,
+                ...inputImagePayload,
               });
               return;
             }
 
-            await emit({ type: "completed", ...result });
+            await emit({ type: "completed", ...result, ...inputImagePayload });
           },
         });
 
@@ -1041,7 +1126,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
 
     if (count === 1) {
       const result = await runChat(requestedGenerationId || randomUUID());
-      return NextResponse.json(result);
+      return NextResponse.json({ ...result, ...inputImagePayload });
     }
 
     const results = await runBatchImageGeneration({
@@ -1055,12 +1140,18 @@ export const POST = withApiLogging(async (request: NextRequest) => {
     });
 
     return NextResponse.json({
+      ...inputImagePayload,
       results,
       error: firstBatchError(results)?.error,
     });
   } catch (error) {
-    return errorResponse(
-      error instanceof Error ? error.message : "Failed to generate image."
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Failed to generate image.",
+        ...inputImagePayload,
+      },
+      { status: 400 }
     );
   }
 });

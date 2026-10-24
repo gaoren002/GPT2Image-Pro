@@ -15,37 +15,170 @@
  * 约束:父组件传入的所有函数 prop 必须是 useCallback 固定引用,否则隔离失效。
  */
 
-import type { MutableRefObject, ReactNode, SetStateAction } from "react";
-import { useEffect, useRef } from "react";
-import { useCreateRuntimeState } from "@/features/image-generation/create-runtime-store";
+import type {
+  Dispatch,
+  MutableRefObject,
+  ReactNode,
+  SetStateAction,
+} from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { toast } from "sonner";
+import {
+  useCreateRuntimeAccessor,
+  useCreateRuntimeRef,
+  useCreateRuntimeState,
+  useResetCreateRuntimeKeys,
+} from "@/features/image-generation/create-runtime-store";
 import type {
   ChatConversation,
   ChatMessage,
   ConversationMode,
 } from "./chat-message-types";
 import {
-  CHAT_CONVERSATION_LIMIT,
-  CHAT_CONVERSATIONS_STORAGE_KEY,
+  beginChatStorageScope,
+  buildChatConversationSnapshot,
   CHAT_PERSIST_DEBOUNCE_MS,
-  CHAT_STORAGE_KEY,
-  chatActiveConversationStorageKey,
-  compactChatConversations,
-  getChatConversationTitle,
+  CHAT_STORAGE_SCOPE_REVOKED_EVENT,
+  type ChatPersistenceResult,
+  type ChatStorageScope,
   inferChatConversationMode,
-  isMessageInConversationMode,
-  sanitizePersistedChatMessages,
+  persistChatConversationSnapshot,
 } from "./chat-persistence";
 import type { ChatStreamState } from "./chat-stream-state";
 
+const CHAT_ACCOUNT_RUNTIME_KEYS = [
+  "chatConversationId",
+  "chatConversations",
+  "chatMessages",
+  "chatAttachments",
+  "chatPrompt",
+  "chatPromptHasText",
+  "chatPromptHasRef",
+  "chatMention",
+  "chatStream",
+  "retryingChatMessageId",
+  "isChatGenerating",
+  "chatConversationsRef",
+  "didLoadChatRef",
+  "chatMessagesConversationIdRef",
+  "chatMessagesModeRef",
+  "activeChatRequestGenerationIdsRef",
+];
+
 /**
- * 去抖持久化副作用组件。
- *
- * 每次 chatMessages 变化重置 300ms 尾沿定时器,静默期到达才 sanitize +
- * 推导标题 + JSON.stringify 全部会话并写 localStorage(成本随会话数线性
- * 增长,不能逐帧同步执行);卸载/beforeunload 经 pendingRef 冲刷末轮。
- * 渲染恒为 null,不产生 DOM。
+ * 会话确认前不挂载消息消费者。账号变化先撤销旧回调、清除旧账号内存,
+ * 再挂载新账号；同账号软导航保留原 runtime store 和正在执行的回合。
  */
+export function ChatAccountBoundary({
+  renderAccount,
+}: {
+  renderAccount: (scope: ChatStorageScope) => ReactNode;
+}) {
+  // 侧栏已有 SSR 初值和回前台校验；复用同一身份，不再额外请求会话接口。
+  const [userId] = useCreateRuntimeState<string | null | undefined>(
+    "chatAccountUserId",
+    undefined
+  );
+  const scopeRef = useCreateRuntimeRef<ChatStorageScope | null>(
+    "chatStorageScopeRef",
+    null
+  );
+  const resetKeys = useResetCreateRuntimeKeys();
+  const [ready, setReady] = useState<ChatStorageScope | null>(null);
+
+  // 在子树卸载清理之前撤销，避免旧 unmount flush 写入或复活旧消息。
+  if (
+    userId !== undefined &&
+    scopeRef.current?.userId !== userId &&
+    scopeRef.current
+  ) {
+    scopeRef.current.active = false;
+  }
+
+  useLayoutEffect(() => {
+    if (userId === undefined) return;
+    if (scopeRef.current && scopeRef.current.userId === userId) {
+      setReady(scopeRef.current.active ? scopeRef.current : null);
+      return;
+    }
+    resetKeys(CHAT_ACCOUNT_RUNTIME_KEYS);
+    scopeRef.current = userId ? beginChatStorageScope(userId) : null;
+    setReady(scopeRef.current);
+  }, [userId, resetKeys, scopeRef]);
+
+  useEffect(() => {
+    const hideRevokedAccount = () => {
+      if (scopeRef.current?.active) return;
+      resetKeys(CHAT_ACCOUNT_RUNTIME_KEYS);
+      setReady(null);
+    };
+    window.addEventListener(
+      CHAT_STORAGE_SCOPE_REVOKED_EVENT,
+      hideRevokedAccount
+    );
+    return () =>
+      window.removeEventListener(
+        CHAT_STORAGE_SCOPE_REVOKED_EVENT,
+        hideRevokedAccount
+      );
+  }, [resetKeys, scopeRef]);
+
+  return ready?.active && ready.userId === userId ? renderAccount(ready) : null;
+}
+
+/** 旧异步请求的 setter 即使晚返回，也不能写进下一账号的共享 runtime。 */
+export function useChatScopeSetter<T>(
+  scope: ChatStorageScope,
+  setter: Dispatch<SetStateAction<T>>
+) {
+  return useCallback(
+    (next: SetStateAction<T>) => {
+      if (scope.active) setter(next);
+    },
+    [scope, setter]
+  );
+}
+
+/** 用固定通知 id 合并去抖期间的重复失败；不输出消息正文或附件内容。 */
+export function reportChatPersistenceResult(
+  result: ChatPersistenceResult,
+  isZh: boolean,
+  messages: ChatMessage[] = []
+) {
+  if (result.status !== "failed" && result.status !== "partial") return;
+  // 上传确认会把大 data URL 换成小引用；仅延迟这段窗口内的容量提示。
+  // 上传/生成失败定稿后仍会报告，浏览器拒绝存储等实际写入失败始终立即报告。
+  if (
+    result.reason === "size" &&
+    messages.at(-1)?.variants?.some((variant) => variant.pending) &&
+    messages.some((message) =>
+      message.attachments?.some((attachment) =>
+        attachment.previewUrl?.startsWith("data:image/")
+      )
+    )
+  )
+    return;
+  toast.error(
+    result.reason === "size"
+      ? isZh
+        ? "部分对话超过本地保存容量，完整内容仅保留在当前页面；刷新后会恢复上次保存的记录。其他对话可继续保存。"
+        : "Some chats exceed local storage limits. Full content remains on this page; reloading restores the last saved version. Other chats can still be saved."
+      : isZh
+        ? "对话未能保存到本机，当前页面内容仍在；刷新或关闭页面可能丢失本次更改。"
+        : "Chat could not be saved locally. Content remains on this page; reloading or closing it may lose recent changes.",
+    { id: "chat-persistence-failure" }
+  );
+}
+
+/** 去抖保存和卸载冲刷共用带归属的快照；失败仍保留完整内存消息。 */
 export function ChatPersistenceAgent({
+  scope,
   chatConversationId,
   isZh,
   didLoadChatRef,
@@ -54,6 +187,7 @@ export function ChatPersistenceAgent({
   chatConversationsRef,
   setChatConversations,
 }: {
+  scope: ChatStorageScope;
   chatConversationId: string;
   isZh: boolean;
   didLoadChatRef: MutableRefObject<boolean>;
@@ -66,77 +200,56 @@ export function ChatPersistenceAgent({
     "chatMessages",
     []
   );
+  const [getChatMessages] = useCreateRuntimeAccessor<ChatMessage[]>(
+    "chatMessages",
+    []
+  );
   const pendingPersistRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    if (!didLoadChatRef.current) return;
+    if (!didLoadChatRef.current || !scope.active) return;
     const persist = () => {
       pendingPersistRef.current = null;
-      try {
-        if (
-          chatMessages.length > 0 &&
-          chatMessagesConversationIdRef.current &&
-          (chatMessagesConversationIdRef.current !== chatConversationId ||
-            (chatMessagesModeRef.current &&
-              chatMessagesModeRef.current !==
-                inferChatConversationMode(chatMessages)))
-        ) {
-          return;
-        }
-        if (chatMessages.length === 0) {
-          window.localStorage.removeItem(CHAT_STORAGE_KEY);
-          return;
-        }
-        const persistedMessages = sanitizePersistedChatMessages(chatMessages);
-        const conversationMode = inferChatConversationMode(persistedMessages);
-        chatMessagesConversationIdRef.current = chatConversationId;
-        chatMessagesModeRef.current = conversationMode;
-        const title = getChatConversationTitle(
-          persistedMessages.filter((message) =>
-            isMessageInConversationMode(message, conversationMode)
-          ),
-          isZh ? "未命名对话" : "Untitled chat"
-        );
-        const now = new Date().toISOString();
-        const previousConversations = chatConversationsRef.current;
-        const existing = previousConversations.find(
-          (conversation) => conversation.id === chatConversationId
-        );
-        const current: ChatConversation = {
-          id: chatConversationId,
-          mode: existing?.mode || conversationMode,
-          title,
-          messages: persistedMessages,
-          createdAt: existing?.createdAt || now,
-          updatedAt: now,
-        };
-        const nextConversations = compactChatConversations([
-          current,
-          ...previousConversations.filter(
-            (conversation) => conversation.id !== chatConversationId
-          ),
-        ]).slice(0, CHAT_CONVERSATION_LIMIT);
-        chatConversationsRef.current = nextConversations;
-        setChatConversations(nextConversations);
-        window.localStorage.setItem(
-          CHAT_CONVERSATIONS_STORAGE_KEY,
-          JSON.stringify(nextConversations)
-        );
-        window.localStorage.setItem(
-          chatActiveConversationStorageKey(current.mode),
-          chatConversationId
-        );
-        window.localStorage.removeItem(CHAT_STORAGE_KEY);
-      } catch {
-        /* ignore local storage quota errors */
-      }
+      if (!scope.active) return;
+      // 上传确认可能与关页发生在同一事件内，effect 闭包尚未重建；只冲刷最新 store。
+      const messages = getChatMessages();
+      if (!messages.length) return;
+      if (
+        chatMessagesConversationIdRef.current &&
+        (chatMessagesConversationIdRef.current !== chatConversationId ||
+          (chatMessagesModeRef.current &&
+            chatMessagesModeRef.current !==
+              inferChatConversationMode(messages)))
+      )
+        return;
+      const conversationMode = inferChatConversationMode(messages);
+      const params = {
+        scope,
+        conversations: chatConversationsRef.current,
+        conversationId: chatConversationId,
+        mode: conversationMode,
+        messages,
+        titleFallback: isZh ? "未命名对话" : "Untitled chat",
+      };
+      chatMessagesConversationIdRef.current = chatConversationId;
+      chatMessagesModeRef.current = conversationMode;
+      const nextConversations = buildChatConversationSnapshot(params);
+      chatConversationsRef.current = nextConversations;
+      setChatConversations(nextConversations);
+      reportChatPersistenceResult(
+        persistChatConversationSnapshot(params),
+        isZh,
+        messages
+      );
     };
     pendingPersistRef.current = persist;
     const timer = window.setTimeout(persist, CHAT_PERSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [
+    scope,
     chatConversationId,
     chatMessages,
+    getChatMessages,
     chatConversationsRef,
     chatMessagesConversationIdRef,
     chatMessagesModeRef,
@@ -145,18 +258,14 @@ export function ChatPersistenceAgent({
     setChatConversations,
   ]);
 
-  // 关页/组件卸载时冲刷去抖窗口内尚未落库的会话变更。
   useEffect(() => {
-    const flushPendingChatPersist = () => {
-      pendingPersistRef.current?.();
-    };
-    window.addEventListener("beforeunload", flushPendingChatPersist);
+    const flush = () => pendingPersistRef.current?.();
+    window.addEventListener("beforeunload", flush);
     return () => {
-      window.removeEventListener("beforeunload", flushPendingChatPersist);
-      flushPendingChatPersist();
+      window.removeEventListener("beforeunload", flush);
+      flush();
     };
   }, []);
-
   return null;
 }
 

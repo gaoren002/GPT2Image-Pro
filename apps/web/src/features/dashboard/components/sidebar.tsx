@@ -1,5 +1,7 @@
 "use client";
 
+/** Dashboard 导航与账号菜单；会话变更及成功登出时撤销旧账号聊天写入资格。 */
+
 import { getMyUnreadAnnouncementCountAction } from "@repo/shared/announcements/actions";
 import { signOut } from "@repo/shared/auth/client";
 import { isAdminRole, isObserverAdminRole } from "@repo/shared/auth/roles";
@@ -40,14 +42,16 @@ import Link, { useLinkStatus } from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useAction } from "next-safe-action/hooks";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   type CurrentSession,
   useCurrentSession,
 } from "@/features/auth/hooks/use-current-session";
-import { SIDEBAR_UNREAD_CHANGED_EVENT } from "@/features/dashboard/components/sidebar-unread-sync";
 import { SidebarNavigationLink } from "@/features/dashboard/components/sidebar-navigation-link";
+import { SIDEBAR_UNREAD_CHANGED_EVENT } from "@/features/dashboard/components/sidebar-unread-sync";
 import { useSidebar } from "@/features/dashboard/context";
+import { revokeChatStorageScope } from "@/features/image-generation/components/chat-persistence";
+import { useCreateRuntimeState } from "@/features/image-generation/create-runtime-store";
 
 /**
  * Dashboard 侧边栏组件
@@ -116,8 +120,25 @@ export function DashboardSidebar({
   const t = useTranslations("Dashboard");
 
   // 获取当前用户会话
-  const { data: session } = useCurrentSession(initialSession);
+  const { data: session, isPending: isSessionPending } =
+    useCurrentSession(initialSession);
   const user = session?.user;
+  const [, setChatAccountUserId] = useCreateRuntimeState<
+    string | null | undefined
+  >("chatAccountUserId", undefined);
+  const previousChatUserIdRef = useRef(user?.id);
+  const signedOutChatUserIdRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!user && isSessionPending) return;
+    // 成功登出后的旧会话响应不能重新开放同一账号，等待新身份或布局重新挂载。
+    if (user?.id && user.id === signedOutChatUserIdRef.current) return;
+    if (user?.id) signedOutChatUserIdRef.current = undefined;
+    if (previousChatUserIdRef.current !== user?.id) {
+      revokeChatStorageScope(previousChatUserIdRef.current);
+      previousChatUserIdRef.current = user?.id;
+    }
+    setChatAccountUserId(user?.id ?? null);
+  }, [user, isSessionPending, setChatAccountUserId]);
   const isAdmin = isAdminRole(user?.role);
   const isObserverAdmin = isObserverAdminRole(user?.role);
 
@@ -235,6 +256,9 @@ export function DashboardSidebar({
     await signOut({
       fetchOptions: {
         onSuccess: () => {
+          signedOutChatUserIdRef.current = user?.id;
+          revokeChatStorageScope(user?.id);
+          setChatAccountUserId(null);
           router.push("/");
         },
       },

@@ -12,6 +12,17 @@ import {
   interpretImageHealthResult,
 } from "./health-check";
 
+describe("测活鉴权判定", () => {
+  it.each([
+    "HTTP 500: server_error request_id=req_3c4019e2",
+    "HTTP 502: Bad Gateway Ray ID 8f40393ab2c1d4e5",
+    "HTTP 503: authentication failed because authentication backend is overloaded",
+    "HTTP 503: forbidden by temporary gateway policy",
+  ])("5xx 正文不会变成 auth_failed：%s", (error) => {
+    expect(classifyImageHealthError(error)).toBe("error");
+  });
+});
+
 describe("interpretImageHealthResult", () => {
   it("有 imageBase64 判为 ok", () => {
     const r = interpretImageHealthResult({ imageBase64: "abc" }, 120);
@@ -25,9 +36,9 @@ describe("interpretImageHealthResult", () => {
     expect(
       interpretImageHealthResult({ imageUrl: "https://x/a.png" }, 1).status
     ).toBe("ok");
-    expect(
-      interpretImageHealthResult({ imageOutputs: [{}] }, 1).status
-    ).toBe("ok");
+    expect(interpretImageHealthResult({ imageOutputs: [{}] }, 1).status).toBe(
+      "ok"
+    );
   });
 
   it("无图但带 no image output 错误 → no_image", () => {
@@ -82,14 +93,16 @@ describe("classifyImageHealthError", () => {
 
   it("无图像产出/缺工具 → no_image", () => {
     expect(
-      classifyImageHealthError("Upstream returned no image output: 已生成图片。")
+      classifyImageHealthError(
+        "Upstream returned no image output: 已生成图片。"
+      )
     ).toBe("no_image");
     expect(classifyImageHealthError("API returned no image data")).toBe(
       "no_image"
     );
-    expect(classifyImageHealthError("未提供 image_generation 图像生成工具")).toBe(
-      "no_image"
-    );
+    expect(
+      classifyImageHealthError("未提供 image_generation 图像生成工具")
+    ).toBe("no_image");
   });
 
   it("超时/连接/网络 → unreachable", () => {

@@ -11,6 +11,7 @@
  *
  * 使用方：image-backend-pool 的后台 API 测活；settings 的用户自配 API 测活。
  */
+import { isInvalidBackendCredentialError } from "./backend-credential-error";
 import type { ApiConfig } from "@/features/image-generation/types";
 
 import type {
@@ -72,18 +73,7 @@ export function classifyImageHealthError(
   error: string
 ): Exclude<ImageApiHealthStatus, "ok"> {
   const n = error.toLowerCase();
-  if (
-    n.includes("401") ||
-    n.includes("403") ||
-    n.includes("unauthorized") ||
-    n.includes("forbidden") ||
-    n.includes("invalid api key") ||
-    n.includes("invalid_api_key") ||
-    n.includes("invalid access token") ||
-    n.includes("invalid authentication")
-  ) {
-    return "auth_failed";
-  }
+  if (isInvalidBackendCredentialError(error)) return "auth_failed";
   if (
     n.includes("no image output") ||
     n.includes("no image data") ||
@@ -123,7 +113,13 @@ export function interpretImageHealthResult(
       (result.imageOutputs && result.imageOutputs.length > 0)
   );
   if (imageReturned) {
-    return { ok: true, status: "ok", latencyMs, imageReturned: true, message: "OK" };
+    return {
+      ok: true,
+      status: "ok",
+      latencyMs,
+      imageReturned: true,
+      message: "OK",
+    };
   }
   if (result.error) {
     return {

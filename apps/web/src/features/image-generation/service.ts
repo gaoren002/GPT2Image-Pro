@@ -20,9 +20,9 @@ import { eq } from "drizzle-orm";
 import { assertPublicApiBaseUrl } from "@/features/external-api/safe-image-fetch";
 import { imageBackendApiUsesResponsesEndpoint } from "@/features/image-backend-pool/api-interface-mode";
 import {
-  acquireImageBackendInflight,
   bindImageBackendStickyMember,
   ImageBackendPoolUnavailableError,
+  isImageBackendInfrastructureError,
   isImageBackendSwitchableError,
   isUnclassifiedBackendError,
   recordImageBackendSchedulerSwitch,
@@ -39,6 +39,8 @@ import {
   applyApiModelMapping,
   parseApiModelMapping,
 } from "./api-model-mapping";
+import { resolveModelBilling } from "./model-billing";
+import { resolveQualityBillingMultiplier } from "./quality-billing";
 import {
   AGENT_CONTINUE_INSTRUCTIONS,
   createDefaultAgentAdditionalTools,
@@ -119,6 +121,7 @@ import type {
   EditImageParams,
   GenerateImageParams,
   GenerateImageResult,
+  ImageGenerationBillingSnapshot,
   ImageGenerationCallbacks,
   ImageInputFile,
   ImageModeration,
@@ -845,6 +848,7 @@ async function postResponsesImageRequest(
   requestBody: unknown,
   params: {
     signal?: AbortSignal;
+    requestedQuality: string | undefined;
   },
   callbacks?: ImageGenerationCallbacks
 ) {
@@ -864,8 +868,22 @@ async function postResponsesImageRequest(
       body: JSON.stringify(requestBody),
     }
   );
-  return await parseResponsesResponse(response, callbacks, {
+  const result = await parseResponsesResponse(response, callbacks, {
     preferEventStream: true,
+  });
+  const imageTool =
+    isPlainRecord(requestBody) && Array.isArray(requestBody.tools)
+      ? requestBody.tools.find(
+          (item: unknown) =>
+            isPlainRecord(item) && item.type === "image_generation"
+        )
+      : undefined;
+  if (!isPlainRecord(imageTool) || typeof imageTool.model !== "string")
+    return result;
+  return attachImageBillingSnapshot(config, result, params.requestedQuality, {
+    model: imageTool.model,
+    quality:
+      typeof imageTool.quality === "string" ? imageTool.quality : undefined,
   });
 }
 
@@ -874,6 +892,7 @@ async function postResponsesImageRequestWithToolChoiceFallback(
   requestBody: Record<string, unknown>,
   params: {
     signal?: AbortSignal;
+    requestedQuality: string | undefined;
   },
   callbacks?: ImageGenerationCallbacks
 ) {
@@ -1107,20 +1126,74 @@ async function retryPoolBackendResult(
     allowAnyResponsesBackend?: boolean;
     spanGroupsForWeb?: boolean;
     webRequestMode?: "image" | "text";
+    requestedModel?: string;
     signal?: AbortSignal;
   }
-) {
+): Promise<GenerateImageResult> {
   // 仅"不需要上报"的后端直接跑一次返回。带 reportResult 的池后端必须进入下方主循环。
   if (!config.backend?.reportResult) {
     return run(config);
   }
 
+  // 持久租约只覆盖一轮调用。审核改写或透明背景回退复用的是已消费配置，
+  // 必须重新经过池调度；原成员仅作偏好，不能绕过状态、套餐及跨实例并发检查。
+  const releaseCandidateLease = async (candidate: ApiConfig) => {
+    const backend = candidate.backend;
+    if (!backend?.inflightLease) return;
+    backend.inflightLease = false;
+    await releaseImageBackendInflightLease({
+      memberType: poolBackendMemberType(backend.type),
+      memberId: backend.id,
+      leaseId: backend.inflightLeaseId,
+      leasePersisted: backend.inflightLeasePersisted,
+    });
+  };
+  const abortedResult = () => ({
+    error: "The operation was aborted due to timeout",
+  });
+  if (options?.signal?.aborted) {
+    await releaseCandidateLease(config);
+    return abortedResult();
+  }
   const requestKind = config.backend.requestKind;
   const excluded = new Set<string>();
   let accountBackendPreference: ImageBackendAccountBackend | undefined =
     options?.accountBackendPreference ||
     (options?.mixWebFirst ? "web" : undefined);
   let candidate = config;
+  if (poolBackendMemberKey(config) && config.backend.inflightLease !== true) {
+    const { userId, apiKeyId, id, type } = config.backend;
+    if (!userId || !requestKind) {
+      return { error: "生图后端缺少重新获取租约所需的请求信息" };
+    }
+    let resolved: Awaited<ReturnType<typeof resolveImageBackendPoolConfig>> =
+      null;
+    try {
+      resolved = await resolveImageBackendPoolConfig({
+        userId,
+        apiKeyId,
+        requestKind,
+        preferredMemberId: id,
+        preferredMemberType: poolBackendMemberType(type),
+        accountBackendPreference,
+        accountBackendPreferenceMode: options?.accountBackendPreferenceMode,
+        allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
+        spanGroupsForWeb: options?.spanGroupsForWeb,
+        webRequestMode: options?.webRequestMode,
+        requestedModel: options?.requestedModel,
+      });
+    } catch (error) {
+      if (!(error instanceof ImageBackendPoolUnavailableError)) throw error;
+    }
+    if (!resolved?.config) {
+      return options?.signal?.aborted
+        ? abortedResult()
+        : {
+            error: "当前生图后端分组没有可用账号或 API",
+          };
+    }
+    candidate = resolved.config;
+  }
   let lastResult: GenerateImageResult | null = null;
   let attempt = 0;
   // IMAGE_BACKEND_MAX_ATTEMPTS 按【同一 priority 档】计数；该档换号用尽后跳到
@@ -1128,8 +1201,8 @@ async function retryPoolBackendResult(
   // 不得再回到更优(更小) priority。无图次数按整次请求累计，不随换档清零。
   let attemptsInPriorityTier = 0;
   let priorityTier: number | undefined =
-    typeof config.backend.priority === "number"
-      ? config.backend.priority
+    typeof candidate.backend?.priority === "number"
+      ? candidate.backend.priority
       : undefined;
   let minPriorityFloor: number | undefined;
   let unclassifiedErrorSwitches = 0;
@@ -1148,7 +1221,10 @@ async function retryPoolBackendResult(
         DEFAULT_MAX_NO_IMAGE_OUTPUT_ATTEMPTS,
         { positive: true }
       ),
-    ]);
+    ]).catch(async (error: unknown) => {
+      await releaseCandidateLease(candidate);
+      throw error;
+    });
   const maxAttempts = Math.max(1, Math.floor(configuredMaxAttempts));
   const maxNoImageOutputAttempts = Math.max(
     1,
@@ -1183,6 +1259,7 @@ async function retryPoolBackendResult(
         allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
         spanGroupsForWeb: options?.spanGroupsForWeb,
         webRequestMode: options?.webRequestMode,
+        requestedModel: options?.requestedModel,
       });
     } catch (fallbackError) {
       if (fallbackError instanceof ImageBackendPoolUnavailableError) {
@@ -1200,18 +1277,14 @@ async function retryPoolBackendResult(
   const releaseResolvedLease = async (
     resolved: Awaited<ReturnType<typeof resolveImageBackendPoolConfig>>
   ) => {
-    const backend = resolved?.config?.backend;
-    if (!backend) return;
-    await releaseImageBackendInflightLease({
-      memberType: poolBackendMemberType(backend.type),
-      memberId: backend.id,
-      leaseId: backend.inflightLeaseId,
-      leasePersisted: backend.inflightLeasePersisted,
-    });
-    backend.inflightLease = false;
+    if (resolved?.config) await releaseCandidateLease(resolved.config);
   };
 
   while (true) {
+    if (options?.signal?.aborted) {
+      await releaseCandidateLease(candidate);
+      return withAttemptDiagnostics(abortedResult());
+    }
     attempt += 1;
     attemptsInPriorityTier += 1;
     let result: GenerateImageResult;
@@ -1227,31 +1300,25 @@ async function retryPoolBackendResult(
       priorityTier = currentBackend.priority;
       attemptsInPriorityTier = 1;
     }
-    const hasPoolBackend =
-      currentBackend?.type === "pool-api" ||
-      currentBackend?.type === "pool-account";
-    const acquiredBeforeRun =
-      hasPoolBackend && currentBackend.inflightLease !== true;
-    if (acquiredBeforeRun) {
-      acquireImageBackendInflight({
-        memberType: poolBackendMemberType(currentBackend.type),
-        memberId: currentBackend.id,
-      });
-    }
+    let shouldRetry = false;
+    let durationMs = 0;
     try {
       result = await run(withoutPoolBackendReport(candidate));
-    } finally {
-      if (hasPoolBackend) {
-        await releaseImageBackendInflightLease({
-          memberType: poolBackendMemberType(currentBackend.type),
-          memberId: currentBackend.id,
-          leaseId: currentBackend.inflightLeaseId,
-          leasePersisted: currentBackend.inflightLeasePersisted,
-        });
-        currentBackend.inflightLease = false;
+      durationMs = Date.now() - startedAt;
+      // 失败状态必须在释放名额前提交，避免下一请求在这段间隙读到旧的 active。
+      if (
+        !options?.signal?.aborted &&
+        !isImageBackendInfrastructureError(result.error)
+      ) {
+        shouldRetry = await reportPoolBackendResult(
+          candidate,
+          result,
+          durationMs
+        );
       }
+    } finally {
+      await releaseCandidateLease(candidate);
     }
-    const durationMs = Date.now() - startedAt;
     backendAttempts.push({
       attempt,
       backendType: currentBackend?.type,
@@ -1260,19 +1327,13 @@ async function retryPoolBackendResult(
       durationMs,
       ...(result.error ? { error: result.error.slice(0, 500) } : {}),
     });
-    // 调用方总超时属于本地取消，不应记成账号失败、写入冷却或继续换号。
     if (options?.signal?.aborted) {
-      return withAttemptDiagnostics(
-        result.error
-          ? result
-          : { ...result, error: "The operation was aborted due to timeout" }
-      );
+      return withAttemptDiagnostics({ ...result, ...abortedResult() });
     }
-    const shouldRetry = await reportPoolBackendResult(
-      candidate,
-      result,
-      durationMs
-    );
+    // 共享代理/网络故障不属于账号健康，整轮返回，避免逐个惩罚和耗尽换号预算。
+    if (isImageBackendInfrastructureError(result.error)) {
+      return withAttemptDiagnostics(result);
+    }
     if (isNoImageOutputError(result.error)) noImageOutputAttempts += 1;
     lastResult = result;
 
@@ -1296,8 +1357,7 @@ async function retryPoolBackendResult(
     }
     if (unclassifiedRetry) unclassifiedErrorSwitches += 1;
 
-    const samePriorityBudgetExhausted =
-      attemptsInPriorityTier >= maxAttempts;
+    const samePriorityBudgetExhausted = attemptsInPriorityTier >= maxAttempts;
     const noImageBudgetExhausted =
       noImageOutputAttempts >= maxNoImageOutputAttempts;
 
@@ -1318,6 +1378,7 @@ async function retryPoolBackendResult(
           allowAnyResponsesBackend: options?.allowAnyResponsesBackend,
           spanGroupsForWeb: options?.spanGroupsForWeb,
           webRequestMode: options?.webRequestMode,
+          requestedModel: options?.requestedModel,
           ...(typeof minPriorityExclusive === "number"
             ? { minPriorityExclusive }
             : {}),
@@ -1513,10 +1574,8 @@ async function retryPoolBackendResult(
     candidate = next.config;
   }
 
-  if (lastResult) return withAttemptDiagnostics(lastResult);
-  return attachStickyBackendMember(
-    config,
-    await run(withoutPoolBackendReport(config))
+  return withAttemptDiagnostics(
+    lastResult ?? { error: "当前生图后端分组没有可用账号或 API" }
   );
 }
 
@@ -2255,7 +2314,12 @@ async function generateChatImageWithChatCompletions(
           body: JSON.stringify(body),
         }
       );
-      return await parseChatCompletionsResponse(response, callbacks);
+      return attachImageBillingSnapshot(
+        config,
+        await parseChatCompletionsResponse(response, callbacks),
+        params.quality,
+        { model }
+      );
     } catch (error) {
       logImageRequestError(error, {
         operation: "chat",
@@ -4413,11 +4477,122 @@ export function poolBackendMemberType(
   return "account";
 }
 
+/** 将单个定价分量收敛到既有精度和范围；总倍率保留各分量乘积。 */
+function normalizeBillingComponent(value: unknown): number {
+  const parsed =
+    typeof value === "number" || typeof value === "string"
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+  return Math.min(100, Math.max(0.01, Math.round(parsed * 100) / 100));
+}
+
+/**
+ * 成功候选返回计价白名单；外层重试保留内层快照，避免被初始成员覆盖。
+ * 质量倍率沿用用户请求，mapping 只改变出站质量；raw 工具显式质量可单独指定。
+ */
+function attachImageBillingSnapshot(
+  config: ApiConfig,
+  result: GenerateImageResult,
+  requestedQuality: string | undefined,
+  outgoing: { model: string; quality?: string },
+  billingQuality = requestedQuality
+): GenerateImageResult {
+  if (result.error || result.billingSnapshot) return result;
+  const backend = config.backend;
+  const isPool =
+    backend?.type === "pool-api" || backend?.type === "pool-account";
+  const modelBilling =
+    backend?.type === "pool-api"
+      ? resolveModelBilling(
+          backend.modelBilling,
+          outgoing.model,
+          billingQuality
+        )
+      : { multiplier: 1, replacesQualityBilling: false };
+  const backendBillingMultiplier = isPool
+    ? normalizeBillingComponent(backend.billingMultiplier)
+    : 1;
+  const poolApiModelBillingMultiplier = normalizeBillingComponent(
+    modelBilling.multiplier
+  );
+  const qualityBillingMultiplier =
+    isPool && !modelBilling.replacesQualityBilling
+      ? normalizeBillingComponent(
+          resolveQualityBillingMultiplier(
+            backend.qualityBilling,
+            billingQuality
+          )
+        )
+      : 1;
+  // 显式白名单：凭据、headers、租约和原始配置不得流入结果或账本。
+  const billingSnapshot: ImageGenerationBillingSnapshot = {
+    backendType: backend?.type ?? null,
+    backendId: backend?.id ?? null,
+    groupId: backend?.groupId ?? null,
+    billingGroupId: backend?.billingGroupId ?? null,
+    accountBackend: backend?.accountBackend ?? null,
+    requestedQuality: requestedQuality ?? null,
+    billingQuality: billingQuality ?? null,
+    outboundModel: outgoing.model,
+    outboundQuality: outgoing.quality ?? null,
+    backendBillingMultiplier,
+    poolApiModelBillingMultiplier,
+    qualityBillingMultiplier,
+    poolApiModelBillingReplacesQuality: modelBilling.replacesQualityBilling,
+    billingMultiplier:
+      backendBillingMultiplier *
+      poolApiModelBillingMultiplier *
+      qualityBillingMultiplier,
+  };
+  return { ...result, billingSnapshot };
+}
+
+/** 入口仅补回原请求质量；成功候选已按请求质量留价，不覆盖实际成员或 raw 工具质量。 */
+function withRequestedBillingQuality(
+  result: GenerateImageResult,
+  quality: string | undefined
+): GenerateImageResult {
+  if (!result.billingSnapshot) return result;
+  return {
+    ...result,
+    billingSnapshot: {
+      ...result.billingSnapshot,
+      requestedQuality: quality ?? null,
+    },
+  };
+}
+
+/** 生成入口在实际候选成功后附加快照；失败沿用原结果与费用政策。 */
 export async function generateImage(
   config: ApiConfig,
   params: GenerateImageParams,
   callbacks?: ImageGenerationCallbacks
 ): Promise<GenerateImageResult> {
+  const result = await generateImageForBackend(config, params, callbacks);
+  if (result.error) return result;
+  if (result.billingSnapshot)
+    return withRequestedBillingQuality(result, params.quality);
+  return attachImageBillingSnapshot(
+    config,
+    result,
+    params.quality,
+    resolveOutgoingImageRequest(
+      config,
+      params.model,
+      params.size,
+      params.quality
+    )
+  );
+}
+
+async function generateImageForBackend(
+  config: ApiConfig,
+  params: GenerateImageParams,
+  callbacks?: ImageGenerationCallbacks
+): Promise<GenerateImageResult> {
+  // mapping 会改写局部 params，叶子快照仍须使用映射前的请求质量。
+  const requestedQuality = params.quality;
   if (config.backend?.groupBackendType === "web") {
     params = { ...params, model: DEFAULT_IMAGE_MODEL };
   }
@@ -4427,6 +4602,8 @@ export async function generateImage(
       (candidate) => generateImage(candidate, params, callbacks),
       {
         mixWebFirst: params.mixWebFirst,
+        signal: params.signal,
+        requestedModel: params.model,
         accountBackendPreference: params.requiresResponsesBackend
           ? "responses"
           : params.forceWebBackend
@@ -4480,7 +4657,7 @@ export async function generateImage(
                   allowPremiumModels: params.allowPremiumModels,
                 })),
             }),
-            { signal: params.signal },
+            { signal: params.signal, requestedQuality },
             callbacks
           )
         )
@@ -4568,11 +4745,36 @@ export async function generateImage(
   }
 }
 
+/** 改图入口与生成共用快照白名单，换号后的成员决定最终价格。 */
 export async function editImage(
   config: ApiConfig,
   params: EditImageParams,
   callbacks?: ImageGenerationCallbacks
 ): Promise<GenerateImageResult> {
+  const result = await editImageForBackend(config, params, callbacks);
+  if (result.error) return result;
+  if (result.billingSnapshot)
+    return withRequestedBillingQuality(result, params.quality);
+  return attachImageBillingSnapshot(
+    config,
+    result,
+    params.quality,
+    resolveOutgoingImageRequest(
+      config,
+      params.model,
+      params.size,
+      params.quality
+    )
+  );
+}
+
+async function editImageForBackend(
+  config: ApiConfig,
+  params: EditImageParams,
+  callbacks?: ImageGenerationCallbacks
+): Promise<GenerateImageResult> {
+  // 改图可能多次映射型号及质量；计价质量始终取这次用户请求。
+  const requestedQuality = params.quality;
   if (config.backend?.groupBackendType === "web") {
     params = { ...params, model: DEFAULT_IMAGE_MODEL };
   }
@@ -4582,6 +4784,8 @@ export async function editImage(
       (candidate) => editImage(candidate, params, callbacks),
       {
         mixWebFirst: params.mixWebFirst,
+        signal: params.signal,
+        requestedModel: params.model,
         accountBackendPreference: params.requiresResponsesBackend
           ? "responses"
           : params.forceWebBackend
@@ -4724,7 +4928,7 @@ export async function editImage(
             { ...paramsWithResolvedPrompt, model, gptModel },
             forceBase64
           ),
-          { signal: params.signal },
+          { signal: params.signal, requestedQuality },
           callbacks
         );
 
@@ -4800,10 +5004,21 @@ export async function editImage(
       body: formData,
     });
 
-    return requireImageOutput(
-      applyPromptOptimizationResultVisibility(
-        await parseImageResponse(response, callbacks)
-      )
+    return attachImageBillingSnapshot(
+      config,
+      requireImageOutput(
+        applyPromptOptimizationResultVisibility(
+          await parseImageResponse(response, callbacks)
+        )
+      ),
+      requestedQuality,
+      {
+        model: String(formData.get("model")),
+        quality:
+          typeof formData.get("quality") === "string"
+            ? String(formData.get("quality"))
+            : undefined,
+      }
     );
   } catch (error) {
     logImageRequestError(error, {
@@ -4819,7 +5034,29 @@ export async function editImage(
   }
 }
 
+/** 对话图片按实际图片工具型号留价；纯文字费用仍由 operations 原政策决定。 */
 export async function generateChatImage(
+  config: ApiConfig,
+  params: ChatImageParams,
+  callbacks?: ImageGenerationCallbacks
+): Promise<GenerateImageResult> {
+  const result = await generateChatImageForBackend(config, params, callbacks);
+  if (result.error) return result;
+  if (result.billingSnapshot)
+    return withRequestedBillingQuality(result, params.quality);
+  // Images Chat 子路径会从 generate/edit 返回映射后的快照；Responses 工具
+  // 使用独立 imageModel，不把顶层文本模型或未实际应用的 API 映射当作图片价格。
+  const imageModel =
+    config.backend?.groupBackendType === "web"
+      ? DEFAULT_IMAGE_MODEL
+      : getImageModel(params.imageModel) || DEFAULT_IMAGE_MODEL;
+  return attachImageBillingSnapshot(config, result, params.quality, {
+    model: getUpstreamImageModel(imageModel),
+    quality: normalizeQuality(params.quality),
+  });
+}
+
+async function generateChatImageForBackend(
   config: ApiConfig,
   params: ChatImageParams,
   callbacks?: ImageGenerationCallbacks
@@ -4834,6 +5071,8 @@ export async function generateChatImage(
       (candidate) => generateChatImage(candidate, params, callbacks),
       {
         mixWebFirst: params.mixWebFirst,
+        signal: params.signal,
+        requestedModel: params.model,
         accountBackendPreference: params.requiresResponsesBackend
           ? "responses"
           : undefined,
@@ -5487,7 +5726,41 @@ export async function generateChatImage(
           },
         });
       }
-      return applyPromptOptimizationResultVisibility(resultWithNativeState);
+      const actualImageTool = requestBody.tools?.find(
+        (item) => isPlainRecord(item) && item.type === "image_generation"
+      );
+      // raw 工具的显式质量也是用户请求，必须从原始工具取值，不能从出站映射反推。
+      const requestedImageTool =
+        isPlainRecord(params.rawResponsesBody) &&
+        Array.isArray(params.rawResponsesBody.tools)
+          ? params.rawResponsesBody.tools.find(
+              (item: unknown) =>
+                isPlainRecord(item) && item.type === "image_generation"
+            )
+          : undefined;
+      const billingQuality =
+        isPlainRecord(requestedImageTool) &&
+        typeof requestedImageTool.quality === "string"
+          ? requestedImageTool.quality
+          : params.quality;
+      return attachImageBillingSnapshot(
+        config,
+        applyPromptOptimizationResultVisibility(resultWithNativeState),
+        params.quality,
+        {
+          model:
+            isPlainRecord(actualImageTool) &&
+            typeof actualImageTool.model === "string"
+              ? actualImageTool.model
+              : toolModel,
+          quality:
+            isPlainRecord(actualImageTool) &&
+            typeof actualImageTool.quality === "string"
+              ? actualImageTool.quality
+              : undefined,
+        },
+        billingQuality
+      );
     };
 
     let result = await attempt(false);

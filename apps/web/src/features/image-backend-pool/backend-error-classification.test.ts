@@ -1,3 +1,4 @@
+/** 后端错误分类行为回归；运行时设置使用默认值，不访问外部服务。 */
 import { describe, expect, it, vi } from "vitest";
 
 // 让分类函数 DB-free:运行时设置一律返回默认值(避免 classifyFailure 经
@@ -21,6 +22,42 @@ async function loadService() {
 }
 
 describe("image backend error classification", () => {
+  it.each([
+    "The operation was aborted due to timeout",
+    "This operation was aborted",
+    "fetch failed",
+    "ChatGPT Web proxy failed: HTTP 502 proxyconnect tcp: connection refused",
+  ])("本地和基础设施故障不冷却或逐号切换：%s", async (error) => {
+    const service = await loadService();
+    expect(await service.classifyFailure(error)).toEqual({});
+    expect(service.isImageBackendSwitchableError(error)).toBe(false);
+    expect(service.isUnclassifiedBackendError(error)).toBe(false);
+  });
+
+  it.each([
+    "Upstream Responses API returned HTTP 500: server_error request ID req_3c4019e2b7d5a1f08c6e2d9b7a4f1e03",
+    "ChatGPT Web conversation failed: HTTP 502 Bad Gateway Ray ID: 8f40193ab2c1d4e5",
+    "Upstream Responses API returned HTTP 503: upstream authentication backend is overloaded",
+    "HTTP 503: forbidden by temporary gateway policy",
+    "HTTP 503: authentication failed because authentication backend is overloaded",
+  ])("5xx 的标识符或普通正文不触发凭据失效：%s", async (error) => {
+    const service = await loadService();
+    expect((await service.classifyFailure(error)).status).toBe("active");
+  });
+
+  it.each([
+    "HTTP 401: Unauthorized",
+    "ChatGPT Web conversation failed (401): Unauthorized",
+    "HTTP 403: Forbidden",
+    "invalid_api_key",
+    "token_invalidated",
+  ])("明确鉴权状态或错误码仍下线：%s", async (error) => {
+    const service = await loadService();
+    expect(await service.classifyFailure(error)).toEqual({
+      status: "error",
+      cooldownUntil: null,
+    });
+  });
   it("treats transient connection termination as switchable", async () => {
     const isImageBackendSwitchableError = await loadClassifier();
 

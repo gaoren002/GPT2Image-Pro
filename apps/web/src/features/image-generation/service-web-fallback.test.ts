@@ -24,6 +24,7 @@ const backendPoolMock = vi.hoisted(() => {
     releaseImageBackendInflight: vi.fn(),
     releaseImageBackendInflightLease: vi.fn(async () => undefined),
     recordImageBackendSchedulerSwitch: vi.fn(async () => undefined),
+    isImageBackendInfrastructureError: vi.fn(() => false),
     isImageBackendSwitchableError: vi.fn((error?: string | null) =>
       (error || "").includes("terminated")
     ),
@@ -483,6 +484,7 @@ describe("image service Web-first fallback", () => {
             requestKind: "image_generation",
             accountBackend: "responses",
             reportResult: true,
+            inflightLease: true,
           },
         },
       });
@@ -501,6 +503,7 @@ describe("image service Web-first fallback", () => {
           requestKind: "image_generation",
           accountBackend: "web",
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -559,6 +562,7 @@ describe("image service Web-first fallback", () => {
           requestKind: "image_generation",
           accountBackend: "web",
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -619,6 +623,7 @@ describe("image service Web-first fallback", () => {
           requestKind: "image_generation",
           accountBackend: "responses",
           reportResult: true,
+          inflightLease: true,
         },
       },
     });
@@ -636,6 +641,7 @@ describe("image service Web-first fallback", () => {
           requestKind: "image_generation",
           accountBackend: "responses",
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -704,6 +710,7 @@ describe("image service Web-first fallback", () => {
               requestKind: "image_generation",
               accountBackend: "responses",
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -723,6 +730,7 @@ describe("image service Web-first fallback", () => {
           requestKind: "image_generation",
           accountBackend: "responses",
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -764,6 +772,7 @@ describe("image service Web-first fallback", () => {
               accountBackend: "web",
               priority: 50,
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -784,6 +793,7 @@ describe("image service Web-first fallback", () => {
           accountBackend: "web",
           priority: 50,
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -796,9 +806,7 @@ describe("image service Web-first fallback", () => {
 
     expect(result.error).toBe("terminated");
     expect(result.backendAttempts).toHaveLength(8);
-    expect(
-      backendPoolMock.resolveImageBackendPoolConfig
-    ).toHaveBeenCalledWith(
+    expect(backendPoolMock.resolveImageBackendPoolConfig).toHaveBeenCalledWith(
       expect.objectContaining({ minPriorityExclusive: 50 })
     );
   });
@@ -841,6 +849,7 @@ describe("image service Web-first fallback", () => {
                 requestKind: "image_generation",
                 priority: 55,
                 reportResult: true,
+                inflightLease: true,
               },
             },
           };
@@ -861,6 +870,7 @@ describe("image service Web-first fallback", () => {
               accountBackend: "web",
               priority: 50,
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -881,6 +891,7 @@ describe("image service Web-first fallback", () => {
           accountBackend: "web",
           priority: 50,
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -893,9 +904,7 @@ describe("image service Web-first fallback", () => {
 
     expect(result.imageBase64).toBe(imageBase64);
     expect(result.error).toBeUndefined();
-    expect(
-      backendPoolMock.resolveImageBackendPoolConfig
-    ).toHaveBeenCalledWith(
+    expect(backendPoolMock.resolveImageBackendPoolConfig).toHaveBeenCalledWith(
       expect.objectContaining({ minPriorityExclusive: 50 })
     );
     expect(fetchMock).toHaveBeenCalledWith(
@@ -947,6 +956,7 @@ describe("image service Web-first fallback", () => {
                 requestKind: "image_generation",
                 priority: opts.minPriorityExclusive + 5,
                 reportResult: true,
+                inflightLease: true,
               },
             },
           };
@@ -967,6 +977,7 @@ describe("image service Web-first fallback", () => {
               accountBackend: "web",
               priority: 50,
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -987,6 +998,7 @@ describe("image service Web-first fallback", () => {
           accountBackend: "web",
           priority: 50,
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -998,7 +1010,8 @@ describe("image service Web-first fallback", () => {
     );
 
     expect(result.error).toBeTruthy();
-    const resolveCalls = backendPoolMock.resolveImageBackendPoolConfig.mock.calls;
+    const resolveCalls =
+      backendPoolMock.resolveImageBackendPoolConfig.mock.calls;
     const firstFloorIndex = resolveCalls.findIndex(
       (call) =>
         typeof (call[0] as { minPriorityExclusive?: number } | undefined)
@@ -1006,11 +1019,13 @@ describe("image service Web-first fallback", () => {
     );
     expect(firstFloorIndex).toBeGreaterThanOrEqual(0);
     expect(
-      resolveCalls.slice(firstFloorIndex).every(
-        (call) =>
-          (call[0] as { minPriorityExclusive?: number }).minPriorityExclusive ===
-          50
-      )
+      resolveCalls
+        .slice(firstFloorIndex)
+        .every(
+          (call) =>
+            (call[0] as { minPriorityExclusive?: number })
+              .minPriorityExclusive === 50
+        )
     ).toBe(true);
     expect(
       result.backendAttempts?.some(
@@ -1064,6 +1079,7 @@ describe("image service Web-first fallback", () => {
                 accountBackend: "responses",
                 priority: 50,
                 reportResult: true,
+                inflightLease: true,
               },
             },
           };
@@ -1085,6 +1101,7 @@ describe("image service Web-first fallback", () => {
               accountBackend: "web",
               priority: 50,
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -1105,6 +1122,7 @@ describe("image service Web-first fallback", () => {
           accountBackend: "web",
           priority: 50,
           reportResult: true,
+          inflightLease: true,
         },
       },
       {
@@ -1117,14 +1135,10 @@ describe("image service Web-first fallback", () => {
 
     expect(result.imageBase64).toBe(imageBase64);
     expect(result.error).toBeUndefined();
-    expect(
-      backendPoolMock.resolveImageBackendPoolConfig
-    ).toHaveBeenCalledWith(
+    expect(backendPoolMock.resolveImageBackendPoolConfig).toHaveBeenCalledWith(
       expect.objectContaining({ minPriorityExclusive: 50 })
     );
-    expect(
-      backendPoolMock.resolveImageBackendPoolConfig
-    ).toHaveBeenCalledWith(
+    expect(backendPoolMock.resolveImageBackendPoolConfig).toHaveBeenCalledWith(
       expect.objectContaining({ accountBackendPreference: "responses" })
     );
     expect(result.backendAttempts).toHaveLength(3);
@@ -1163,6 +1177,7 @@ describe("image service Web-first fallback", () => {
                 requestKind: "image_generation",
                 priority: 55,
                 reportResult: true,
+                inflightLease: true,
               },
             },
           };
@@ -1183,6 +1198,7 @@ describe("image service Web-first fallback", () => {
               accountBackend: "responses",
               priority: 50,
               reportResult: true,
+              inflightLease: true,
             },
           },
         };
@@ -1203,6 +1219,7 @@ describe("image service Web-first fallback", () => {
           accountBackend: "responses",
           priority: 50,
           reportResult: true,
+          inflightLease: true,
         },
       },
       {

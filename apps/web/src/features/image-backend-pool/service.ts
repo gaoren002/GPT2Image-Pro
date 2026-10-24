@@ -49,10 +49,17 @@ import {
   or,
   sql,
 } from "drizzle-orm";
+import {
+  getBackendHttpStatus,
+  isInvalidBackendCredentialError,
+} from "./backend-credential-error";
 import { nanoid } from "nanoid";
 import { Pool } from "pg";
 import { parseApiModelMapping } from "@/features/image-generation/api-model-mapping";
-import { normalizeQualityBillingForStorage, parseQualityBilling } from "@/features/image-generation/quality-billing";
+import {
+  normalizeQualityBillingForStorage,
+  parseQualityBilling,
+} from "@/features/image-generation/quality-billing";
 import {
   normalizeModelBillingForStorage,
   parseModelBilling,
@@ -362,7 +369,6 @@ const DEFAULT_UNRECOVERABLE_BACKEND_ERROR_KEYWORDS = [
   "invalid refresh token",
   "invalid_refresh_token",
   "invalid_grant",
-  "authentication",
   "authentication failed",
   "token_invalidated",
   "token_revoked",
@@ -410,9 +416,7 @@ function normalizeApiSizeDialect(
   metadata: Record<string, unknown> | null | undefined
 ): "wxh" | "exact-ratio" | "ratio-string" {
   const value = asGroupMetadata(metadata).sizeDialect;
-  return value === "exact-ratio" || value === "ratio-string"
-    ? value
-    : "wxh";
+  return value === "exact-ratio" || value === "ratio-string" ? value : "wxh";
 }
 
 function stripTrailingSlash(value: string) {
@@ -1002,6 +1006,49 @@ async function pruneExpiredBackendLeases(
     );
 }
 
+/**
+ * 行锁内重查可用性，防止候选快照覆盖并发失败或管理员停用。
+ * Web 文本借用只豁免图片专属额度，普通冷却及终态错误仍不可用。
+ */
+function isLockedPoolMemberAvailable(
+  member: {
+    isEnabled: boolean;
+    alwaysActive: boolean;
+    status: string;
+    cooldownUntil: Date | null;
+    implementationMode?: string;
+    lastError?: string | null;
+    metadata?: unknown;
+  },
+  now: Date,
+  webText: boolean
+) {
+  if (!member.isEnabled || member.status === "error") return false;
+  if (member.alwaysActive) return true;
+  if (webText && member.implementationMode === "web") {
+    const metadata = asBackendMetadata(member.metadata);
+    const quota = metadata.webAccount?.quota;
+    const imageQuotaOnly =
+      (member.lastError == null && /^(?:0+(?:\.0+)?)$/.test(String(quota))) ||
+      (/image_gen\.text2im|image generation|create more images|image request|图像生成|图片生成/i.test(
+        member.lastError || ""
+      ) &&
+        /ratelimitexception|rate[ -]limit|usage limit|quota|上限|额度|耗尽|用尽/i.test(
+          member.lastError || ""
+        ));
+    if (imageQuotaOnly) return true;
+  }
+  const cooledDown =
+    member.cooldownUntil != null &&
+    member.cooldownUntil.getTime() <= now.getTime();
+  return (
+    (member.status === "active" &&
+      (member.cooldownUntil == null || cooledDown)) ||
+    (member.status === "limited" && cooledDown)
+  );
+}
+
+/** 先锁成员并核验最新状态与并发，再预留租约；缺租约表时仍须锁成员核验。 */
 async function acquirePoolMemberInflightLease(
   member: PoolMember,
   options?: {
@@ -1012,128 +1059,96 @@ async function acquirePoolMemberInflightLease(
   if (!hasBackendCapacity(member)) return "full";
   const leaseId = nanoid();
   let persisted = false;
-  let touchedMember = false;
-  const now = new Date();
-  const expiresAt = new Date(
-    now.getTime() + IMAGE_BACKEND_INFLIGHT_LEASE_TTL_MS
-  );
-  if (typeof db.transaction !== "function") {
-    acquireImageBackendInflight({
-      memberType: member.type,
-      memberId: member.id,
-    });
-    member.leaseId = leaseId;
-    member.leasePersisted = false;
-    member.leaseTouchedMember = false;
-    return "acquired";
-  }
-
-  try {
-    const acquired = await db.transaction(async (tx) => {
-      let lockedLastAcquiredAt: Date | string | null | undefined;
-      if (member.type === "api") {
-        const [locked] = await tx
-          .select({ lastAcquiredAt: imageBackendApi.lastAcquiredAt })
-          .from(imageBackendApi)
-          .where(eq(imageBackendApi.id, member.id))
-          .for("update");
-        lockedLastAcquiredAt = locked?.lastAcquiredAt;
-        if (!locked) return "full";
-        if (
-          options?.enforceLastAcquiredSnapshot &&
-          !sameMemberTimestamp(lockedLastAcquiredAt, member.lastAcquiredAt)
-        ) {
-          return "stale";
-        }
-      } else {
-        const [locked] = await tx
-          .select({ lastAcquiredAt: imageBackendAccount.lastAcquiredAt })
-          .from(imageBackendAccount)
-          .where(eq(imageBackendAccount.id, member.id))
-          .for("update");
-        lockedLastAcquiredAt = locked?.lastAcquiredAt;
-        if (!locked) return "full";
-        if (
-          options?.enforceLastAcquiredSnapshot &&
-          !sameMemberTimestamp(lockedLastAcquiredAt, member.lastAcquiredAt)
-        ) {
-          return "stale";
-        }
+  let acquiredAt = new Date();
+  const acquire = (persistLease: boolean) =>
+    db.transaction(async (tx): Promise<BackendLeaseAcquireResult> => {
+      const table =
+        member.type === "api" ? imageBackendApi : imageBackendAccount;
+      const [locked] = await tx
+        .select({
+          lastAcquiredAt: table.lastAcquiredAt,
+          isEnabled: table.isEnabled,
+          status: table.status,
+          cooldownUntil: table.cooldownUntil,
+          alwaysActive: table.alwaysActive,
+          concurrency: table.concurrency,
+          ...(member.type === "account"
+            ? {
+                implementationMode: imageBackendAccount.implementationMode,
+                lastError: imageBackendAccount.lastError,
+                metadata: imageBackendAccount.metadata,
+              }
+            : {}),
+        })
+        .from(table)
+        .where(eq(table.id, member.id))
+        .for("update");
+      // 锁等待也消耗时间，租约 TTL 和冷却判断以拿到锁后的时点为准。
+      const now = new Date();
+      if (
+        !locked ||
+        !isLockedPoolMemberAvailable(
+          locked,
+          now,
+          options?.preserveAvailabilityState === true
+        )
+      )
+        return "full";
+      if (
+        options?.enforceLastAcquiredSnapshot &&
+        !sameMemberTimestamp(locked.lastAcquiredAt, member.lastAcquiredAt)
+      ) {
+        return "stale";
       }
-      await pruneExpiredBackendLeases(tx, member, now);
-      const [activeLeaseCount] = await tx
-        .select({ value: count() })
-        .from(imageBackendInflightLease)
-        .where(
-          and(
-            eq(imageBackendInflightLease.memberType, member.type),
-            eq(imageBackendInflightLease.memberId, member.id),
-            gt(imageBackendInflightLease.expiresAt, now)
-          )
-        );
-      const activeCount = Number(activeLeaseCount?.value || 0);
-      if (activeCount >= backendConcurrency(member)) return "full";
-      await tx.insert(imageBackendInflightLease).values({
-        id: leaseId,
-        memberType: member.type,
-        memberId: member.id,
-        expiresAt,
-        createdAt: now,
-      });
-      if (member.type === "api") {
-        await tx
-          .update(imageBackendApi)
-          .set({
-            status: "active",
-            cooldownUntil: null,
-            lastUsedAt: now,
-            lastAcquiredAt: now,
-            updatedAt: now,
-          })
-          .where(eq(imageBackendApi.id, member.id));
-      } else {
-        await tx
-          .update(imageBackendAccount)
-          .set(
-            options?.preserveAvailabilityState
-              ? {
-                  lastUsedAt: now,
-                  lastAcquiredAt: now,
-                  updatedAt: now,
-                }
-              : {
-                  status: "active",
-                  cooldownUntil: null,
-                  lastUsedAt: now,
-                  lastAcquiredAt: now,
-                  updatedAt: now,
-                }
-          )
-          .where(eq(imageBackendAccount.id, member.id));
+      const currentMember = { ...member, concurrency: locked.concurrency };
+      if (!hasBackendCapacity(currentMember)) return "full";
+      if (persistLease) {
+        await pruneExpiredBackendLeases(tx, member, now);
+        const [activeLeaseCount] = await tx
+          .select({ value: count() })
+          .from(imageBackendInflightLease)
+          .where(
+            and(
+              eq(imageBackendInflightLease.memberType, member.type),
+              eq(imageBackendInflightLease.memberId, member.id),
+              gt(imageBackendInflightLease.expiresAt, now)
+            )
+          );
+        if (
+          Number(activeLeaseCount?.value || 0) >=
+          backendConcurrency(currentMember)
+        ) {
+          return "full";
+        }
+        await tx.insert(imageBackendInflightLease).values({
+          id: leaseId,
+          memberType: member.type,
+          memberId: member.id,
+          expiresAt: new Date(
+            now.getTime() + IMAGE_BACKEND_INFLIGHT_LEASE_TTL_MS
+          ),
+          createdAt: now,
+        });
       }
-      touchedMember = true;
-      persisted = true;
+      // 获取租约只能更新时间戳，不能据此证明账号或 API 已恢复。
+      await tx
+        .update(table)
+        .set({
+          lastUsedAt: now,
+          lastAcquiredAt: now,
+          updatedAt: now,
+        })
+        .where(eq(table.id, member.id));
+      acquiredAt = now;
+      persisted = persistLease;
       return "acquired";
     });
-    if (acquired === "acquired") {
-      acquireImageBackendInflight({
-        memberType: member.type,
-        memberId: member.id,
-      });
-      member.leaseId = leaseId;
-      member.leasePersisted = persisted;
-      member.leaseTouchedMember = touchedMember;
-      member.lastAcquiredAt = now;
-      member.lastUsedAt = now;
-    }
-    return acquired;
+
+  let result: BackendLeaseAcquireResult;
+  try {
+    result = await acquire(true);
   } catch (error) {
-    if (isMissingTableError(error)) {
-      logWarn("生图后端并发租约表不存在，退回进程内并发控制", {
-        memberType: member.type,
-        memberId: member.id,
-      });
-    } else {
+    if (!isMissingTableError(error)) {
       logWarn("生图后端并发租约获取失败", {
         memberType: member.type,
         memberId: member.id,
@@ -1141,16 +1156,24 @@ async function acquirePoolMemberInflightLease(
       });
       throw error;
     }
+    logWarn("生图后端并发租约表不存在，退回进程内并发控制", {
+      memberType: member.type,
+      memberId: member.id,
+    });
+    result = await acquire(false);
   }
-
-  acquireImageBackendInflight({
-    memberType: member.type,
-    memberId: member.id,
-  });
-  member.leaseId = leaseId;
-  member.leasePersisted = false;
-  member.leaseTouchedMember = false;
-  return "acquired";
+  if (result === "acquired") {
+    acquireImageBackendInflight({
+      memberType: member.type,
+      memberId: member.id,
+    });
+    member.leaseId = leaseId;
+    member.leasePersisted = persisted;
+    member.leaseTouchedMember = true;
+    member.lastAcquiredAt = acquiredAt;
+    member.lastUsedAt = acquiredAt;
+  }
+  return result;
 }
 
 function splitKeywordList(value?: string | null) {
@@ -1172,7 +1195,8 @@ async function getUnrecoverableBackendErrorKeywords() {
 
 async function isUnrecoverableBackendError(error?: string | null) {
   const normalized = (error || "").toLowerCase();
-  if (!normalized) return false;
+  const status = getBackendHttpStatus(normalized);
+  if (!normalized || (status !== undefined && status >= 500)) return false;
   const keywords = await getUnrecoverableBackendErrorKeywords();
   return keywords.some((keyword) => normalized.includes(keyword));
 }
@@ -1320,11 +1344,19 @@ function isTransientNetworkBackendError(error?: string | null) {
   );
 }
 
-function isLocalAbortTimeoutError(error?: string | null) {
-  const normalized = (error || "").toLowerCase();
+/** 本地取消和共享传输故障不能通过换凭据修复，不计入成员健康或逐号重试。 */
+export function isImageBackendInfrastructureError(error?: string | null) {
+  const normalized = (error || "").trim().toLowerCase();
   return (
-    normalized.includes("operation was aborted") &&
-    normalized.includes("timeout")
+    /^(?:typeerror: )?fetch failed$/.test(normalized) ||
+    normalized.includes("chatgpt web proxy failed:") ||
+    /(?:operation was aborted|request aborted|aborterror|timeouterror)/.test(
+      normalized
+    ) ||
+    normalized.includes("proxyconnect tcp") ||
+    normalized.includes("econnrefused") ||
+    normalized.includes("enotfound") ||
+    normalized.includes("eai_again")
   );
 }
 
@@ -1531,7 +1563,7 @@ export function isImageBackendSwitchableError(error?: string | null) {
   return Boolean(
     error &&
       !isUserRequestBackendError(error) &&
-      !isLocalAbortTimeoutError(error) &&
+      !isImageBackendInfrastructureError(error) &&
       (isRecoverableBackendError(error) ||
         isInvalidBackendCredentialError(error) ||
         isImageGenDisabledBackendError(error) ||
@@ -1552,7 +1584,7 @@ export function isUnclassifiedBackendError(error?: string | null) {
   return Boolean(
     error &&
       !isUserRequestBackendError(error) &&
-      !isLocalAbortTimeoutError(error) &&
+      !isImageBackendInfrastructureError(error) &&
       !isImageBackendSwitchableError(error)
   );
 }
@@ -1566,30 +1598,6 @@ function isClassifiedFailureRecoverable(
       !isUserRequestBackendError(error) &&
       isRecoverableBackendError(error) &&
       failure.status !== "error"
-  );
-}
-
-function isInvalidBackendCredentialError(error?: string | null) {
-  const normalized = (error || "").toLowerCase();
-  return (
-    normalized.includes("401") ||
-    normalized.includes("unauthorized") ||
-    normalized.includes("forbidden") ||
-    normalized.includes("invalid api key") ||
-    normalized.includes("invalid_api_key") ||
-    normalized.includes("invalid access token") ||
-    normalized.includes("invalid_access_token") ||
-    normalized.includes("invalid auth") ||
-    normalized.includes("invalid authentication") ||
-    normalized.includes("authentication token has been invalidated") ||
-    normalized.includes("token has been invalidated") ||
-    normalized.includes("token expired") ||
-    normalized.includes("expired token") ||
-    normalized.includes("token is expired") ||
-    normalized.includes("access token expired") ||
-    normalized.includes("signing in again") ||
-    normalized.includes("please sign in again") ||
-    normalized.includes("please try signing in again")
   );
 }
 
@@ -1873,6 +1881,7 @@ export async function classifyFailure(
   cooldownUntil?: Date | null;
 }> {
   const normalized = (error || "").toLowerCase();
+  if (isImageBackendInfrastructureError(error)) return {};
   // 明确的 ChatGPT 工具限流优先于拒绝、缺工具及自定义终态关键词判断。
   // 中文本地化提示可能同时含“无法调用图像生成工具”，但账号实际具备该能力。
   if (isToolRateLimitBackendError(error)) {
@@ -2729,10 +2738,7 @@ async function selectPoolMember(
       metadata: row.metadata,
     }));
 
-  const notExcludedCandidates = [
-    ...apiMembers,
-    ...accountMembers,
-  ].filter(
+  const notExcludedCandidates = [...apiMembers, ...accountMembers].filter(
     (member) =>
       !excluded?.has(backendKey(member)) &&
       (minPriorityExclusive === undefined ||
@@ -2851,9 +2857,7 @@ async function selectPoolMember(
 
   let sawStaleCandidate = false;
   for (const member of candidates) {
-    let leaseResult: Awaited<
-      ReturnType<typeof acquirePoolMemberInflightLease>
-    >;
+    let leaseResult: Awaited<ReturnType<typeof acquirePoolMemberInflightLease>>;
     try {
       leaseResult = await acquirePoolMemberInflightLease(member, {
         enforceLastAcquiredSnapshot:
@@ -2954,43 +2958,18 @@ async function selectPoolMember(
   return null;
 }
 
-async function touchSelectedMember(
-  member: PoolMember,
-  options?: { preserveAvailabilityState?: boolean }
-) {
+/** 兼容未更新时间戳的预留路径，仅记录使用时间，不改可用状态。 */
+async function touchSelectedMember(member: PoolMember) {
   const now = new Date();
-  if (member.type === "api") {
-    await db
-      .update(imageBackendApi)
-      .set({
-        status: "active",
-        cooldownUntil: null,
-        lastUsedAt: now,
-        lastAcquiredAt: now,
-        updatedAt: now,
-      })
-      .where(eq(imageBackendApi.id, member.id));
-    return;
-  }
-
+  const table = member.type === "api" ? imageBackendApi : imageBackendAccount;
   await db
-    .update(imageBackendAccount)
-    .set(
-      options?.preserveAvailabilityState
-        ? {
-            lastUsedAt: now,
-            lastAcquiredAt: now,
-            updatedAt: now,
-          }
-        : {
-            status: "active",
-            cooldownUntil: null,
-            lastUsedAt: now,
-            lastAcquiredAt: now,
-            updatedAt: now,
-          }
-    )
-    .where(eq(imageBackendAccount.id, member.id));
+    .update(table)
+    .set({
+      lastUsedAt: now,
+      lastAcquiredAt: now,
+      updatedAt: now,
+    })
+    .where(eq(table.id, member.id));
 }
 
 function toResolvedPoolConfig(
@@ -3352,12 +3331,7 @@ export async function resolveImageBackendPoolConfig(
   if (!resolved) return null;
   try {
     if (!resolved.member.leaseTouchedMember) {
-      await touchSelectedMember(resolved.member, {
-        preserveAvailabilityState:
-          options.webRequestMode === "text" &&
-          resolved.member.type === "account" &&
-          resolved.member.implementationMode === "web",
-      });
+      await touchSelectedMember(resolved.member);
     }
     return toResolvedPoolConfig(
       resolved.group.id,
@@ -3384,6 +3358,9 @@ export async function reportImageBackendResult(
   }
   const now = new Date();
   const error = truncateError(input.error);
+  if (!input.success && isImageBackendInfrastructureError(error)) {
+    return { success: false, retryable: false, switchable: false };
+  }
   const failure = input.success ? {} : await classifyFailure(error, input);
 
   if (input.memberType === "api") {
@@ -3488,69 +3465,80 @@ export async function reportImageBackendResult(
     switchable: !input.success && isImageBackendSwitchableError(error),
   };
 
-  const [account] = await db
-    .select({
-      implementationMode: imageBackendAccount.implementationMode,
-      metadata: imageBackendAccount.metadata,
-      alwaysActive: imageBackendAccount.alwaysActive,
-    })
-    .from(imageBackendAccount)
-    .where(eq(imageBackendAccount.id, input.memberId))
-    .limit(1);
-  const alwaysActive = account?.alwaysActive ?? false;
-  // always_active：遇【临时】错误不下线——不改 status、不进冷却（仅记 lastError/failCount）。
-  // 例外：终态/鉴权类错误（status="error"，如 token 失效、401/403、凭据失效、封号、
-  // GROUP_DISABLED）必须照样标 error——死号无法靠常驻自愈,否则常驻入选→必失败→再入选,
-  // 形成持续吃流量的黑洞。临时错误（overload/5xx，status=active+cooldown）仍受常驻豁免。
-  const accountFailure =
-    alwaysActive && failure?.status !== "error" ? {} : failure;
-  const backend = normalizeAccountBackend(account?.implementationMode);
-  const webSuccess =
-    input.success && backend === "web" && input.consumeWebImageQuota !== false
-      ? nextWebAccountMetadataAfterSuccess(account?.metadata)
-      : null;
-  const preserveWebImageAvailability =
-    input.success && backend === "web" && input.consumeWebImageQuota === false;
-  const metadata = nextSchedulerMetadataAfterResult(
-    webSuccess?.metadata ?? account?.metadata,
-    input,
-    now
-  );
+  const memberId = input.memberId;
+  const backend = await db.transaction(async (tx) => {
+    const [account] = await tx
+      .select({
+        implementationMode: imageBackendAccount.implementationMode,
+        metadata: imageBackendAccount.metadata,
+        alwaysActive: imageBackendAccount.alwaysActive,
+        status: imageBackendAccount.status,
+      })
+      .from(imageBackendAccount)
+      .where(eq(imageBackendAccount.id, memberId))
+      .for("update");
+    if (!account) return;
+    // error 只由显式测活或管理操作恢复；在途成功及临时失败都不能复活死号。
+    const stickyError = account.status === "error";
+    const alwaysActive = account?.alwaysActive ?? false;
+    // always_active：遇【临时】错误不下线——不改 status、不进冷却（仅记 lastError/failCount）。
+    // 例外：终态/鉴权类错误（status="error"，如 token 失效、401/403、凭据失效、封号、
+    // GROUP_DISABLED）必须照样标 error——死号无法靠常驻自愈,否则常驻入选→必失败→再入选,
+    // 形成持续吃流量的黑洞。临时错误（overload/5xx，status=active+cooldown）仍受常驻豁免。
+    const accountFailure =
+      alwaysActive && failure?.status !== "error" ? {} : failure;
+    const backend = normalizeAccountBackend(account?.implementationMode);
+    const webSuccess =
+      input.success && backend === "web" && input.consumeWebImageQuota !== false
+        ? nextWebAccountMetadataAfterSuccess(account?.metadata)
+        : null;
+    const preserveWebImageAvailability =
+      input.success &&
+      backend === "web" &&
+      input.consumeWebImageQuota === false;
+    const metadata = nextSchedulerMetadataAfterResult(
+      webSuccess?.metadata ?? account?.metadata,
+      input,
+      now
+    );
 
-  await db
-    .update(imageBackendAccount)
-    .set(
-      input.success
-        ? preserveWebImageAvailability
-          ? {
-              // 文本成功只能证明 Chat 能力可用，不能据此清除 image_gen 的额度、
-              // 冷却或最后错误；否则后续图片请求会把仅文本可用的账号当成已恢复。
-              successCount: sql`${imageBackendAccount.successCount} + 1`,
-              metadata,
-              updatedAt: now,
-            }
+    await tx
+      .update(imageBackendAccount)
+      .set(
+        input.success
+          ? stickyError || preserveWebImageAvailability
+            ? {
+                // 文本成功只能证明 Chat 能力可用，不能据此清除 image_gen 的额度、
+                // 冷却或最后错误；否则后续图片请求会把仅文本可用的账号当成已恢复。
+                successCount: sql`${imageBackendAccount.successCount} + 1`,
+                metadata,
+                updatedAt: now,
+              }
+            : {
+                successCount: sql`${imageBackendAccount.successCount} + 1`,
+                metadata,
+                status: webSuccess?.status || "active",
+                lastError: null,
+                lastErrorAt: null,
+                cooldownUntil: webSuccess ? webSuccess.cooldownUntil : null,
+                updatedAt: now,
+              }
           : {
-              successCount: sql`${imageBackendAccount.successCount} + 1`,
+              failCount: sql`${imageBackendAccount.failCount} + 1`,
               metadata,
-              status: webSuccess?.status || "active",
-              lastError: null,
-              lastErrorAt: null,
-              cooldownUntil: webSuccess ? webSuccess.cooldownUntil : null,
+              ...(!stickyError && accountFailure.status
+                ? { status: accountFailure.status }
+                : {}),
+              ...(!stickyError && accountFailure.cooldownUntil !== undefined
+                ? { cooldownUntil: accountFailure.cooldownUntil }
+                : {}),
+              ...(!stickyError ? { lastError: error, lastErrorAt: now } : {}),
               updatedAt: now,
             }
-        : {
-            failCount: sql`${imageBackendAccount.failCount} + 1`,
-            metadata,
-            ...(accountFailure.status ? { status: accountFailure.status } : {}),
-            ...(accountFailure.cooldownUntil !== undefined
-              ? { cooldownUntil: accountFailure.cooldownUntil }
-              : {}),
-            lastError: error,
-            lastErrorAt: now,
-            updatedAt: now,
-          }
-    )
-    .where(eq(imageBackendAccount.id, input.memberId));
+      )
+      .where(eq(imageBackendAccount.id, memberId));
+    return backend;
+  });
   if (!input.success) {
     logWarn("生图账号后端失败，已更新调度状态", {
       memberType: input.memberType,

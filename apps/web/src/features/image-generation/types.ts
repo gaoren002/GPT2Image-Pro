@@ -32,6 +32,8 @@ export interface GenerateImageParams {
 }
 
 export interface GenerateImageResult {
+  /** 服务端最终成功成员的计价白名单；不得包含配置、凭据或租约。 */
+  billingSnapshot?: ImageGenerationBillingSnapshot;
   imageBase64?: string;
   imageUrl?: string;
   imageOutputs?: GeneratedImageOutput[];
@@ -57,6 +59,27 @@ export interface GenerateImageResult {
   upstreamResetAt?: string;
   retryAfterSeconds?: number;
   backendAttempts?: BackendAttemptDiagnostic[];
+}
+
+/** 仅保留结算与对账必要的标量，不能扩展为整个 backend/config 的副本。 */
+export interface ImageGenerationBillingSnapshot {
+  backendType: NonNullable<ApiConfig["backend"]>["type"] | null;
+  backendId: string | null;
+  groupId: string | null;
+  billingGroupId: string | null;
+  accountBackend: "web" | "responses" | null;
+  /** 入口收到的请求质量，保留原始审计口径。 */
+  requestedQuality: string | null;
+  /** 计价质量：原请求质量，或 raw Responses 用户显式填写的工具质量；不取 mapping 改写值。 */
+  billingQuality: string | null;
+  outboundModel: string;
+  /** 实际出站质量，仅记录路由结果，不改变质量计价规则。 */
+  outboundQuality: string | null;
+  backendBillingMultiplier: number;
+  poolApiModelBillingMultiplier: number;
+  qualityBillingMultiplier: number;
+  poolApiModelBillingReplacesQuality: boolean;
+  billingMultiplier: number;
 }
 
 export interface BackendAttemptDiagnostic {
@@ -331,14 +354,14 @@ export interface ApiConfig {
     billingGroupId?: string | null;
     billingMultiplier?: number;
     // 池 API / 池账号成员的质量计价倍率表（quality → 倍率，DB json 原样）。
-    // 解析与回退规则见 quality-billing.ts；operations.ts 把它按请求 quality
-    // 折入总 billingMultiplier。
+    // 解析与回退规则见 quality-billing.ts；预扣与成功结算均按请求质量，mapping 不回灌计价。
     qualityBilling?: Partial<Record<string, number>> | null;
     // 池 API 按模型计价倍率表（出站模型 id → 统一倍率或质量分档表，精确命中）；
     // 仅 pool-api 读取。来源是成员 metadata.modelBilling，解析见 model-billing.ts。
-    modelBilling?:
-      | Record<string, number | Partial<Record<string, number>>>
-      | null;
+    modelBilling?: Record<
+      string,
+      number | Partial<Record<string, number>>
+    > | null;
     // 池成员调度优先级(越小越先)。换号预算按同优先级计数,耗尽后跳到更高数值的下一档。
     priority?: number;
     reportResult?: boolean;

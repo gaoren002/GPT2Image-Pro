@@ -1,3 +1,4 @@
+/** 调度与结果上报行为回归；数据库替身编排候选快照到行锁之间的状态变化。 */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
@@ -24,6 +25,7 @@ const schemaMock = vi.hoisted(() => {
       "implementationMode",
       "contentSafetyEnabled",
       "isEnabled",
+      "alwaysActive",
       "priority",
       "concurrency",
       "successCount",
@@ -148,6 +150,7 @@ const dbMock = vi.hoisted(() => {
     schedulerMetrics: [] as Row[],
     leases: [] as Row[],
     lockedLastAcquiredAtById: new Map<string, Date | null>(),
+    lockedAvailabilityById: new Map<string, Row>(),
     limitCalls: [] as { tableName: string; limit: number }[],
     updates: [] as { tableName: string; values: Row }[],
     inserts: [] as { tableName: string; values: Row }[],
@@ -225,10 +228,14 @@ const dbMock = vi.hoisted(() => {
     return undefined;
   };
 
-  const createSelectBuilder = (options?: { filterByWhere?: boolean }) => {
+  const createSelectBuilder = (options?: {
+    filterByWhere?: boolean;
+    columns?: Row;
+  }) => {
     let tableName = "";
     let limitValue: number | null = null;
     let wherePredicate: unknown;
+    let locked = false;
     const builder: Record<string, unknown> = {};
     builder.from = vi.fn((table: unknown) => {
       tableName = tableNameOf(table);
@@ -241,7 +248,10 @@ const dbMock = vi.hoisted(() => {
     });
     builder.orderBy = vi.fn(() => builder);
     builder.groupBy = vi.fn(() => builder);
-    builder.for = vi.fn(() => builder);
+    builder.for = vi.fn(() => {
+      locked = true;
+      return builder;
+    });
     builder.limit = vi.fn((limit: number) => {
       limitValue = limit;
       state.limitCalls.push({ tableName, limit });
@@ -288,6 +298,24 @@ const dbMock = vi.hoisted(() => {
           );
         }
       }
+      if (locked) {
+        rows = rows.map((row) => {
+          Object.assign(row, state.lockedAvailabilityById.get(String(row.id)));
+          const current = {
+            isEnabled: true,
+            alwaysActive: false,
+            status: "active",
+            cooldownUntil: null,
+            ...row,
+          };
+          return Object.fromEntries(
+            Object.keys(options?.columns || current).map((key) => [
+              key,
+              current[key as keyof typeof current],
+            ])
+          );
+        });
+      }
       rows = limitValue === null ? rows : rows.slice(0, limitValue);
       return Promise.resolve(rows).then(resolve, reject);
     };
@@ -332,6 +360,15 @@ const dbMock = vi.hoisted(() => {
   return {
     state,
     db: {
+      delete: vi.fn((table: unknown) => ({
+        where: vi.fn(async (predicate: unknown) => {
+          if (tableNameOf(table) !== "image_backend_inflight_lease") {
+            throw new Error("测试不支持删除该表");
+          }
+          const id = findPredicateValue(predicate, "id");
+          state.leases = state.leases.filter((lease) => lease.id !== id);
+        }),
+      })),
       select: vi.fn(() => createSelectBuilder()),
       update: vi.fn((table: unknown) => createUpdateBuilder(table)),
       insert: vi.fn((table: unknown) => createInsertBuilder(table)),
@@ -341,7 +378,9 @@ const dbMock = vi.hoisted(() => {
       }),
       transaction: vi.fn(async (callback: (tx: unknown) => unknown) => {
         const tx = {
-          select: vi.fn(() => createSelectBuilder({ filterByWhere: true })),
+          select: vi.fn((columns?: Row) =>
+            createSelectBuilder({ filterByWhere: true, columns })
+          ),
           update: vi.fn((table: unknown) => createUpdateBuilder(table)),
           insert: vi.fn((table: unknown) => createInsertBuilder(table)),
           delete: vi.fn((table: unknown) => ({
@@ -406,7 +445,8 @@ vi.mock("drizzle-orm", () => {
   };
 });
 
-vi.mock("@repo/shared/config/subscription-plan", () => ({
+vi.mock("@repo/shared/config/subscription-plan", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   isPlanAtLeast: vi.fn(() => true),
   normalizeSubscriptionPlan: vi.fn(
     (_value: unknown, fallback: string) => fallback
@@ -419,6 +459,7 @@ vi.mock("@repo/shared/image-backend/nested-groups", () => ({
 
 vi.mock("@repo/shared/logger", () => ({
   logWarn: vi.fn(),
+  logError: vi.fn(),
 }));
 
 vi.mock("@repo/shared/subscription/services/plan-capabilities", () => ({
@@ -446,6 +487,7 @@ vi.mock("@repo/shared/system-settings", () => ({
 
 vi.mock("@/features/image-generation/chatgpt-web", () => ({
   getChatGptWebAccountInfo: vi.fn(),
+  generateImageWithChatGptWeb: vi.fn(),
 }));
 
 import { getRuntimeSettingBoolean } from "@repo/shared/system-settings";
@@ -454,6 +496,8 @@ import {
   resetImageBackendInflightForTests,
   resolveImageBackendPoolConfig,
 } from "./service";
+import { generateImageWithChatGptWeb } from "@/features/image-generation/chatgpt-web";
+import { generateImage } from "@/features/image-generation/service";
 
 function testJwt(payload: Record<string, unknown>) {
   return [
@@ -510,6 +554,7 @@ describe("image backend pool scheduler selection", () => {
     dbMock.state.schedulerMetrics = [];
     dbMock.state.leases = [];
     dbMock.state.lockedLastAcquiredAtById.clear();
+    dbMock.state.lockedAvailabilityById.clear();
     dbMock.state.limitCalls = [];
     dbMock.state.updates = [];
     dbMock.state.inserts = [];
@@ -699,6 +744,206 @@ describe("image backend pool scheduler selection", () => {
     });
 
     expect(result?.memberId).toBe("acct-2");
+  });
+
+  it.each([
+    { status: "error", lastError: "HTTP 401: token_invalidated" },
+    { status: "limited", cooldownUntil: new Date(Date.now() + 60_000) },
+    { status: "active", cooldownUntil: new Date(Date.now() + 60_000) },
+    { isEnabled: false },
+    { status: "error", alwaysActive: true },
+  ])("行锁内拒绝已不可用账号 %j，保留状态", async (changed) => {
+    dbMock.state.accounts = [makeAccount(1), makeAccount(2)];
+    dbMock.state.lockedAvailabilityById.set("acct-1", changed);
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+    expect(result?.memberId).toBe("acct-2");
+    expect(dbMock.state.accounts[0]).toMatchObject(changed);
+    expect(dbMock.state.leases.map((lease) => lease.memberId)).toEqual([
+      "acct-2",
+    ]);
+  });
+
+  it("租约只更新时间戳，不清除过期冷却或 limited 状态", async () => {
+    const cooldownUntil = new Date(Date.now() - 60_000);
+    dbMock.state.accounts = [
+      { ...makeAccount(1), status: "limited", cooldownUntil },
+    ];
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+    expect(result?.memberId).toBe("acct-1");
+    expect(dbMock.state.accounts[0]).toMatchObject({
+      status: "limited",
+      cooldownUntil,
+    });
+  });
+
+  it.each([
+    { status: "error", lastError: "HTTP 403: GROUP_DISABLED" },
+    { status: "limited", cooldownUntil: new Date(Date.now() + 60_000) },
+    { isEnabled: false },
+  ])("API 行锁也拒绝并发变更 %j", async (changed) => {
+    dbMock.state.accounts = [];
+    dbMock.state.apis = [1, 2].map((index) => ({
+      id: `api-${index}`,
+      groupId: "group-a",
+      name: `API ${index}`,
+      baseUrl: "https://api.example.test/v1",
+      apiKey: "test-key",
+      interfaceMode: "images",
+      priority: 10,
+      concurrency: 1,
+      lastAcquiredAt: null,
+      lastUsedAt: null,
+      createdAt: new Date(2026, 0, index),
+      metadata: null,
+    }));
+    dbMock.state.lockedAvailabilityById.set("api-1", changed);
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+    expect(result?.memberId).toBe("api-2");
+    expect(dbMock.state.apis[0]).toMatchObject(changed);
+    expect(dbMock.state.leases.map((lease) => lease.memberId)).toEqual([
+      "api-2",
+    ]);
+  });
+
+  it("行锁内采用管理员最新降低的并发上限", async () => {
+    dbMock.state.accounts = [
+      { ...makeAccount(1), concurrency: 3 },
+      makeAccount(2),
+    ];
+    await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+      preferredMemberId: "acct-1",
+    });
+    dbMock.state.lockedAvailabilityById.set("acct-1", { concurrency: 1 });
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+      preferredMemberId: "acct-1",
+    });
+    expect(result?.memberId).toBe("acct-2");
+  });
+
+  it("上报的读写在行锁中完成，保留读前并发写入的 error", async () => {
+    dbMock.state.accounts = [makeAccount(1)];
+    dbMock.state.lockedAvailabilityById.set("acct-1", {
+      status: "error",
+      lastError: "HTTP 401: token_invalidated",
+    });
+    await reportImageBackendResult({
+      memberType: "account",
+      memberId: "acct-1",
+      success: true,
+    });
+    expect(dbMock.state.accounts[0]).toMatchObject({
+      status: "error",
+      lastError: "HTTP 401: token_invalidated",
+    });
+  });
+
+  it("直接上报基础设施故障也不改变成员健康、计数或最后错误", async () => {
+    dbMock.state.accounts = [makeAccount(1)];
+    for (const error of [
+      "fetch failed",
+      "This operation was aborted",
+      "ChatGPT Web proxy failed: HTTP 502 connection refused",
+    ]) {
+      const outcome = await reportImageBackendResult({
+        memberType: "account",
+        memberId: "acct-1",
+        success: false,
+        error,
+      });
+      expect(outcome).toEqual({
+        success: false,
+        retryable: false,
+        switchable: false,
+      });
+    }
+    expect(dbMock.state.updates).toEqual([]);
+  });
+
+  it("真实生成入口二次选路持久预留其他成员，不使用已停用或满载的原账号", async () => {
+    dbMock.state.groups[0] = {
+      ...dbMock.state.groups[0],
+      metadata: { backendType: "web" },
+    };
+    dbMock.state.accounts = [1, 2].map((index) => ({
+      ...makeAccount(index),
+      implementationMode: "web",
+      isEnabled: true,
+      status: "active",
+    }));
+    const first = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+    expect(first?.config.backend?.inflightLeasePersisted).toBe(true);
+    if (!first) throw new Error("首轮未获得租约");
+    vi.mocked(generateImageWithChatGptWeb).mockResolvedValueOnce({
+      error: "content_policy_violation",
+    });
+    await generateImage(first.config, { prompt: "blocked" });
+    expect(dbMock.state.leases).toEqual([]);
+
+    await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+      preferredMemberId: "acct-1",
+    });
+    await reportImageBackendResult({
+      memberType: "account",
+      memberId: "acct-1",
+      success: false,
+      error: "HTTP 401: token_invalidated",
+    });
+    vi.mocked(generateImageWithChatGptWeb).mockImplementationOnce(
+      async (selected) => {
+        expect(selected.backend?.id).toBe("acct-2");
+        expect(
+          dbMock.state.leases.map((lease) => lease.memberId).sort()
+        ).toEqual(["acct-1", "acct-2"]);
+        return { imageBase64: "aW1hZ2U=" };
+      }
+    );
+    const result = await generateImage(first.config, { prompt: "repaired" });
+    expect(result.backendMember?.id).toBe("acct-2");
+    expect(dbMock.state.accounts[0]?.status).toBe("error");
+    expect(dbMock.state.leases.map((lease) => lease.memberId)).toEqual([
+      "acct-1",
+    ]);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("账号 error 对在途成功粘性（常驻=%s）", async (alwaysActive) => {
+    dbMock.state.accounts = [{ ...makeAccount(1), alwaysActive }];
+    await reportImageBackendResult({
+      memberType: "account",
+      memberId: "acct-1",
+      success: false,
+      error: "HTTP 401: token_invalidated",
+    });
+    expect(dbMock.state.accounts[0]?.status).toBe("error");
+    await reportImageBackendResult({
+      memberType: "account",
+      memberId: "acct-1",
+      success: true,
+    });
+    expect(dbMock.state.accounts[0]).toMatchObject({
+      status: "error",
+      lastError: "HTTP 401: token_invalidated",
+    });
   });
 
   it("reselects when every candidate in the first snapshot is stale", async () => {
@@ -1556,5 +1801,4 @@ describe("image backend pool scheduler selection", () => {
       lastErrorAt: expect.any(Date),
     });
   });
-
 });

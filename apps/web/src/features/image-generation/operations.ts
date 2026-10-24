@@ -1,6 +1,6 @@
 /** 统一图像生成管线：校验套餐和模型、选择后端并完成队列、扣费与结果保存。 */
 import { db } from "@repo/database";
-import { generation, user } from "@repo/database/schema";
+import { creditsTransaction, generation, user } from "@repo/database/schema";
 import { consumeCredits } from "@repo/shared/credits/core";
 import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
@@ -10,6 +10,7 @@ import {
 import { getFailedGenerationTargetCredits } from "@repo/shared/generation-settlement";
 import { logWarn } from "@repo/shared/logger";
 import { toClientErrorMessage } from "./error-sanitize";
+import { readGeneratedImage } from "./generated-image";
 import {
   isContentModerationEnabled,
   moderateContent,
@@ -61,7 +62,10 @@ import {
 } from "./output-format";
 import { buildInputImagesMetadata } from "./generation-metadata";
 import { getRuntimeImageBaseCreditPricing } from "./pricing-settings";
-import { withImageGenerationQueue } from "./queue";
+import {
+  estimateImageGenerationQueueBytes,
+  withImageGenerationQueue,
+} from "./queue";
 import {
   alignImageSizeToStep,
   DEFAULT_IMAGE_SIZE,
@@ -101,6 +105,7 @@ import type {
   EditImageParams,
   GenerateImageParams,
   GenerateImageResult,
+  ImageGenerationBillingSnapshot,
   ImageGenerationCallbacks,
   ImageInputFile,
   ModerationBlockRiskLevel,
@@ -345,29 +350,6 @@ async function getStoredImageUrl(bucket: string, storageKey: string) {
   return buildSignedStorageImageUrl(storageKey, bucket) ?? "";
 }
 
-async function toImageBuffer(result: {
-  imageBase64?: string;
-  imageUrl?: string;
-}) {
-  if (result.imageBase64) {
-    const base64 = result.imageBase64.includes(",")
-      ? result.imageBase64.split(",").pop() || result.imageBase64
-      : result.imageBase64;
-    return Buffer.from(base64, "base64");
-  }
-
-  if (!result.imageUrl) {
-    throw new Error("Missing image data");
-  }
-
-  const response = await fetch(result.imageUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download image: ${response.status}`);
-  }
-
-  return Buffer.from(await response.arrayBuffer());
-}
-
 function stripTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -512,8 +494,12 @@ function resolveStoredImageFormat(buffer: Buffer, requestedFormat?: string) {
   };
 }
 
-function isPendingGeneration(generationId: string) {
-  return and(eq(generation.id, generationId), eq(generation.status, "pending"));
+function isPendingGeneration(generationId: string, userId: string) {
+  return and(
+    eq(generation.id, generationId),
+    eq(generation.userId, userId),
+    eq(generation.status, "pending")
+  );
 }
 
 function readUInt24LE(buffer: Buffer, offset: number) {
@@ -879,8 +865,13 @@ async function storeGeneratedImageOutput(params: {
   requestedFormat?: string;
   /** 高清修复开关(请求级):true 且主开关开时用 SCUNet 盲复原最终图(不改分辨率);其余不修复。 */
   hdRepair?: boolean;
+  signal?: AbortSignal;
 }) {
-  let imageBuffer: Buffer = await toImageBuffer(params.output);
+  let imageBuffer: Buffer = await readGeneratedImage(params.output, {
+    publicBaseUrl:
+      process.env.NEXT_PUBLIC_APP_URL || process.env.BETTER_AUTH_URL,
+    signal: params.signal,
+  });
   // 修复与分辨率校准是两个独立步骤，各自主开关门控、失败回退不阻断。
   // 顺序=先修复再超分（修复在原分辨率上跑更省算力，超分再放大到目标）。
   const isFinalImage =
@@ -1138,6 +1129,14 @@ export async function runImageGenerationForUser(
   callbacks?: ImageGenerationCallbacks
 ): Promise<ImageGenerationOperationResult> {
   const generationId = input.generationId || nanoid();
+  // 账本阶段键用冒号分隔。客户端ID不能进入该命名空间，否则初扣键可碰撞他人的补扣键。
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(generationId)) {
+    return {
+      error:
+        "Invalid generation task ID. Use 1-128 letters, digits, underscores or hyphens.",
+      generationId,
+    };
+  }
   const size = alignImageSizeToStep(input.size || DEFAULT_IMAGE_SIZE);
   const sizeCheck = validateImageSize(size);
   if (!sizeCheck.valid) {
@@ -1150,11 +1149,7 @@ export async function runImageGenerationForUser(
   // 统一的 Web-first 偏好(默认开启,详见 shouldForceWebBackend)。两个变量同值,
   // 分别供 gen/edit 路径(forceWebBackend)与 chat 路径(mixWebFirst)透传到 service 层;
   // chat 的 mix_web_first 已并入该决策,不再单独走像素区间判定。
-  const preferWebFirst = shouldForceWebBackend(
-    input,
-    size,
-    forceWebPixelRange
-  );
+  const preferWebFirst = shouldForceWebBackend(input, size, forceWebPixelRange);
   const forceWebBackend = preferWebFirst;
   const mixWebFirst = preferWebFirst;
   const preferWebWithFallback = preferWebFirst;
@@ -1309,6 +1304,9 @@ export async function runImageGenerationForUser(
         userId: input.userId,
         priority: queueSettings.priority,
         userConcurrency: queueSettings.userConcurrency,
+        apiKeyId: input.apiKeyId,
+        signal: input.signal,
+        estimatedBytes: estimateImageGenerationQueueBytes(input),
       },
       async () => {
         let leasedConfig: ApiConfig | null = null;
@@ -1385,11 +1383,8 @@ export async function runImageGenerationForUser(
             };
           }
           // 整体计费倍率 = 后端(分组/成员)倍率 × 模型计价倍率 × 质量倍率。
-          // 各倍率只在此处折入一次,得到的 effectiveMultiplier 作为本次
-          // 请求统一的 billingMultiplier 向下传递,确保扣费/明细/退款/元数据口径一致
-          // (退款须按相同倍率结算,故元数据上报的 billingMultiplier 即 effectiveMultiplier)。
-          // 质量倍率按用户【请求的 quality】解析(默认 auto),不改写出站口径——出站
-          // 质量改写(model_mapping.setQuality)属路由层行为,不回灌计价。
+          // 首次预扣保持请求质量口径；成功后的服务快照按实际成员、出站型号及
+          // 出站质量结算。两份快照分别留痕，不能继续用预扣倍率覆盖换号结果。
           const backendBillingMultiplier = getConfigBillingMultiplier(config);
           // 池 API 按模型计价（metadata.modelBilling，精确命中出站模型 id）：
           // 模型 id 取出站口径（站内别名解析 + model_mapping 改写后的完整 id），
@@ -1407,9 +1402,10 @@ export async function runImageGenerationForUser(
             outboundModel,
             input.quality
           );
-          const qualityBillingMultiplier = apiModelBilling.replacesQualityBilling
-            ? 1
-            : getPoolQualityBillingMultiplier(config, input.quality);
+          const qualityBillingMultiplier =
+            apiModelBilling.replacesQualityBilling
+              ? 1
+              : getPoolQualityBillingMultiplier(config, input.quality);
           const poolApiModelBillingMultiplier = apiModelBilling.multiplier;
           const billingMultiplier =
             backendBillingMultiplier *
@@ -1435,14 +1431,15 @@ export async function runImageGenerationForUser(
             billingMultiplier
           );
           const creditsPerImage = creditCost.totalCredits;
-          const chatRoundCredits = isChatInput
-            ? applyBillingMultiplier(
-                input.agentMode
-                  ? planCapabilities.billing.agentRoundCredits
-                  : planCapabilities.billing.chatRoundCredits,
-                billingMultiplier
-              )
+          const baseChatRoundCredits = isChatInput
+            ? input.agentMode
+              ? planCapabilities.billing.agentRoundCredits
+              : planCapabilities.billing.chatRoundCredits
             : 0;
+          const chatRoundCredits = applyBillingMultiplier(
+            baseChatRoundCredits,
+            billingMultiplier
+          );
           const billingPolicy = buildGenerationBillingPolicy({
             useSiteImageCredits: useCredits,
             moderationEnabled,
@@ -1523,6 +1520,7 @@ export async function runImageGenerationForUser(
             isChatInput,
             initialCreditCharge,
             chatRoundCredits,
+            baseChatRoundCredits,
             bucket,
             userPlan,
             moderationBlockRiskLevel,
@@ -1577,6 +1575,7 @@ async function runQueuedImageGenerationForUser({
   isChatInput,
   initialCreditCharge,
   chatRoundCredits,
+  baseChatRoundCredits,
   bucket,
   userPlan,
   moderationBlockRiskLevel,
@@ -1611,6 +1610,7 @@ async function runQueuedImageGenerationForUser({
   isChatInput: boolean;
   initialCreditCharge: number;
   chatRoundCredits: number;
+  baseChatRoundCredits: number;
   bucket: string;
   userPlan: Awaited<ReturnType<typeof getUserPlan>>;
   moderationBlockRiskLevel: ModerationBlockRiskLevel;
@@ -1649,7 +1649,22 @@ async function runQueuedImageGenerationForUser({
     useCredits,
     billingPolicy,
   });
-  const billingMetadata = {
+  const initialOutbound = applyApiModelMapping({
+    resolvedModel: getUpstreamImageModel(imageModel),
+    requestedModel: input.mode === "chat" ? input.imageModel : input.model,
+    quality: input.quality,
+    mapping: config.modelMapping,
+  });
+  const initialBilling: ImageGenerationBillingSnapshot = {
+    backendType: config.backend?.type ?? null,
+    backendId: config.backend?.id ?? null,
+    groupId: config.backend?.groupId ?? null,
+    billingGroupId: config.backend?.billingGroupId ?? null,
+    accountBackend: config.backend?.accountBackend ?? null,
+    requestedQuality: input.quality ?? null,
+    billingQuality: input.quality ?? null,
+    outboundModel: initialOutbound.model,
+    outboundQuality: initialOutbound.quality ?? null,
     billingMultiplier,
     // 倍率分量留痕：billingMultiplier 为乘积（后端×池API模型×质量），
     // 拆出各分量便于对账时区分定价来源；各分量与乘积同期写入，旧记录无此字段。
@@ -1657,6 +1672,12 @@ async function runQueuedImageGenerationForUser({
     backendBillingMultiplier,
     poolApiModelBillingMultiplier,
     poolApiModelBillingReplacesQuality: apiModelBilling.replacesQualityBilling,
+  };
+  let actualBilling: ImageGenerationBillingSnapshot | null = null;
+  const billingMetadata = {
+    ...initialBilling,
+    initialBilling,
+    actualBilling,
     requestedQuality: input.quality ?? null,
     billingGroupId: config.backend?.billingGroupId ?? null,
     chargeImageCredits: billingPolicy.chargeImageCredits,
@@ -1679,31 +1700,73 @@ async function runQueuedImageGenerationForUser({
     upstreamStream: streamTelemetry.snapshot(),
   });
 
-  // 纯中转：不落生成历史。其余 db.update(generation) 在无行时天然 no-op。
-  // 防御性降级写入：INSERT 失败（metadata 超大/并发冲突/字段截断等 DB 层错误）
-  // 时用最小可写版本重试——保证后续错误（上游 400 等）至少能 UPDATE 落库，
-  // 避免「用户看到报错但历史记录里查不到」的口径断裂。
-  const buildGenerationValues = (compact: boolean) => ({
+  // 主键唯一约束同时充当原子执行权认领：冲突和写库失败都不能继续扣费/调用上游。
+  // 纯中转不创建历史记录；其付费任务的重复 ID 由下方账本幂等检查拒绝。
+  const generationValues = {
     id: generationId,
     userId: input.userId,
-    prompt: compact ? input.prompt.substring(0, 2000) : input.prompt,
+    prompt: input.prompt,
     model: recordModel,
     size,
     status: "pending" as const,
     creditsConsumed: initialCreditCharge,
     storageBucket: bucket,
-    metadata: compact
-      ? { mode: input.mode, ...backendMetadata, ...billingMetadata }
-      : input.mode === "edit"
+    metadata:
+      input.mode === "edit"
+        ? {
+            mode: "edit",
+            ...backendMetadata,
+            ...modelMetadata,
+            ...promptOptimizationMetadata,
+            ...inputImagesMetadata,
+            imageCount: input.images.length,
+            hasMask: Boolean(input.mask),
+            quality: input.quality || "auto",
+            outputFormat: input.outputFormat || null,
+            outputCompression: input.outputCompression ?? null,
+            background: input.background || null,
+            batchCount: input.n || 1,
+            forceWebBackend,
+            creditCost,
+            ...billingMetadata,
+            chatRoundCredits: billingPolicy.chargeImageCredits
+              ? chatRoundCredits
+              : 0,
+            moderationBlockingEnabled: moderationEnabled,
+            moderationFailureCredits,
+          }
+        : input.mode === "chat"
           ? {
-              mode: "edit",
+              mode: input.agentMode
+                ? "agent"
+                : input.waterfallMode
+                  ? "waterfall"
+                  : "chat",
+              action: "auto",
               ...backendMetadata,
               ...modelMetadata,
               ...promptOptimizationMetadata,
               ...inputImagesMetadata,
-              imageCount: input.images.length,
-              hasMask: Boolean(input.mask),
+              imageCount: input.images?.length || 0,
+              fileContextChars: input.fileContext?.length || 0,
               quality: input.quality || "auto",
+              moderation: input.moderation || "auto",
+              outputFormat: input.outputFormat || null,
+              outputCompression: input.outputCompression ?? null,
+              batchCount: input.n || 1,
+              forceWebBackend,
+              creditCost,
+              ...billingMetadata,
+              moderationBlockingEnabled: moderationEnabled,
+              moderationFailureCredits,
+            }
+          : {
+              mode: "generate",
+              ...backendMetadata,
+              ...modelMetadata,
+              ...promptOptimizationMetadata,
+              quality: input.quality || "auto",
+              moderation: input.moderation || "auto",
               outputFormat: input.outputFormat || null,
               outputCompression: input.outputCompression ?? null,
               background: input.background || null,
@@ -1711,74 +1774,21 @@ async function runQueuedImageGenerationForUser({
               forceWebBackend,
               creditCost,
               ...billingMetadata,
-              chatRoundCredits: billingPolicy.chargeImageCredits
-                ? chatRoundCredits
-                : 0,
               moderationBlockingEnabled: moderationEnabled,
               moderationFailureCredits,
-            }
-          : input.mode === "chat"
-            ? {
-                mode: input.agentMode
-                  ? "agent"
-                  : input.waterfallMode
-                    ? "waterfall"
-                    : "chat",
-                action: "auto",
-                ...backendMetadata,
-                ...modelMetadata,
-                ...promptOptimizationMetadata,
-                ...inputImagesMetadata,
-                imageCount: input.images?.length || 0,
-                fileContextChars: input.fileContext?.length || 0,
-                quality: input.quality || "auto",
-                moderation: input.moderation || "auto",
-                outputFormat: input.outputFormat || null,
-                outputCompression: input.outputCompression ?? null,
-                batchCount: input.n || 1,
-                forceWebBackend,
-                creditCost,
-                ...billingMetadata,
-                moderationBlockingEnabled: moderationEnabled,
-                moderationFailureCredits,
-              }
-            : {
-                mode: "generate",
-                ...backendMetadata,
-                ...modelMetadata,
-                ...promptOptimizationMetadata,
-                quality: input.quality || "auto",
-                moderation: input.moderation || "auto",
-                outputFormat: input.outputFormat || null,
-                outputCompression: input.outputCompression ?? null,
-                background: input.background || null,
-                batchCount: input.n || 1,
-                forceWebBackend,
-                creditCost,
-                ...billingMetadata,
-                moderationBlockingEnabled: moderationEnabled,
-                moderationFailureCredits,
-              },
-  });
+            },
+  };
   if (!relayOnly) {
-    try {
-      await db.insert(generation).values(buildGenerationValues(false));
-    } catch (insertError) {
-      // 全量 INSERT 失败 → 降级用 compact 版本重试（截断 prompt、剥离
-      // inputImages 等大字段）。再失败则记日志放行——后续 UPDATE 自然 no-op，
-      // 但扣费/退款链路不受影响，用户至少能收到真实错误而非 DB 异常。
-      logWarn("generation INSERT 失败,降级写入 compact 版本", {
+    const [claimed] = await db
+      .insert(generation)
+      .values(generationValues)
+      .onConflictDoNothing({ target: generation.id })
+      .returning({ id: generation.id });
+    if (!claimed) {
+      return {
+        error: "Generation task ID is already in use. Please start a new task.",
         generationId,
-        error: insertError instanceof Error ? insertError.message : String(insertError),
-      });
-      try {
-        await db.insert(generation).values(buildGenerationValues(true));
-      } catch (compactError) {
-        logWarn("generation compact INSERT 也失败,跳过记录(扣费不受影响)", {
-          generationId,
-          error: compactError instanceof Error ? compactError.message : String(compactError),
-        });
-      }
+      };
     }
   }
 
@@ -1786,25 +1796,22 @@ async function runQueuedImageGenerationForUser({
   const refundChargedCredits = async (
     amount: number,
     sourceRef: string,
-    description: string
+    description: string,
+    metadata?: Record<string, unknown>
   ) => {
     if (!billingPolicy.chargesCredits || amount <= 0) return;
     const roundedAmount = roundCreditAmount(amount);
-    await refundGenerationCredits({
+    const refund = await refundGenerationCredits({
       generationId,
       userId: input.userId,
       amount: roundedAmount,
       sourceRef,
       description,
+      metadata,
     });
-    await refundExternalApiKeyCredits({
-      apiKeyId: input.apiKeyId,
-      userId: input.userId,
-      amount: roundedAmount,
-    });
-    chargedCredits = roundCreditAmount(
-      Math.max(0, chargedCredits - roundedAmount)
-    );
+    // 钱包与原消费所属的 Key 已在同事务处理。即使本次 no-op，其他路径也可能
+    // 已经退款；按权威剩余净额覆盖本地旧值，不能用本地旧扣费减本次退额推算。
+    chargedCredits = roundCreditAmount(refund.remainingDebited);
   };
   const chargeAdditionalCredits = async (
     amount: number,
@@ -1822,7 +1829,7 @@ async function runQueuedImageGenerationForUser({
     });
     let userCreditsConsumed = false;
     try {
-      await consumeCredits({
+      const consumption = await consumeCredits({
         userId: input.userId,
         amount: roundedAmount,
         serviceName,
@@ -1833,6 +1840,13 @@ async function runQueuedImageGenerationForUser({
           externalApiKeyId: input.apiKeyId,
         },
       });
+      // 历史记录可以被用户删除，不能只依赖 generation 主键阻止重放。
+      // 旧扣费命中代表没有发生本次消费，须拒绝执行并释放刚预留的 Key 配额。
+      if (consumption.alreadyConsumed) {
+        throw new Error(
+          "Generation task ID is already in use. Please start a new task."
+        );
+      }
       userCreditsConsumed = true;
     } finally {
       if (!userCreditsConsumed) {
@@ -1863,18 +1877,46 @@ async function runQueuedImageGenerationForUser({
         serviceName,
         description,
         {
+          ...billingMetadata,
+          actualBilling,
           ...metadata,
           previousCredits: chargedCredits,
           targetCredits: roundedTarget,
         },
         `${sourceRef}:charge`
       );
-      return;
     }
 
     if (delta < 0) {
-      await refundChargedCredits(Math.abs(delta), sourceRef, description);
+      await refundChargedCredits(Math.abs(delta), sourceRef, description, {
+        ...billingMetadata,
+        actualBilling,
+        ...metadata,
+        previousCredits: chargedCredits,
+        targetCredits: roundedTarget,
+      });
     }
+    // 同价换号不会新建补扣或退款流水，仍须把实际快照回填到原始扣费账本。
+    // 只追加审计字段，不修改金额；按用户、类型及完整阶段键限制更新范围。
+    await db
+      .update(creditsTransaction)
+      .set({
+        metadata: sql`COALESCE(${creditsTransaction.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
+          {
+            initialBilling,
+            actualBilling,
+            settledCredits: chargedCredits,
+            settlementSourceRef: sourceRef,
+          }
+        )}::jsonb`,
+      })
+      .where(
+        and(
+          eq(creditsTransaction.userId, input.userId),
+          eq(creditsTransaction.type, "consumption"),
+          eq(creditsTransaction.sourceRef, `${generationId}:charge`)
+        )
+      );
   };
 
   if (initialCreditCharge > 0) {
@@ -1896,8 +1938,7 @@ async function runQueuedImageGenerationForUser({
           mode: input.mode,
           size,
           creditCost,
-          billingMultiplier,
-          billingGroupId: config.backend?.billingGroupId ?? null,
+          ...billingMetadata,
           initialCredits: initialCreditCharge,
           targetImageCredits: creditsPerImage,
           billingMode: billingPolicy.mode,
@@ -1914,7 +1955,7 @@ async function runQueuedImageGenerationForUser({
           error: message,
           creditsConsumed: chargedCredits,
         })
-        .where(isPendingGeneration(generationId));
+        .where(isPendingGeneration(generationId, input.userId));
       return { error: message, generationId };
     }
   }
@@ -1964,7 +2005,7 @@ async function runQueuedImageGenerationForUser({
             )
           )}::jsonb`,
         })
-        .where(isPendingGeneration(generationId))
+        .where(isPendingGeneration(generationId, input.userId))
         .returning({ id: generation.id });
 
       // 中转模式无 generation 行，UPDATE 返回空；退款仍须照常执行。
@@ -1992,7 +2033,12 @@ async function runQueuedImageGenerationForUser({
                 }
               )}::jsonb`,
             })
-            .where(eq(generation.id, generationId));
+            .where(
+              and(
+                eq(generation.id, generationId),
+                eq(generation.userId, input.userId)
+              )
+            );
         } catch {
           /* best effort settlement */
         }
@@ -2089,7 +2135,7 @@ async function runQueuedImageGenerationForUser({
             buildModerationPromptRepairMetadata(repairAttempts)
           )}::jsonb`,
         })
-        .where(isPendingGeneration(generationId));
+        .where(isPendingGeneration(generationId, input.userId));
     }
   };
 
@@ -2289,7 +2335,7 @@ async function runQueuedImageGenerationForUser({
               : {}
           )}::jsonb`,
         })
-        .where(isPendingGeneration(generationId));
+        .where(isPendingGeneration(generationId, input.userId));
       return {
         error: responseMessage,
         generationId,
@@ -2345,7 +2391,7 @@ async function runQueuedImageGenerationForUser({
               : {}
           )}::jsonb`,
         })
-        .where(isPendingGeneration(generationId));
+        .where(isPendingGeneration(generationId, input.userId));
       return {
         error: message,
         generationId,
@@ -2399,10 +2445,15 @@ async function runQueuedImageGenerationForUser({
     withPromptRepairMetadata(
       {
         ...buildStreamTelemetryMetadata(),
+        ...billingMetadata,
+        ...(hasImageOutput(result) && !result.error ? actualBilling : {}),
+        actualBilling,
         ...metadata,
       },
       repairAttempts
     );
+
+  if (!result.error) actualBilling = result.billingSnapshot ?? initialBilling;
 
   if (result.error) {
     const failureTargetCredits = getFailedGenerationTargetCredits({
@@ -2436,7 +2487,7 @@ async function runQueuedImageGenerationForUser({
           metadataWithPromptRepair(buildResponseOutputMetadata(result))
         )}::jsonb`,
       })
-      .where(isPendingGeneration(generationId));
+      .where(isPendingGeneration(generationId, input.userId));
     return {
       error: result.error,
       generationId,
@@ -2485,7 +2536,7 @@ async function runQueuedImageGenerationForUser({
           )}::jsonb`,
           completedAt: new Date(),
         })
-        .where(isPendingGeneration(generationId));
+        .where(isPendingGeneration(generationId, input.userId));
       return {
         error: message,
         generationId,
@@ -2526,7 +2577,7 @@ async function runQueuedImageGenerationForUser({
             error: message,
             creditsConsumed: chargedCredits,
           })
-          .where(isPendingGeneration(generationId));
+          .where(isPendingGeneration(generationId, input.userId));
         return {
           error: "Insufficient credits",
           generationId,
@@ -2565,7 +2616,7 @@ async function runQueuedImageGenerationForUser({
         )}::jsonb`,
         completedAt: new Date(),
       })
-      .where(isPendingGeneration(generationId));
+      .where(isPendingGeneration(generationId, input.userId));
 
     return {
       generationId,
@@ -2662,6 +2713,7 @@ async function runQueuedImageGenerationForUser({
             requestedSize: size,
             requestedFormat: input.outputFormat,
             hdRepair: input.hdRepair,
+            signal: generationSignal,
           })
         );
         if (isAgentChatInput) {
@@ -2718,7 +2770,7 @@ async function runQueuedImageGenerationForUser({
         )}::jsonb`,
         creditsConsumed: chargedCredits,
       })
-      .where(isPendingGeneration(generationId));
+      .where(isPendingGeneration(generationId, input.userId));
     return {
       error: "Failed to save image",
       generationId,
@@ -2765,6 +2817,15 @@ async function runQueuedImageGenerationForUser({
       ? storedOutputs
       : storedOutputs.filter((output) => output.outputRole !== "agent_draft");
   const billableImageOutputCount = billableOutputs.length;
+  const actualBillingMultiplier =
+    actualBilling?.billingMultiplier ?? billingMultiplier;
+  const actualChatRoundCredits = applyBillingMultiplier(
+    baseChatRoundCredits,
+    actualBillingMultiplier
+  );
+  const actualQuality = (
+    actualBilling ? (actualBilling.billingQuality ?? undefined) : input.quality
+  ) as ImageQualityLevel | undefined;
   const perOutputCreditCosts = storedOutputs.map((output) =>
     // 分层运行:每张图都计费(不把层当作免费 agent_draft 草稿)。
     (!isLayeredRun && output.outputRole === "agent_draft") ||
@@ -2788,10 +2849,10 @@ async function runQueuedImageGenerationForUser({
             textModerationCount: moderationEnabled ? undefined : 0,
             imageModerationCount: moderationEnabled ? inputImages.length : 0,
             basePricing: imageBasePricing,
-            quality: input.quality as ImageQualityLevel | undefined,
+            quality: actualQuality,
             thinking: input.thinking as ImageThinkingLevel | undefined,
           }),
-          billingMultiplier
+          actualBillingMultiplier
         )
   );
   const billableOutputCreditCosts = billableOutputs.map((output) =>
@@ -2800,10 +2861,10 @@ async function runQueuedImageGenerationForUser({
         textModerationCount: moderationEnabled ? undefined : 0,
         imageModerationCount: moderationEnabled ? inputImages.length : 0,
         basePricing: imageBasePricing,
-        quality: input.quality as ImageQualityLevel | undefined,
+        quality: actualQuality,
         thinking: input.thinking as ImageThinkingLevel | undefined,
       }),
-      billingMultiplier
+      actualBillingMultiplier
     )
   );
   const actualCreditCost =
@@ -2813,10 +2874,10 @@ async function runQueuedImageGenerationForUser({
         textModerationCount: moderationEnabled ? undefined : 0,
         imageModerationCount: moderationEnabled ? inputImages.length : 0,
         basePricing: imageBasePricing,
-        quality: input.quality as ImageQualityLevel | undefined,
+        quality: actualQuality,
         thinking: input.thinking as ImageThinkingLevel | undefined,
       }),
-      billingMultiplier
+      actualBillingMultiplier
     );
   const actualImageCredits = perOutputCreditCosts.reduce(
     (total, item) => roundCreditAmount(total + item.totalCredits),
@@ -2826,10 +2887,10 @@ async function runQueuedImageGenerationForUser({
   const targetSuccessCredits = getImageSuccessTargetCredits({
     policy: billingPolicy,
     isChatInput,
-    chatRoundCredits,
+    chatRoundCredits: actualChatRoundCredits,
     chatRoundCount,
     actualImageCredits,
-    creditCost,
+    creditCost: actualCreditCost,
   });
   try {
     if (isAgentChatInput) {
@@ -2851,12 +2912,13 @@ async function runQueuedImageGenerationForUser({
         mode: input.mode,
         requestedSize: size,
         actualSize: primaryOutput.size,
+        ...actualBilling,
         requestedCreditCost: creditCost,
         actualCreditCost,
         perOutputCreditCosts,
         chatRoundCredits:
           isChatInput && billingPolicy.chargeImageCredits
-            ? chatRoundCredits
+            ? actualChatRoundCredits
             : 0,
         chatRoundCount,
         billableImageOutputCount,
@@ -2908,7 +2970,7 @@ async function runQueuedImageGenerationForUser({
           metadataWithPromptRepair({})
         )}::jsonb`,
       })
-      .where(isPendingGeneration(generationId));
+      .where(isPendingGeneration(generationId, input.userId));
     return {
       error: "Insufficient credits",
       generationId,
@@ -2950,7 +3012,7 @@ async function runQueuedImageGenerationForUser({
             requestedCreditCost: creditCost,
             actualCreditCost,
             perOutputCreditCosts,
-            chatRoundCredits: isChatInput ? chatRoundCredits : 0,
+            chatRoundCredits: isChatInput ? actualChatRoundCredits : 0,
             chatRoundCount,
             billableImageOutputCount,
             upstreamImageOutputCount,
@@ -2997,7 +3059,7 @@ async function runQueuedImageGenerationForUser({
       )}::jsonb`,
       completedAt: new Date(),
     })
-    .where(isPendingGeneration(generationId));
+    .where(isPendingGeneration(generationId, input.userId));
 
   return {
     generationId,

@@ -31,6 +31,11 @@ import { useEffect, useState } from "react";
 import { formatDateInTimeZone } from "../../time-zone";
 import { getMyTransactions } from "../actions";
 import { formatCredits } from "../format";
+import {
+  type CreditLedgerTransaction,
+  getCreditTransactionSemantics,
+  type UpgradeReservationLedgerKind,
+} from "../transaction-semantics";
 
 /**
  * 交易类型键
@@ -42,7 +47,8 @@ type TransactionTypeKey =
   | "purchase"
   | "consumption"
   | "expiration"
-  | "refund";
+  | "refund"
+  | UpgradeReservationLedgerKind;
 
 /**
  * 交易类型变体映射
@@ -58,6 +64,13 @@ const TRANSACTION_TYPE_VARIANTS: Record<
   consumption: "destructive",
   expiration: "outline",
   refund: "secondary",
+  upgrade_hold: "outline",
+  upgrade_release: "secondary",
+  upgrade_settlement: "outline",
+  upgrade_expiration: "outline",
+  upgrade_refund_hold: "outline",
+  upgrade_refund_settlement: "outline",
+  upgrade_refund_restore: "secondary",
 };
 
 /**
@@ -68,26 +81,18 @@ function formatDateTime(
   locale: string,
   timeZone: string
 ): string {
-  return formatDateInTimeZone(date, locale, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }, timeZone);
-}
-
-/**
- * 判断是否为收入类型交易
- */
-function isIncomeType(type: string): boolean {
-  return [
-    "registration_bonus",
-    "admin_grant",
-    "monthly_grant",
-    "purchase",
-    "refund",
-  ].includes(type);
+  return formatDateInTimeZone(
+    date,
+    locale,
+    {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    },
+    timeZone
+  );
 }
 
 function getMonthlyCreditsFromMetadata(
@@ -138,12 +143,13 @@ export function TransactionHistory({ timeZone }: { timeZone: string }) {
   /**
    * 获取本地化的交易描述
    */
-  const getLocalizedDescription = (tx: {
-    type: string;
-    amount: number;
-    description: string | null;
-    metadata?: Record<string, unknown> | null;
-  }): string => {
+  const getLocalizedDescription = (
+    tx: CreditLedgerTransaction & {
+      description: string | null;
+    }
+  ): string => {
+    const kind = getCreditTransactionSemantics(tx).reservationKind;
+    if (kind) return t(`descriptions.${kind}`);
     const meta = tx.metadata;
     switch (tx.type) {
       case "registration_bonus":
@@ -252,7 +258,9 @@ export function TransactionHistory({ timeZone }: { timeZone: string }) {
           /* 表格内容 */
           <div className="divide-y">
             {transactions.map((tx) => {
-              const isIncome = isIncomeType(tx.type);
+              const { reservationKind, walletDelta } =
+                getCreditTransactionSemantics(tx);
+              const presentationType = reservationKind ?? tx.type;
 
               return (
                 <div
@@ -267,10 +275,10 @@ export function TransactionHistory({ timeZone }: { timeZone: string }) {
                   {/* 类型 */}
                   <div className="col-span-2">
                     <Badge
-                      variant={getTypeVariant(tx.type)}
+                      variant={getTypeVariant(presentationType)}
                       className="text-xs"
                     >
-                      {getTypeLabel(tx.type)}
+                      {getTypeLabel(presentationType)}
                     </Badge>
                   </div>
 
@@ -286,11 +294,16 @@ export function TransactionHistory({ timeZone }: { timeZone: string }) {
                   <div
                     className={cn(
                       "col-span-2 text-right font-medium",
-                      isIncome ? "text-success" : "text-destructive"
+                      walletDelta > 0
+                        ? "text-success"
+                        : walletDelta < 0
+                          ? "text-destructive"
+                          : "text-muted-foreground"
                     )}
+                    title={walletDelta === 0 ? t("walletUnchanged") : undefined}
                   >
-                    {isIncome ? "+" : "-"}
-                    {formatCredits(tx.amount)}
+                    {walletDelta > 0 ? "+" : walletDelta < 0 ? "-" : ""}
+                    {formatCredits(Math.abs(walletDelta))}
                   </div>
                 </div>
               );

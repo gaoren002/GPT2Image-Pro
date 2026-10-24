@@ -89,7 +89,8 @@
     "./mcp/user-tool-factory": "./src/mcp/user-tool-factory.ts",
     "./mcp/user-key-actions": "./src/mcp/user-key-actions.ts",
     "./support/constants": "./src/support/constants.ts",
-    "./announcements/constants": "./src/announcements/constants.ts"
+    "./announcements/constants": "./src/announcements/constants.ts",
+    "./credits/transaction-semantics-sql": "./src/credits/transaction-semantics-sql.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

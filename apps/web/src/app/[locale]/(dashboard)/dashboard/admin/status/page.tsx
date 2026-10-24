@@ -14,6 +14,7 @@ import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { canViewImageBackendPool } from "@repo/shared/auth/roles";
 import { getServerSession } from "@repo/shared/auth/server";
 import { formatCredits } from "@repo/shared/credits/format";
+import { creditExpirationWriteOffCondition } from "@repo/shared/credits/transaction-semantics-sql";
 import {
   formatDateInputInTimeZone,
   formatDateInTimeZone,
@@ -1541,7 +1542,7 @@ async function loadStatusData() {
             Number
           ),
         expiration:
-          sql<number>`coalesce(sum(case when ${creditsTransaction.type} = 'expiration' then ${creditsTransaction.amount} else 0 end), 0)`.mapWith(
+          sql<number>`coalesce(sum(case when ${creditExpirationWriteOffCondition(creditsTransaction)} then ${creditsTransaction.amount} else 0 end), 0)`.mapWith(
             Number
           ),
         grants:
@@ -1562,7 +1563,7 @@ async function loadStatusData() {
             Number
           ),
         expiration:
-          sql<number>`coalesce(sum(case when ${creditsTransaction.type} = 'expiration' then ${creditsTransaction.amount} else 0 end), 0)`.mapWith(
+          sql<number>`coalesce(sum(case when ${creditExpirationWriteOffCondition(creditsTransaction)} then ${creditsTransaction.amount} else 0 end), 0)`.mapWith(
             Number
           ),
         grants:

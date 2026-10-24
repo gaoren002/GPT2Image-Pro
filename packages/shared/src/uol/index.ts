@@ -10,3 +10,5 @@ export * from "./errors";
 export * from "./registry";
 export * from "./access";
 export * from "./invoke";
+// webhook 传输按根入口加载已注册的纯契约；业务服务仍延迟读取。
+export { creemWebhook } from "./operations/creem-webhook";

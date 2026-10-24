@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   }),
   setting: vi.fn(async () => true),
 }));
+vi.mock("../../../../../../../packages/shared/src/payment/creem-state", () => ({
+  projectCreemSubscription: async () => ({ userId: "u", projected: false }),
+}));
 vi.mock("@repo/database", () => ({
   db: {
     select: () => {
@@ -101,10 +104,12 @@ vi.mock("@repo/shared/payment/creem", async (original) => ({
   ...(await original<typeof import("@repo/shared/payment/creem")>()),
   constructRuntimeCreemEvent: async () => ({
     id: "event",
+    created_at: 1792882800100,
     eventType: "subscription.renewed",
     object: {
       id: "sub",
       product: "pro_monthly",
+      customer: "cust",
       current_period_start_date: "2026-08-02T12:00:00.000Z",
       current_period_end_date: state.periodEnd,
       status: "active",
@@ -122,6 +127,7 @@ const post = () =>
     new Request("https://test/api/webhooks/creem", {
       method: "POST",
       body: "signed",
+      headers: { "creem-signature": "verified-at-boundary" },
     })
   );
 beforeEach(() => {

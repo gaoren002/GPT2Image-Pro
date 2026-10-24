@@ -18,6 +18,7 @@ import "./credits";
 import "./credits-admin-grant";
 // 订阅域
 import "./subscription";
+import "./creem-webhook";
 // 用户认证域
 import "./user-auth";
 // 图像后端池域

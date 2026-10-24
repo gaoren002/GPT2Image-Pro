@@ -5,8 +5,8 @@
  * 文档: https://docs.creem.io/api-reference
  */
 
-import crypto from "crypto";
-import { z } from "zod";
+import crypto from "node:crypto";
+import { creemEventEnvelopeSchema } from "./creem-event";
 import { getRuntimeSettingString } from "../system-settings";
 
 async function getRuntimeCreemApiKey() {
@@ -47,7 +47,15 @@ export interface CreemSubscription {
   /** 订阅 ID */
   id: string;
   /** 订阅状态 */
-  status: "active" | "canceled" | "past_due" | "trialing" | "paused";
+  status:
+    | "active"
+    | "canceled"
+    | "past_due"
+    | "trialing"
+    | "paused"
+    | "scheduled_cancel"
+    | "unpaid"
+    | "expired";
   /** 产品（可能是 ID 字符串或完整对象） */
   product:
     | string
@@ -62,11 +70,11 @@ export interface CreemSubscription {
   /** 客户（可能是 ID 字符串或完整对象） */
   customer: string | { id: string; email?: string; name?: string };
   /** 当前周期开始时间 (ISO 8601) */
-  current_period_start_date: string;
+  current_period_start_date?: string;
   /** 当前周期结束时间 (ISO 8601) */
-  current_period_end_date: string;
+  current_period_end_date?: string;
   /** 是否在周期结束时取消 */
-  cancel_at_period_end: boolean;
+  cancel_at_period_end?: boolean;
   /** 元数据 */
   metadata?: Record<string, string>;
 }
@@ -94,7 +102,11 @@ export interface CreemWebhookEvent {
     | "subscription.paused"
     | "subscription.past_due"
     | "subscription.paid"
-    | "subscription.expired";
+    | "subscription.expired"
+    | "subscription.unpaid"
+    | "subscription.scheduled_cancel"
+    | "subscription.update"
+    | "subscription.trialing";
   /** 事件数据 (Creem 直接在顶层使用 object，不嵌套在 data 里) */
   object: CreemCheckoutCompletedData | CreemSubscription;
   /** 创建时间 (Unix 毫秒时间戳) */
@@ -146,41 +158,6 @@ export interface CreemCheckoutCompletedData {
 // ============================================
 
 /**
- * Creem 已知的 Webhook 事件类型。
- *
- * 与 CreemWebhookEvent.eventType 保持一致；Creem 新增类型时需同步此处，
- * 未知类型会在 parseCreemWebhookEvent 处被拒绝并记录，避免静默走错分支。
- */
-const CREEM_WEBHOOK_EVENT_TYPES = [
-  "checkout.completed",
-  "subscription.active",
-  "subscription.canceled",
-  "subscription.renewed",
-  "subscription.paused",
-  "subscription.past_due",
-  "subscription.paid",
-  "subscription.expired",
-] as const;
-
-/**
- * Webhook 事件体的运行时 schema。
- *
- * WHY：Creem 直接在顶层使用 eventType + object，过去仅以 `as CreemWebhookEvent`
- * 盲转，Creem 改字段或发未预期事件时类型系统无保护（运行时 undefined 解引用
- * 或静默走错分支）。此处用 Zod 在验签后做结构校验，违反 CLAUDE.md
- * “校验一切外部输入优先 Zod”。object 用 passthrough 保留未知字段，仅保证它是对象，
- * 具体变体字段由各 handler 自行判空读取，避免对 Creem 字段演进过度脆弱。
- */
-const creemWebhookEventSchema = z
-  .object({
-    id: z.string(),
-    eventType: z.enum(CREEM_WEBHOOK_EVENT_TYPES),
-    object: z.object({}).passthrough(),
-    created_at: z.number(),
-  })
-  .passthrough();
-
-/**
  * 解析并运行时校验 Webhook 事件体。
  *
  * @param payload - 已验签的原始请求体（JSON 字符串）
@@ -195,7 +172,7 @@ export function parseCreemWebhookEvent(payload: string): CreemWebhookEvent {
     throw new Error("Invalid webhook payload: not valid JSON");
   }
 
-  const result = creemWebhookEventSchema.safeParse(parsed);
+  const result = creemEventEnvelopeSchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(
       `Invalid webhook event shape: ${result.error.issues
@@ -204,9 +181,7 @@ export function parseCreemWebhookEvent(payload: string): CreemWebhookEvent {
     );
   }
 
-  // schema 已校验 eventType/object/created_at 的运行时形状；object 仅保证是对象，
-  // 其 CreemSubscription / CreemCheckoutCompletedData 变体字段由各 handler 判空读取，
-  // 故经 unknown 收窄回声明类型（运行时已验签 + 结构校验，非裸 as 盲转）。
+  // 此处只校验 wire 外壳；UOL 的 creemWebhookInputSchema 在任何落库前校验对象变体。
   return result.data as unknown as CreemWebhookEvent;
 }
 
@@ -370,11 +345,14 @@ export const creem = {
    * @returns 客户信息
    */
   async getCustomer(customerId: string): Promise<CreemCustomer> {
-    const res = await fetch(`${await getRuntimeCreemApiBase()}/customers/${customerId}`, {
-      headers: {
-        "x-api-key": await getRuntimeCreemApiKey(),
-      },
-    });
+    const res = await fetch(
+      `${await getRuntimeCreemApiBase()}/customers/${customerId}`,
+      {
+        headers: {
+          "x-api-key": await getRuntimeCreemApiKey(),
+        },
+      }
+    );
 
     if (!res.ok) {
       const error = await res.text();

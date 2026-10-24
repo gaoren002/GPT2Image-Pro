@@ -1,4 +1,4 @@
--- Creem 已验签事件身份与订阅状态水位；0057 永久保留空号，父侧最终统一排序 journal。
+-- Creem 已验签事件身份与订阅状态水位。
 ALTER TABLE subscription ADD COLUMN IF NOT EXISTS creem_event_created_at bigint;
 CREATE TABLE IF NOT EXISTS creem_webhook_event (
   event_id text PRIMARY KEY,

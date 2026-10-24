@@ -25,7 +25,7 @@ function registerOperation(
   overrides: Partial<OperationDefinition> & {
     name: string;
     access: AccessRequirement;
-  },
+  }
 ) {
   return defineOperation({
     name: overrides.name,
@@ -64,9 +64,9 @@ describe("MCP tool factories", () => {
 
     bindExecute("image.generate", async () => ({ ok: true }));
 
-    expect(buildUserMcpTools(apiKeyPrincipal).map((tool) => tool.name)).toEqual([
-      "image.generate",
-    ]);
+    expect(buildUserMcpTools(apiKeyPrincipal).map((tool) => tool.name)).toEqual(
+      ["image.generate"]
+    );
   });
 
   it("hides admin tools until their UOL operation is bound", () => {
@@ -81,8 +81,76 @@ describe("MCP tool factories", () => {
 
     bindExecute("pool.getAdminPool", async () => ({ ok: true }));
 
-    expect(buildAdminMcpTools(adminPrincipal).map((tool) => tool.name)).toEqual([
-      "pool_getAdminPool",
-    ]);
+    expect(buildAdminMcpTools(adminPrincipal).map((tool) => tool.name)).toEqual(
+      ["pool_getAdminPool"]
+    );
   });
+});
+
+describe("MCP的Zod4输入契约", () => {
+  beforeEach(() => clearRegistry());
+
+  const input = z.object({
+    prompt: z.string().min(1).max(8000).describe("用户提示词"),
+    count: z.number().int().min(1).max(10).optional(),
+    relayOnly: z.boolean().default(false),
+    quality: z.enum(["low", "high"]).optional(),
+    images: z.array(z.string().url()).max(3).optional(),
+    extra: z.object({ seed: z.number().int() }).optional(),
+  });
+
+  it.each(["user", "admin"])("%s工具保留字段类型、约束与可选语义", (kind) => {
+    const name = kind === "user" ? "image.generate" : "pool.updateApi";
+    registerOperation({
+      name,
+      domain: kind === "user" ? "image-generation" : "image-backend-pool",
+      input,
+      access: { kind: kind === "user" ? "protected" : "admin" },
+    });
+    bindExecute(name, async () => ({ ok: true }));
+    const tools =
+      kind === "user"
+        ? buildUserMcpTools(apiKeyPrincipal)
+        : buildAdminMcpTools(adminPrincipal);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]?.inputSchema).toMatchObject({
+      type: "object",
+      required: ["prompt"],
+      properties: {
+        prompt: {
+          type: "string",
+          minLength: 1,
+          maxLength: 8000,
+          description: "用户提示词",
+        },
+        count: { type: "integer", minimum: 1, maximum: 10 },
+        relayOnly: { type: "boolean", default: false },
+        quality: { type: "string", enum: ["low", "high"] },
+        images: {
+          type: "array",
+          maxItems: 3,
+          items: { type: "string", format: "uri" },
+        },
+        extra: {
+          type: "object",
+          required: ["seed"],
+          properties: { seed: { type: "integer" } },
+        },
+      },
+    });
+  });
+});
+
+it("真实image.generate契约隐藏路由注入userId，并要求generationId", async () => {
+  clearRegistry();
+  await import("../uol/operations/image-generation");
+  bindExecute("image.generate", async (input: unknown) => input);
+  const tool = buildUserMcpTools(apiKeyPrincipal).find(
+    (candidate) => candidate.name === "image.generate"
+  );
+  expect(tool?.inputSchema.properties).not.toHaveProperty("userId");
+  expect(tool?.inputSchema.required).toEqual(
+    expect.arrayContaining(["prompt", "generationId"])
+  );
+  expect(tool?.inputSchema.required).not.toContain("userId");
 });

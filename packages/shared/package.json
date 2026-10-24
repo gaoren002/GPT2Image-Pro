@@ -21,6 +21,7 @@
     "./logger": "./src/logger/index.ts",
     "./db/error-summary": "./src/db/error-summary.ts",
     "./rate-limit": "./src/rate-limit/index.ts",
+    "./rate-limit/large-body-routes": "./src/rate-limit/large-body-routes.ts",
     "./api-logger": "./src/api-logger.ts",
     "./announcements": "./src/announcements/index.ts",
     "./announcements/service": "./src/announcements/service.ts",

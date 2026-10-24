@@ -4,6 +4,7 @@ import {
   getClientIp,
   getRateLimitHeaders,
 } from "@repo/shared/rate-limit";
+import { getHandlerRateLimitType } from "@repo/shared/rate-limit/large-body-routes";
 import { type NextRequest, NextResponse } from "next/server";
 import createIntlMiddleware from "next-intl/middleware";
 import { routing } from "@/i18n/routing";
@@ -59,6 +60,12 @@ export async function middleware(request: NextRequest) {
 
     const isPrivateApiPath =
       pathname.startsWith("/api/auth/") || pathname === "/api/session/current";
+
+    // 页面 AI POST 共用 Node 侧同一个 ai/IP 桶；小 body 路径仍匹配本中间件，
+    // 仅把计数交给真实 handler，避免 Edge/Node 无 Redis 时分桶或重复计数。
+    if (request.method === "POST" && getHandlerRateLimitType(pathname)) {
+      return NextResponse.next();
+    }
 
     // 白名单模式：只对匹配的敏感路由做限流。认证类路由（登录、注册、发码、
     // 重置密码）也在此限流，因此必须先于下方认证路径的 no-store 放行执行；
@@ -159,13 +166,18 @@ export async function middleware(request: NextRequest) {
 
   // 执行国际化中间件
   const response = intlMiddleware(request);
-  return isProtectedRoute || isAuthRoute ? setPrivateNoStore(response) : response;
+  return isProtectedRoute || isAuthRoute
+    ? setPrivateNoStore(response)
+    : response;
 }
 
 /**
  * 中间件匹配配置
  *
- * 现在也匹配 API 路由，以便进行全局限流
+ * 保留 API、页面和 Server Action 的现有保护，仅精确排除已接管限流的大 body API。
+ * Next 会在进入 middleware 前复制并缓冲 body；在函数内提前 return 不能避免复制。
+ * 三个站内入口由 withApiLogging 在读 body 前使用原 ai/IP 桶；v1 保留原并发队列规则。
+ * 此处必须保留静态字面量，不能由 classifier 动态生成；两者由真实 Next matcher 测试核对。
  */
 export const config = {
   matcher: [
@@ -176,8 +188,8 @@ export const config = {
      * - favicon.ico (favicon file)
      * - public folder files
      *
-     * 注意: 现在包含 /api 路由以便进行限流
+     * 大请求只排除完整路径与尾斜线，不排除相似前缀、子路径或所有 Server Action。
      */
-    "/((?!_next/static|_next/image|favicon.ico|site\\.webmanifest|sitemap\\.xml|robots\\.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|site\\.webmanifest|sitemap\\.xml|robots\\.txt|api/(?:images/(?:chat|edit)|editable-file/generate)/?$|(?:api/)?v1/(?:images/edits|agents/images|chat/completions|responses|ppts|psds)/?$|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };

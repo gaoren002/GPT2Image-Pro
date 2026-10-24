@@ -1,4 +1,5 @@
 import type { RateLimitType } from "@repo/shared/rate-limit";
+import { getHandlerRateLimitType } from "@repo/shared/rate-limit/large-body-routes";
 
 /**
  * API 路由限流配置（白名单模式）
@@ -29,6 +30,8 @@ const API_RATE_LIMITS: Array<{ pattern: RegExp; type: RateLimitType }> = [
  * @returns 限流类型，未匹配返回 null（不限流）
  */
 export function getApiRateLimitType(pathname: string): RateLimitType | null {
+  const handlerType = getHandlerRateLimitType(pathname);
+  if (handlerType) return handlerType;
   for (const { pattern, type } of API_RATE_LIMITS) {
     if (pattern.test(pathname)) {
       return type;

@@ -15,19 +15,29 @@ const state = vi.hoisted(() => ({
   putObject: vi.fn(),
   expandAsyncImage: false,
   failCompletionUpdate: false,
+  failMarkerUpdate: false,
+  priorConsumption: false,
+  dispatch: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
   inserts: [] as Record<string, unknown>[],
   updates: [] as Record<string, unknown>[],
 }));
 // 这些用例验证协议/回退/计价；安全连接层在 safe-api-fetch.test 独立验证。
 vi.mock("./safe-api-fetch", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./safe-api-fetch")>()),
-  fetchApiRequest: (_config: unknown, url: string, init?: RequestInit) => fetch(url, init),
+  fetchApiRequest: (_config: unknown, url: string, init?: RequestInit) =>
+    fetch(url, init),
 }));
 
 vi.mock("@repo/database", () => ({
   db: {
     select: () => ({
-      from: () => ({ where: () => ({ limit: async () => [] }) }),
+      from: () => ({
+        where: () => ({
+          // 只有任务 ID 复用检查会命中账本；其余查询保持空结果。
+          limit: async () =>
+            state.priorConsumption ? [{ id: "prior-charge" }] : [],
+        }),
+      }),
     }),
     insert: () => ({
       values: (row: Record<string, unknown>) => {
@@ -44,6 +54,14 @@ vi.mock("@repo/database", () => ({
         where: () => {
           if (state.failCompletionUpdate && row.status === "completed")
             throw new Error("completion database unavailable");
+          if (
+            state.failMarkerUpdate &&
+            metadataParams(row).some(
+              (value) =>
+                typeof value === "string" && value.includes("unconfirmed")
+            )
+          )
+            return Promise.reject(new Error("marker database unavailable"));
           state.updates.push(row);
           return Object.assign(Promise.resolve([]), {
             returning: async () =>
@@ -108,9 +126,12 @@ vi.mock("@/features/image-backend-pool/service", async (importOriginal) => ({
   releaseImageBackendInflightLease: vi.fn(),
   recordImageBackendSchedulerSwitch: vi.fn(),
 }));
-vi.mock("@/features/external-api/quota", () => ({
-  reserveExternalApiKeyCredits: vi.fn(),
-  refundExternalApiKeyCredits: vi.fn(),
+// 本文件验证中转交付与结算边界；派发 CAS 语义由 relay-initial-charge-pipeline.test 覆盖。
+vi.mock("@repo/shared/relay-initial-charge", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@repo/shared/relay-initial-charge")
+  >()),
+  dispatchRelayInitialCharge: (...args: unknown[]) => state.dispatch(...args),
 }));
 vi.mock("./queue", () => ({
   estimateImageGenerationQueueBytes: () => 0,
@@ -151,8 +172,9 @@ vi.mock("./transparent-fallback", () => ({
   isTransparentUnsupportedError: () => false,
 }));
 
+import { logWarn } from "@repo/shared/logger";
+import { RelayInitialDispatchError } from "@repo/shared/relay-initial-charge";
 import { runImageGenerationForUser } from "./operations";
-import { refundExternalApiKeyCredits } from "@/features/external-api/quota";
 import { generateImage, editImage, generateChatImage } from "./service";
 import {
   getImageCreditCostBreakdown,
@@ -217,6 +239,9 @@ beforeEach(() => {
   state.readImage.mockReset();
   state.expandAsyncImage = false;
   state.failCompletionUpdate = false;
+  state.failMarkerUpdate = false;
+  state.priorConsumption = false;
+  state.dispatch.mockReset().mockResolvedValue(undefined);
   state.updates.length = 0;
   state.initial = member("web", 2);
   state.debit.mockReset().mockResolvedValue({ success: true });
@@ -344,6 +369,101 @@ describe("async 结果在成功结算之前检查交付边界", () => {
   });
 });
 
+/** 提取真实 Drizzle JSON 拼接的参数，用于断言写入的 metadata 片段。 */
+function metadataParams(row: Record<string, unknown>) {
+  return row.metadata
+    ? new PgDialect().sqlToQuery(row.metadata as SQL).params
+    : [];
+}
+
+describe("首笔扣费结果与任务 ID 复用", () => {
+  it("账本已有该任务 ID 的消费时直接拒绝复用，不认领任务行也不扣费", async () => {
+    state.priorConsumption = true;
+    const result = await runImageGenerationForUser(input);
+    expect(result.error).toBe(
+      "Generation task ID is already in use. Please start a new task."
+    );
+    expect(state.inserts).toHaveLength(0);
+    expect(state.debit).not.toHaveBeenCalled();
+  });
+
+  it("首笔结果未知时任务保持 pending 并打上未确认标记，交超时清扫按 0 结算", async () => {
+    state.debit.mockRejectedValueOnce(
+      new Error("Connection terminated unexpectedly")
+    );
+    const result = await runImageGenerationForUser(input);
+    expect(result.error).toContain("Billing confirmation was interrupted");
+    expect(state.updates.some((row) => row.status === "failed")).toBe(false);
+    expect(
+      state.updates.some((row) =>
+        metadataParams(row).some(
+          (value) => typeof value === "string" && value.includes("unconfirmed")
+        )
+      )
+    ).toBe(true);
+    expect(state.web).not.toHaveBeenCalled();
+  });
+
+  it("未确认标记写入失败时记录告警，任务仍保持 pending 并按结果未知返回", async () => {
+    state.failMarkerUpdate = true;
+    state.debit.mockRejectedValueOnce(
+      new Error("Connection terminated unexpectedly")
+    );
+    const result = await runImageGenerationForUser(input);
+    expect(result.error).toContain("Billing confirmation was interrupted");
+    expect(vi.mocked(logWarn)).toHaveBeenCalledWith(
+      "Initial charge unconfirmed marker write failed",
+      expect.objectContaining({ generationId: "billing-task" })
+    );
+    expect(state.updates.some((row) => row.status === "failed")).toBe(false);
+    expect(state.web).not.toHaveBeenCalled();
+  });
+
+  it("首笔确定被拒（余额不足）时立即标记失败，不写未确认标记", async () => {
+    state.debit.mockRejectedValueOnce(
+      Object.assign(new Error("积分不足: 需要 2.54，可用 0"), {
+        name: "InsufficientCreditsError",
+      })
+    );
+    const result = await runImageGenerationForUser(input);
+    expect(result.error).toContain("积分不足");
+    expect(state.updates.some((row) => row.status === "failed")).toBe(true);
+    expect(
+      state.updates.some((row) =>
+        metadataParams(row).some(
+          (value) => typeof value === "string" && value.includes("unconfirmed")
+        )
+      )
+    ).toBe(false);
+  });
+
+  it.each([
+    ["unknown", true],
+    ["rejected", false],
+  ] as const)("中转派发 CAS 结果为 %s 时是否由本请求投递目标 0 退款：%s", async (outcome, refunds) => {
+    state.dispatch.mockRejectedValueOnce(
+      new RelayInitialDispatchError(outcome)
+    );
+    const result = await runImageGenerationForUser({
+      ...input,
+      relayOnly: true,
+      asyncDelivery: true,
+    });
+    expect(result.error).toContain("dispatch unavailable");
+    expect(state.web).not.toHaveBeenCalled();
+    if (refunds) {
+      expect(state.refund).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targetCredits: 0,
+          sourceRef: "billing-task:relay-dispatch-refund",
+        })
+      );
+    } else {
+      expect(state.refund).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("按最终实际成员计价", () => {
   it("本地原扣 10，其他路径已退 8，本次封顶退 2 后 generation 记录权威净额 0", async () => {
     state.initial = member("origin", 7.87);
@@ -366,7 +486,10 @@ describe("按最终实际成员计价", () => {
       state.updates.findLast((row) => row.status === "completed")
         ?.creditsConsumed
     ).toBe(0);
-    expect(refundExternalApiKeyCredits).not.toHaveBeenCalled();
+    // Key 额度随首笔消费在同一事务内扣减，退款也由同一退款事务退回原 Key。
+    expect(state.debit.mock.calls[0]?.[0].externalApiKeyId).toBe(
+      "new-key-reservation"
+    );
   });
   it.each([
     { refunded: false, amount: 0, remainingDebited: 1.2 },
@@ -383,7 +506,7 @@ describe("按最终实际成员计价", () => {
     });
     expect(result.error).toBeUndefined();
     expect(result.creditsConsumed).toBe(refund.remainingDebited);
-    expect(refundExternalApiKeyCredits).not.toHaveBeenCalled();
+    expect(state.debit.mock.calls[0]?.[0].externalApiKeyId).toBe("key-owned");
   });
   it.each([
     4, 0.5,
@@ -561,9 +684,11 @@ describe("按最终实际成员计价", () => {
     state.web
       .mockResolvedValueOnce({ error: "HTTP 401: token_invalidated" })
       .mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
-    state.debit
-      .mockResolvedValueOnce({ success: true })
-      .mockRejectedValueOnce(new Error("Insufficient credits"));
+    state.debit.mockResolvedValueOnce({ success: true }).mockRejectedValueOnce(
+      Object.assign(new Error("Insufficient credits"), {
+        name: "InsufficientCreditsError",
+      })
+    );
     const result = await runImageGenerationForUser(input);
     expect(result.error).toBe("Insufficient credits");
     expect(result.creditsConsumed).toBe(0);
@@ -571,6 +696,71 @@ describe("按最终实际成员计价", () => {
     expect(finalMetadata().actualBilling).toMatchObject({
       backendId: "expensive",
     });
+  });
+
+  it("补扣结果未知时失败结算把这笔补扣计入退款上限，由退款事务按账本裁剪", async () => {
+    state.resolve.mockResolvedValueOnce({ config: member("expensive", 4) });
+    state.web
+      .mockResolvedValueOnce({ error: "HTTP 401: token_invalidated" })
+      .mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
+    state.debit
+      .mockResolvedValueOnce({ success: true })
+      .mockRejectedValueOnce(new Error("Connection terminated unexpectedly"));
+    const result = await runImageGenerationForUser(input);
+    expect(result.error).toContain("Billing confirmation was interrupted");
+    // 已确认首笔 2 倍基价，补扣 2 倍基价可能已入账：申请退回两者之和。
+    expect(state.refund.mock.calls[0]?.[0]).toMatchObject({
+      amount: baseCredits * 4,
+      targetCredits: 0,
+    });
+  });
+
+  it.each([
+    ["结果未知", new Error("Connection terminated unexpectedly"), true],
+    [
+      "余额不足",
+      Object.assign(new Error("Insufficient credits"), {
+        name: "InsufficientCreditsError",
+      }),
+      false,
+    ],
+  ] as const)("聊天纯文本轮次补扣%s时只保留已确认净额", async (_label, failure, unknown) => {
+    state.web.mockResolvedValueOnce({
+      responseText: "plain answer",
+      agentRoundCount: 3,
+    });
+    state.debit
+      .mockResolvedValueOnce({ success: true })
+      .mockRejectedValueOnce(failure);
+    // 模拟补扣其实已入账：退款事务按“净额 - 目标”裁剪，剩余净额恰为目标。
+    state.refund.mockImplementationOnce(
+      async (params: { amount: number; targetCredits?: number }) => ({
+        refunded: true,
+        amount: params.amount,
+        remainingDebited: params.targetCredits ?? 0,
+      })
+    );
+    const result = await runImageGenerationForUser({
+      ...input,
+      mode: "chat",
+      model: "gpt-5.5",
+      imageModel: "gpt-image-2",
+    });
+    const initial = state.debit.mock.calls[0]?.[0].amount;
+    const supplement = state.debit.mock.calls[1]?.[0].amount;
+    expect(supplement).toBeGreaterThan(0);
+    if (unknown) {
+      expect(result.error).toContain("Billing confirmation was interrupted");
+      // 补扣可能已入账：以已确认首笔额为目标只申请退回这笔补扣。
+      expect(state.refund.mock.calls[0]?.[0]).toMatchObject({
+        amount: supplement,
+        targetCredits: initial,
+      });
+    } else {
+      expect(result.error).toBe("Insufficient credits");
+      expect(state.refund).not.toHaveBeenCalled();
+    }
+    expect(result.creditsConsumed).toBe(initial);
   });
 
   it.each([

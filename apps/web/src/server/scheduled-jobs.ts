@@ -114,6 +114,15 @@ export async function runImageMaintenanceJob() {
     }),
   ]);
 
+  const relayInitialRecovery = await step(
+    "image-generation.recoverRelayInitialCharges",
+    () =>
+      invokeOperation(
+        "image-generation.recoverRelayInitialCharges",
+        { limit: 100 },
+        MAINTENANCE_PRINCIPAL
+      )
+  );
   // 超时终态已提交后再补偿/重放，退款失败不依赖 pending 下次仍被扫描。
   const refundRecovery = await step("image-generation.retryRefunds", () =>
     invokeOperation(
@@ -145,6 +154,7 @@ export async function runImageMaintenanceJob() {
     success: true,
     editableRecovery,
     refundRecovery,
+    relayInitialRecovery,
     backendRetention,
     epayRecovery,
     ...summarizeExpiredPendingGenerations(pending),

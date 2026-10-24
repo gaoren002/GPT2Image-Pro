@@ -27,6 +27,12 @@ import {
   or,
   sql,
 } from "drizzle-orm";
+import {
+  PURE_RELAY_CREDIT_DESCRIPTION,
+  validateRelayInitialCapture,
+  relayInitialCaptureMetadata,
+} from "../relay-initial-charge-contract";
+import { markInvalidChargeRequest } from "./charge-outcome";
 import { logEvent } from "../logger/index";
 import { getRuntimeSettingNumber } from "../system-settings";
 import { CREDIT_CONFIG_DEFAULTS } from "./config";
@@ -209,6 +215,8 @@ function buildGenerationRefundPlan(
 export const EDITABLE_TASK_ATOMIC_CAPTURE_VERSION = 1;
 
 export interface ConsumeCreditsParams {
+  /** pureRelay 正数初始消费的财务意图；与其余任务认领互斥，由同一资金事务写入。 */
+  relayInitialCapture?: import("../relay-initial-charge-contract").RelayInitialCaptureIntent;
   /** 任务行锁在批次/Key/钱包前获得，prepared→running 与本次扣费一起提交。 */
   editableTaskClaim?: import("../editable-task-contract").EditableTaskClaim;
   /** 用户 ID */
@@ -885,24 +893,44 @@ export async function consumeCredits(
     externalApiKeyId,
     generationSettlement,
   } = params;
-  const amount = normalizeCreditAmount(params.amount);
-  if (params.editableTaskClaim && params.generationSettlement) {
-    throw new Error(
-      "Editable task claim and generation settlement are mutually exclusive"
-    );
-  }
+  // 事务前的参数校验没有任何写入；失败统一标记 invalid_charge_request，
+  // 调用方据此确定本次未扣费，而不是当作提交结果未知。
+  const { amount, relayCapture, captureMetadata } = (() => {
+    try {
+      const amount = normalizeCreditAmount(params.amount);
+      // 三类 capture 意图必须在任何资金/到期清理副作用前互斥校验。
+      if (
+        [
+          params.editableTaskClaim,
+          params.generationSettlement,
+          params.relayInitialCapture,
+        ].filter(Boolean).length > 1
+      ) {
+        throw new Error("Capture intents are mutually exclusive");
+      }
 
-  if (amount <= 0) {
-    throw new Error("消费数量必须大于 0");
-  }
-  if (
-    generationSettlement &&
-    (!sourceRef?.startsWith(`${generationSettlement.generationId}:`) ||
-      metadata?.generationId !== generationSettlement.generationId)
-  ) {
-    throw new Error("Invalid generation settlement capture");
-  }
+      if (amount <= 0) {
+        throw new Error("消费数量必须大于 0");
+      }
+      if (
+        generationSettlement &&
+        (!sourceRef?.startsWith(`${generationSettlement.generationId}:`) ||
+          metadata?.generationId !== generationSettlement.generationId)
+      ) {
+        throw new Error("Invalid generation settlement capture");
+      }
 
+      const relayCapture = params.relayInitialCapture
+        ? validateRelayInitialCapture(params.relayInitialCapture, params)
+        : undefined;
+      const captureMetadata = relayCapture
+        ? relayInitialCaptureMetadata(metadata, relayCapture)
+        : metadata;
+      return { amount, relayCapture, captureMetadata };
+    } catch (error) {
+      throw markInvalidChargeRequest(error);
+    }
+  })();
   await processExpiredBatches({ userId });
 
   try {
@@ -1111,10 +1139,12 @@ export async function consumeCredits(
         amount,
         debitAccount,
         creditAccount,
-        description: description ?? `消费于 ${serviceName}`,
+        description: relayCapture
+          ? PURE_RELAY_CREDIT_DESCRIPTION
+          : (description ?? `消费于 ${serviceName}`),
         sourceRef,
         metadata: {
-          ...metadata,
+          ...captureMetadata,
           // 新 capture 归属必须取服务端参数；缺省保持旧独立预留调用的退款归属。
           ...(externalApiKeyId !== undefined ? { externalApiKeyId } : {}),
           serviceName,
@@ -1171,6 +1201,17 @@ export async function consumeCredits(
 
       if (!updatedBalance) {
         throw new InsufficientCreditsError(amount, balanceRecord.balance);
+      }
+
+      if (relayCapture) {
+        const { recordRelayInitialCaptureInTransaction } = await import(
+          "../relay-initial-charge-guard"
+        );
+        await recordRelayInitialCaptureInTransaction(tx, relayCapture, {
+          ...params,
+          amount,
+          transactionId,
+        });
       }
 
       return {

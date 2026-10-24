@@ -1,4 +1,4 @@
-/** R11 images-maintenance 接线：保留 hold expiry，先扫描终态再调用退款恢复操作。 */
+/** R11 images-maintenance 接线：保留 hold expiry，先扫描终态，再恢复中转初始意图并调用退款恢复操作。 */
 import { expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -47,6 +47,11 @@ it("images-maintenance 保留升级预留释放并执行退款恢复", async () 
       { type: "cron", job: "images-maintenance" },
     ],
     [
+      "image-generation.recoverRelayInitialCharges",
+      { limit: 100 },
+      { type: "cron", job: "images-maintenance" },
+    ],
+    [
       "image-generation.retryRefunds",
       { limit: 100 },
       { type: "cron", job: "images-maintenance" },
@@ -57,9 +62,11 @@ it("images-maintenance 保留升级预留释放并执行退款恢复", async () 
       { type: "cron", job: "images-maintenance" },
     ],
   ]);
+  // 超时终态先提交，中转初始意图恢复再入队，同一轮的退款重放即可消费新意图。
   expect(mocks.expire.mock.invocationCallOrder[0]).toBeLessThan(
     mocks.invoke.mock.invocationCallOrder[3] ?? 0
   );
   expect(result.editableRecovery).toEqual({ settled: 1 });
+  expect(result.relayInitialRecovery).toEqual({ settled: 1 });
   expect(result.refundRecovery).toEqual({ settled: 1 });
 });

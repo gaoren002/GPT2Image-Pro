@@ -7,7 +7,10 @@ import {
   processGenerationRefundOutbox,
   submitGenerationRefund,
 } from "./generation-refund-outbox";
-import { getFailedGenerationTargetCreditsFromMetadata } from "./generation-settlement";
+import {
+  getFailedGenerationTargetCreditsFromMetadata,
+  isInitialChargeUnconfirmed,
+} from "./generation-settlement";
 import { logError, logWarn } from "./logger";
 import { describeErrorForLog, isDatabaseError } from "./db/error-summary";
 import { z } from "zod";
@@ -512,11 +515,14 @@ export async function expireStalePendingGenerations(
       }
       continue;
     }
-    const targetCredits = getFailedGenerationTargetCreditsFromMetadata({
-      reason: "generation_error",
-      chargedCredits,
-      metadata: row.metadata,
-    });
+    // 首笔扣费结果未知的任务从未开工，按 0 结算；其余沿用生成失败的目标。
+    const targetCredits = isInitialChargeUnconfirmed(row.metadata)
+      ? 0
+      : getFailedGenerationTargetCreditsFromMetadata({
+          reason: "generation_error",
+          chargedCredits,
+          metadata: row.metadata,
+        });
     const creditsToRefund = computeTimeoutRefund({
       chargedCredits: completion.maxRefundAmount,
       targetCredits,

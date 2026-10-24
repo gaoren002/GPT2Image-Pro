@@ -35,3 +35,6 @@ import "./external-api";
 import "./support";
 // 可编辑文件持久任务查询和到期恢复
 import "./editable-task";
+
+// 纯中转初始财务状态恢复
+import "./relay-initial-charge";

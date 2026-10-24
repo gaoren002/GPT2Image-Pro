@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ExternalApiKeyQuotaExceededError,
   getExternalApiKeyQuotaRemaining,
-  isExternalApiKeyQuotaExceededError,
   normalizeExternalApiKeyCreditLimit,
   roundQuotaCredits,
 } from "./quota-math";
@@ -48,18 +46,5 @@ describe("roundQuotaCredits", () => {
   it("rounds at the two-decimal boundary without float drift", () => {
     expect(roundQuotaCredits(0.1 + 0.2)).toBe(0.3);
     expect(roundQuotaCredits(1.555)).toBe(1.56);
-  });
-});
-
-describe("ExternalApiKeyQuotaExceededError", () => {
-  it("carries the required / remaining / limit / used context", () => {
-    const error = new ExternalApiKeyQuotaExceededError(5, 2, 10, 8);
-    expect(error.code).toBe("api_key_quota_exceeded");
-    expect(error.required).toBe(5);
-    expect(error.remaining).toBe(2);
-    expect(error.limit).toBe(10);
-    expect(error.used).toBe(8);
-    expect(isExternalApiKeyQuotaExceededError(error)).toBe(true);
-    expect(isExternalApiKeyQuotaExceededError(new Error("x"))).toBe(false);
   });
 });

@@ -1,7 +1,18 @@
 /** 统一图像生成管线：校验套餐和模型、选择后端并完成队列、扣费与结果保存。 */
 import { db } from "@repo/database";
 import { creditsTransaction, generation, user } from "@repo/database/schema";
+import {
+  GENERATION_TASK_REUSED_CODE,
+  isDefinitiveChargeRejection,
+  planChargeSettlement,
+} from "@repo/shared/credits/charge-outcome";
 import { consumeCredits } from "@repo/shared/credits/core";
+import {
+  createRelayInitialCapture,
+  dispatchRelayInitialCharge,
+  PURE_RELAY_CREDIT_DESCRIPTION,
+  RelayInitialDispatchError,
+} from "@repo/shared/relay-initial-charge";
 import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
   refundGenerationCredits,
@@ -12,7 +23,11 @@ import {
   readGenerationNetCredits,
   readGenerationCompletionRefundPlan,
 } from "@repo/shared/generation-maintenance";
-import { getFailedGenerationTargetCredits } from "@repo/shared/generation-settlement";
+import {
+  getFailedGenerationTargetCredits,
+  INITIAL_CHARGE_UNCONFIRMED_METADATA,
+} from "@repo/shared/generation-settlement";
+import { describeErrorForLog } from "@repo/shared/db/error-summary";
 import { logWarn } from "@repo/shared/logger";
 import { toClientErrorMessage } from "./error-sanitize";
 import { readGeneratedImage } from "./generated-image";
@@ -45,10 +60,6 @@ import {
   releaseImageBackendInflightLease,
 } from "@/features/image-backend-pool/service";
 import type { ImageBackendRequestKind } from "@/features/image-backend-pool/types";
-import {
-  reserveExternalApiKeyCredits,
-  refundExternalApiKeyCredits,
-} from "@/features/external-api/quota";
 import {
   buildGenerationBillingPolicy,
   getImageSuccessTargetCredits,
@@ -174,6 +185,11 @@ type RunImageGenerationInput =
       requiresResponsesBackend?: boolean;
       webChat?: boolean;
     } & ChatImageParams);
+
+// 扣费结果未知时返回给调用方。首笔扣费由超时清扫按账本退款；结算阶段的
+// 未确认补扣由失败结算计入退款上限。两者都按账本净额裁剪，不会多退。
+const CHARGE_OUTCOME_UNKNOWN_MESSAGE =
+  "Billing confirmation was interrupted. Unconfirmed charges for this task will be refunded automatically.";
 
 const DEFAULT_FORCE_WEB_MIN_PIXELS = 660_000;
 const DEFAULT_FORCE_WEB_MAX_PIXELS = 2_000_000;
@@ -511,6 +527,31 @@ function resolveStoredImageFormat(buffer: Buffer, requestedFormat?: string) {
     extension: getOutputFormatExtension(format),
     detected: Boolean(detectedFormat),
   };
+}
+
+/**
+ * 判断该用户账本里是否已有该任务 ID 的消费记录。
+ *
+ * 退款按“用户 + metadata.generationId”汇总净扣费封顶，同一 ID 的旧扣费会被新任务
+ * 的退款借用，因此已有消费的 ID 不能再次认领。查询命中 0052 的
+ * (user_id, metadata->>'generationId') 索引，单条有界。
+ */
+async function hasPriorGenerationConsumption(
+  userId: string,
+  generationId: string
+) {
+  const [existing] = await db
+    .select({ id: creditsTransaction.id })
+    .from(creditsTransaction)
+    .where(
+      and(
+        eq(creditsTransaction.userId, userId),
+        eq(creditsTransaction.type, "consumption"),
+        sql`${creditsTransaction.metadata}->>'generationId' = ${generationId}`
+      )
+    )
+    .limit(1);
+  return Boolean(existing);
 }
 
 function isPendingGeneration(generationId: string, userId: string) {
@@ -1805,6 +1846,18 @@ async function runQueuedImageGenerationForUser({
               moderationFailureCredits,
             },
   };
+  // 删除历史记录后同一任务 ID 可以再次认领，但旧任务的扣费仍在账本里；退款按
+  // “用户 + generationId”汇总净扣费封顶，复用会让本次失败、超时或未确认补扣的
+  // 退款借用旧任务的扣费。认领前按账本拒绝复用（命中 0052 的 generationId 索引）。
+  if (
+    billingPolicy.chargesCredits &&
+    (await hasPriorGenerationConsumption(input.userId, generationId))
+  ) {
+    return {
+      error: "Generation task ID is already in use. Please start a new task.",
+      generationId,
+    };
+  }
   if (!relayOnly) {
     const [claimed] = await db
       .insert(generation)
@@ -1819,7 +1872,17 @@ async function runQueuedImageGenerationForUser({
     }
   }
 
+  const relayInitialCapture =
+    relayOnly && initialCreditCharge > 0
+      ? createRelayInitialCapture(
+          generationId,
+          new Date(startedAt + IMAGE_GENERATION_PENDING_TIMEOUT_MS)
+        )
+      : undefined;
   let chargedCredits = 0;
+  // 结果未知的扣费合计（COMMIT 可能已生效但确认丢失）。失败结算据此放大退款
+  // 申请上限，由退款事务按账本净额裁剪；退款返回权威净额后清零。
+  let unconfirmedCredits = 0;
   const refundChargedCredits = async (
     amount: number,
     targetCredits: number,
@@ -1840,7 +1903,9 @@ async function runQueuedImageGenerationForUser({
     });
     // 钱包与原消费所属的 Key 已在同事务处理。即使本次 no-op，其他路径也可能
     // 已经退款；按权威剩余净额覆盖本地旧值，不能用本地旧扣费减本次退额推算。
+    // 权威净额已包含实际入账的未确认扣费，本地未确认额随之失效。
     chargedCredits = roundCreditAmount(refund.remainingDebited);
+    unconfirmedCredits = 0;
   };
   const chargeAdditionalCredits = async (
     amount: number,
@@ -1851,53 +1916,49 @@ async function runQueuedImageGenerationForUser({
   ) => {
     if (!billingPolicy.chargesCredits || amount <= 0) return;
     const roundedAmount = roundCreditAmount(amount);
-    // 只围栏存图后的终态补扣；Key 与钱包一起提交，确认丢失不能释放已消费的 Key。
+    // 只围栏存图后的终态补扣；generationSettlement 在同一事务内锁定 settling 行。
     const terminalCapture =
       input.asyncDelivery === true &&
       !relayOnly &&
       sourceRef === `${generationId}:image-actual-size:charge`;
-    if (!terminalCapture) {
-      await reserveExternalApiKeyCredits({
-        apiKeyId: input.apiKeyId,
-        userId: input.userId,
-        amount: roundedAmount,
-      });
-    }
-    let userCreditsConsumed = false;
-    try {
-      const consumption = await consumeCredits({
-        userId: input.userId,
-        amount: roundedAmount,
-        serviceName,
-        description,
-        sourceRef,
-        ...(terminalCapture
-          ? {
-              externalApiKeyId: input.apiKeyId,
-              generationSettlement: { generationId },
-            }
-          : {}),
-        metadata: {
-          ...metadata,
-          externalApiKeyId: input.apiKeyId,
-        },
-      });
-      // 历史记录可以被用户删除，不能只依赖 generation 主键阻止重放。
-      // 旧扣费命中代表没有发生本次消费，须拒绝执行并释放刚预留的 Key 配额。
-      if (consumption.alreadyConsumed) {
-        throw new Error(
-          "Generation task ID is already in use. Please start a new task."
+    const initialRelayCapture =
+      sourceRef === `${generationId}:charge` ? relayInitialCapture : undefined;
+    // Key 额度始终随钱包在同一消费事务内扣减：回滚时两者都不变，COMMIT 后确认
+    // 丢失时两者都已入账，不会出现“钱包已扣、Key 被单独退回”的分裂状态。
+    const consumption = await consumeCredits({
+      userId: input.userId,
+      amount: roundedAmount,
+      serviceName,
+      description: relayOnly ? PURE_RELAY_CREDIT_DESCRIPTION : description,
+      sourceRef,
+      // 空字符串与旧的独立预留一致视为“无 Key”，不能让所有扣费因找不到 Key 失败。
+      externalApiKeyId: input.apiKeyId || undefined,
+      ...(initialRelayCapture
+        ? { relayInitialCapture: initialRelayCapture }
+        : {}),
+      ...(terminalCapture ? { generationSettlement: { generationId } } : {}),
+      metadata: {
+        ...metadata,
+        externalApiKeyId: input.apiKeyId,
+      },
+    }).catch((error: unknown) => {
+      // 无法证明已回滚的异常可能已经入账，记入未确认额供失败结算放大退款上限。
+      if (!isDefinitiveChargeRejection(error)) {
+        unconfirmedCredits = roundCreditAmount(
+          unconfirmedCredits + roundedAmount
         );
       }
-      userCreditsConsumed = true;
-    } finally {
-      if (!userCreditsConsumed && !terminalCapture) {
-        await refundExternalApiKeyCredits({
-          apiKeyId: input.apiKeyId,
-          userId: input.userId,
-          amount: roundedAmount,
-        });
-      }
+      throw error;
+    });
+    // 历史记录可以被用户删除，不能只依赖 generation 主键阻止重放。
+    // 旧扣费命中代表本次没有发生消费，Key 也未变动，须拒绝执行。
+    if (consumption.alreadyConsumed) {
+      throw Object.assign(
+        new Error(
+          "Generation task ID is already in use. Please start a new task."
+        ),
+        { code: GENERATION_TASK_REUSED_CODE }
+      );
     }
     chargedCredits = roundCreditAmount(chargedCredits + roundedAmount);
   };
@@ -1910,12 +1971,18 @@ async function runQueuedImageGenerationForUser({
   ) => {
     if (!billingPolicy.chargesCredits) return;
 
-    const roundedTarget = roundCreditAmount(Math.max(0, targetCredits));
-    const delta = roundCreditAmount(roundedTarget - chargedCredits);
-    if (delta > 0) {
+    // 结果未知的补扣可能已入账：退款按“已确认 + 未确认”申请并由退款事务裁剪，
+    // 补扣只补两者之和以外的部分，宁可少扣也不重复扣。
+    const plan = planChargeSettlement({
+      confirmedCredits: chargedCredits,
+      unconfirmedCredits,
+      targetCredits,
+    });
+    const roundedTarget = plan.targetCredits;
+    if (plan.chargeCredits > 0) {
       // 结算补扣用独立 sourceRef，避免与初始扣费 / 退款 sourceRef 冲突而被误判重复。
       await chargeAdditionalCredits(
-        delta,
+        plan.chargeCredits,
         serviceName,
         description,
         {
@@ -1929,9 +1996,9 @@ async function runQueuedImageGenerationForUser({
       );
     }
 
-    if (delta < 0) {
+    if (plan.refundRequestCredits > 0) {
       await refundChargedCredits(
-        Math.abs(delta),
+        plan.refundRequestCredits,
         roundedTarget,
         sourceRef,
         description,
@@ -1976,11 +2043,13 @@ async function runQueuedImageGenerationForUser({
             ? "chat-input"
             : "image-generation"
           : "content-moderation",
-        billingPolicy.chargeImageCredits
-          ? isChatInput
-            ? `Chat input: ${input.prompt.substring(0, 50)}`
-            : `Image generation: ${input.prompt.substring(0, 50)}`
-          : `Content moderation: ${input.prompt.substring(0, 50)}`,
+        relayOnly
+          ? PURE_RELAY_CREDIT_DESCRIPTION
+          : billingPolicy.chargeImageCredits
+            ? isChatInput
+              ? `Chat input: ${input.prompt.substring(0, 50)}`
+              : `Image generation: ${input.prompt.substring(0, 50)}`
+            : `Content moderation: ${input.prompt.substring(0, 50)}`,
         {
           generationId,
           mode: input.mode,
@@ -1994,6 +2063,38 @@ async function runQueuedImageGenerationForUser({
         `${generationId}:charge`
       );
     } catch (error: unknown) {
+      if (!isDefinitiveChargeRejection(error)) {
+        // 首笔扣费结果未知：COMMIT 可能已生效。任务行保持 pending，超时清扫会按
+        // 行内记录的首笔额申请退款并按账本净额封顶；此处立即标 failed 会让已入账
+        // 的扣费无人退回，立即退款又可能早于仍在途的 COMMIT。中转模式没有任务行，
+        // 由同事务写入的初始意图负责恢复。
+        logWarn("Initial generation charge outcome unknown", {
+          generationId,
+          relayOnly,
+          error: describeErrorForLog(error),
+          source: "image-generation",
+        });
+        if (!relayOnly) {
+          // 尽力标记“首笔未确认”：任务从未审核或调用上游，清扫按目标 0 全额退回；
+          // 标记失败时清扫退回普通生成失败的目标，记录告警以便核对少退的审核费。
+          await db
+            .update(generation)
+            .set({
+              metadata: sql`COALESCE(${generation.metadata}, '{}'::json)::jsonb || ${JSON.stringify(
+                INITIAL_CHARGE_UNCONFIRMED_METADATA
+              )}::jsonb`,
+            })
+            .where(isPendingGeneration(generationId, input.userId))
+            .catch((markerError: unknown) => {
+              logWarn("Initial charge unconfirmed marker write failed", {
+                generationId,
+                error: describeErrorForLog(markerError),
+                source: "image-generation",
+              });
+            });
+        }
+        return { error: CHARGE_OUTCOME_UNKNOWN_MESSAGE, generationId };
+      }
       const message =
         error instanceof Error ? error.message : "Insufficient credits";
       await db
@@ -2008,6 +2109,34 @@ async function runQueuedImageGenerationForUser({
     }
   }
 
+  if (relayInitialCapture) {
+    try {
+      // 工作前唯一 CAS；ACK 未知也不继续审核/上游。
+      await dispatchRelayInitialCharge(input.userId, relayInitialCapture);
+    } catch (error) {
+      // CAS 结果未知时状态可能已是 dispatched，到期恢复不会再退；本请求确知尚未
+      // 开工，按目标 0 投递 R11 退款，账本封顶保证与到期恢复叠加也只退一次。
+      // CAS 明确未命中时意图已过期或已被恢复认领，由恢复负责，不在此重复投递。
+      if (
+        !(error instanceof RelayInitialDispatchError) ||
+        error.outcome !== "rejected"
+      ) {
+        await refundChargedCredits(
+          chargedCredits,
+          0,
+          `${generationId}:relay-dispatch-refund`,
+          "Refund undispatched pure relay charge"
+        ).catch(() => undefined);
+      }
+      return {
+        error:
+          "Pure relay dispatch unavailable. Initial charge recovery may be pending.",
+        generationId,
+        creditsConsumed: chargedCredits,
+      };
+    }
+  }
+
   const repairAttempts: ModerationPromptRepairAttempt[] = [];
   let backendAttemptsForTimeout: GenerateImageResult["backendAttempts"];
   const isTimedOut = () =>
@@ -2019,7 +2148,12 @@ async function runQueuedImageGenerationForUser({
         moderationFailureCredits,
         moderationOnlyCredits: creditCost.moderationOnlyCredits,
       });
-      const creditsToRefund = Math.max(0, chargedCredits - targetCredits);
+      // 未确认补扣可能已入账，退款上限一并计入，由退款事务按账本净额裁剪。
+      const creditsToRefund = planChargeSettlement({
+        confirmedCredits: chargedCredits,
+        unconfirmedCredits,
+        targetCredits,
+      }).refundRequestCredits;
       const refundSourceRef = `${generationId}:timeout-refund`;
 
       const [updated] = await db
@@ -2121,6 +2255,7 @@ async function runQueuedImageGenerationForUser({
         Math.floor(configuredRepairRetries)
       )
     : 0;
+  // capture/dispatch ACK 等待已计入 startedAt，不能从 await 返回重新给20分钟。
   const deadlineSignal = AbortSignal.timeout(
     Math.max(1, IMAGE_GENERATION_PENDING_TIMEOUT_MS - (Date.now() - startedAt))
   );
@@ -2623,6 +2758,22 @@ async function runQueuedImageGenerationForUser({
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Insufficient credits";
+        const definitive = isDefinitiveChargeRejection(error);
+        if (!definitive) {
+          // 轮次补扣结果未知：与确定失败一样只保留已确认净额，未确认部分按
+          // 账本裁剪后退回；退款意图已持久化，失败时由 R11 重放。
+          try {
+            await settleChargedCredits(
+              chargedCredits,
+              "chat-text-only",
+              `${generationId}:chat-text-only-error`,
+              `Settle chat text response failure: ${input.prompt.substring(0, 50)}`,
+              { generationId, creditCost, error: message }
+            );
+          } catch {
+            /* best effort settlement */
+          }
+        }
         await db
           .update(generation)
           .set({
@@ -2632,7 +2783,9 @@ async function runQueuedImageGenerationForUser({
           })
           .where(isPendingGeneration(generationId, input.userId));
         return {
-          error: "Insufficient credits",
+          error: definitive
+            ? "Insufficient credits"
+            : CHARGE_OUTCOME_UNKNOWN_MESSAGE,
           generationId,
           creditsConsumed: chargedCredits,
         };
@@ -3110,7 +3263,9 @@ async function runQueuedImageGenerationForUser({
       })
       .where(isPendingGeneration(generationId, input.userId));
     return {
-      error: "Insufficient credits",
+      error: isDefinitiveChargeRejection(error)
+        ? "Insufficient credits"
+        : CHARGE_OUTCOME_UNKNOWN_MESSAGE,
       generationId,
       creditsConsumed: chargedCredits,
     };

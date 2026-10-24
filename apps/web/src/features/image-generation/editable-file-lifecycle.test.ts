@@ -34,8 +34,6 @@ const state = vi.hoisted(() => ({
   events: [] as string[],
   consume: vi.fn(),
   refund: vi.fn(),
-  reserveKey: vi.fn(),
-  releaseKey: vi.fn(),
   generate: vi.fn(),
   resolve: vi.fn(),
   release: vi.fn(),
@@ -79,10 +77,6 @@ vi.mock("@repo/shared/storage/signed-url", () => ({
 vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingNumber: state.setting,
   getRuntimeSettingString: async () => "generations",
-}));
-vi.mock("@/features/external-api/quota", () => ({
-  reserveExternalApiKeyCredits: state.reserveKey,
-  refundExternalApiKeyCredits: state.releaseKey,
 }));
 vi.mock("@/features/image-backend-pool/service", () => ({
   ImageBackendPoolUnavailableError: class extends Error {},
@@ -306,20 +300,6 @@ beforeEach(() => {
   state.legacyReads.length = 0;
   state.events.length = 0;
   state.setting.mockImplementation(async () => state.price);
-  state.reserveKey.mockImplementation(
-    async (params: { apiKeyId?: string; amount: number }) => {
-      if (!params.apiKeyId) return;
-      state.events.push("key-reserve");
-      if (state.keyLimit - state.keyUsed < params.amount)
-        throw new Error("API key quota exceeded");
-      state.keyUsed += params.amount;
-    }
-  );
-  state.releaseKey.mockImplementation(
-    async (params: { apiKeyId?: string; amount: number }) => {
-      if (params.apiKeyId) state.keyUsed -= params.amount;
-    }
-  );
   // 模拟消费唯一索引：认领在同一同步步骤完成，并发调用只允许一笔消费。
   state.consume.mockImplementation(async (params: ConsumeCreditsParams) => {
     state.events.push("wallet-consume");
@@ -349,7 +329,7 @@ beforeEach(() => {
       alreadyConsumed: false,
     };
   });
-  // 专用退款模拟净额封顶与钱包/原 Key 同事务退额；额外 releaseKey 会被断言发现。
+  // 专用退款模拟净额封顶与钱包/原 Key 同事务退额。
   state.refund.mockImplementation(
     async (params: Parameters<typeof refundGenerationCredits>[0]) => {
       const debit = Array.from(state.entries.values()).find(

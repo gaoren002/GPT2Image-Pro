@@ -1,3 +1,24 @@
+/**
+ * 首笔扣费提交结果未知时写入 pending 行的标记。此类任务从未审核、也未调用上游，
+ * 超时清扫按目标 0 结算（全额退回实际入账的扣费），不保留审核费。
+ */
+export const INITIAL_CHARGE_UNCONFIRMED_METADATA = {
+  initialCharge: { outcome: "unconfirmed" },
+} as const;
+
+/** 判断 generation metadata 是否带首笔扣费未确认标记。 */
+export function isInitialChargeUnconfirmed(
+  metadata: Record<string, unknown> | null | undefined
+) {
+  const initialCharge = metadata?.initialCharge;
+  return (
+    !!initialCharge &&
+    typeof initialCharge === "object" &&
+    !Array.isArray(initialCharge) &&
+    (initialCharge as Record<string, unknown>).outcome === "unconfirmed"
+  );
+}
+
 export type FailedGenerationSettlementReason =
   | "moderation_block"
   | "moderation_error"

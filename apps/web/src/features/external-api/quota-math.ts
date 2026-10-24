@@ -31,28 +31,6 @@ export function normalizeExternalApiKeyCreditLimit(
   return roundQuotaCredits(numeric);
 }
 
-export class ExternalApiKeyQuotaExceededError extends Error {
-  readonly code = "api_key_quota_exceeded";
-
-  constructor(
-    public readonly required: number,
-    public readonly remaining: number,
-    public readonly limit: number | null,
-    public readonly used: number
-  ) {
-    super(
-      `API key quota exceeded: required ${required}, remaining ${remaining}`
-    );
-    this.name = "ExternalApiKeyQuotaExceededError";
-  }
-}
-
-export function isExternalApiKeyQuotaExceededError(
-  error: unknown
-): error is ExternalApiKeyQuotaExceededError {
-  return error instanceof ExternalApiKeyQuotaExceededError;
-}
-
 /**
  * 计算剩余可用额度：不限额（limit===null）返回 null；否则 max(0, limit-used) 并两位取整。
  */

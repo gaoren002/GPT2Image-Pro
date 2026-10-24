@@ -205,7 +205,7 @@ describe("R11 崩溃和存量恢复", () => {
       user_id: "u1",
       status: "failed",
       credits_consumed: 10,
-      created_at: "2020-01-01",
+      created_at: "2020-01-01 00:00:00",
       metadata: { timeout: { targetCredits: 4 }, prompt: "secret" },
     });
     expect(await recoverFailedGenerationRefunds()).toMatchObject({
@@ -233,7 +233,7 @@ describe("R11 崩溃和存量恢复", () => {
       user_id: "u1",
       status: "pending",
       credits_consumed: 10,
-      created_at: "2020-01-01",
+      created_at: "2020-01-01 00:00:00",
       metadata: { creditCost: { moderationOnlyCredits: 2 } },
     });
     ledger.failOutboxInsert = true;
@@ -247,6 +247,26 @@ describe("R11 崩溃和存量恢复", () => {
     await processGenerationRefundOutbox();
     expect(ledger.wallet).toBe(108);
     expect(ledger.generations[0]?.credits_consumed).toBe(2);
+  });
+  it("首笔扣费未确认的 pending 超时按目标 0 全额退款，不保留审核费", async () => {
+    ledger.debit(10);
+    ledger.generations.push({
+      id: "g1",
+      user_id: "u1",
+      status: "pending",
+      credits_consumed: 10,
+      created_at: "2020-01-01 00:00:00",
+      // 对照上一用例：同样的审核费配置，只多了首笔未确认标记。
+      metadata: {
+        creditCost: { moderationOnlyCredits: 2 },
+        initialCharge: { outcome: "unconfirmed" },
+      },
+    });
+    const result = await expireStalePendingGenerations();
+    expect(result[0]?.refundGranted).toBe(true);
+    expect(ledger.generations[0]?.status).toBe("failed");
+    expect(ledger.wallet).toBe(110);
+    expect(ledger.generations[0]?.credits_consumed).toBe(0);
   });
   it("过期多 worker 竞争只领取一次；常规 metadata 目标按白名单复用", async () => {
     ledger.debit(10);
@@ -295,7 +315,7 @@ it("恢复旧快照投影已降低时复用原意图，其他 generation 仍收�
     status: "failed",
     credits_consumed: 10,
     metadata: { timeout: { targetCredits: 4 } },
-    created_at: "2020-01-01",
+    created_at: "2020-01-01 00:00:00",
   });
   await recoverFailedGenerationRefunds();
   await processGenerationRefundOutbox();
@@ -307,7 +327,7 @@ it("恢复旧快照投影已降低时复用原意图，其他 generation 仍收�
     status: "failed",
     credits_consumed: 7,
     metadata: { timeout: { targetCredits: 2 } },
-    created_at: "2020-01-01",
+    created_at: "2020-01-01 00:00:00",
   });
   ledger.failedScanSnapshot = ledger.generations;
   expect(await recoverFailedGenerationRefunds()).toMatchObject({
@@ -332,7 +352,7 @@ it("旧 failed 的审核保留费高于生成失败费时不把审核费用扫�
       moderationFailureCredits: 4,
       creditCost: { moderationOnlyCredits: 1 },
     },
-    created_at: "2020-01-01",
+    created_at: "2020-01-01 00:00:00",
   });
   await recoverFailedGenerationRefunds();
   await processGenerationRefundOutbox();

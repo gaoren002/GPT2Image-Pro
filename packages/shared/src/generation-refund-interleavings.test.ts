@@ -31,6 +31,7 @@ vi.mock("./logger/index", () => ({
 vi.mock("./storage/providers", () => ({ getStorageProvider: vi.fn() }));
 
 import { generation } from "@repo/database/schema";
+import { planChargeSettlement } from "./credits/charge-outcome";
 import {
   IMAGE_GENERATION_PENDING_TIMEOUT_MS,
   processGenerationRefundOutbox,
@@ -109,11 +110,13 @@ function loadRuntimeTimeout(
         eq(generation.status, "pending")
       ),
     refundGenerationCredits: refund,
+    planChargeSettlement,
   };
   const code = ts.transpileModule(
     `
     return (() => {
       let chargedCredits = 10;
+      let unconfirmedCredits = 0;
       ${names.map((name) => declarations.get(name)).join("\n")}
       return { timeout: failTimedOutGeneration };
     })();
@@ -144,7 +147,7 @@ function seedGeneration() {
     user_id: "u1",
     status: "pending",
     credits_consumed: 10,
-    created_at: "2020-01-01",
+    created_at: "2020-01-01 00:00:00",
     metadata: {
       moderationFailureCredits: 4,
       creditCost: { moderationOnlyCredits: 4 },

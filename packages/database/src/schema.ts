@@ -1590,3 +1590,54 @@ export const editableFileTask = pgTable(
     check("editable_file_task_result_check", sql`(${table.state} = 'completed') = (${table.resultReferences} IS NOT NULL)`),
   ]
 );
+
+/** 纯中转初始财务状态：正数消费同事务创建，无内容或 generation 外键；dispatched 不自动退款。 */
+export const relayInitialCharge = pgTable(
+  "relay_initial_charge",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    generationId: text("generation_id").notNull(),
+    consumptionTransactionId: text("consumption_transaction_id")
+      .notNull()
+      .references(() => creditsTransaction.id),
+    apiKeyId: text("api_key_id"),
+    amount: numeric("amount", {
+      precision: 12,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    state: text("state")
+      .notNull()
+      .default("captured")
+      .$type<
+        "captured" | "dispatched" | "refund_pending" | "refund_enqueued"
+      >(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("relay_initial_charge_user_generation_unique").on(
+      table.userId,
+      table.generationId
+    ),
+    uniqueIndex("relay_initial_charge_transaction_unique").on(
+      table.consumptionTransactionId
+    ),
+    index("relay_initial_charge_due_idx")
+      .on(table.expiresAt, table.id)
+      .where(sql`${table.state} IN ('captured', 'refund_pending')`),
+    check("relay_initial_charge_amount_check", sql`${table.amount} > 0`),
+    check(
+      "relay_initial_charge_state_check",
+      sql`${table.state} IN ('captured', 'dispatched', 'refund_pending', 'refund_enqueued')`
+    ),
+  ]
+);

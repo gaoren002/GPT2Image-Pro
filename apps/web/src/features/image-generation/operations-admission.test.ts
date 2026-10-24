@@ -105,10 +105,6 @@ vi.mock("@/features/image-backend-pool/service", () => ({
   ImageBackendPoolUnavailableError: class extends Error {},
   releaseImageBackendInflightLease: vi.fn(async () => undefined),
 }));
-vi.mock("@/features/external-api/quota", () => ({
-  reserveExternalApiKeyCredits: vi.fn(async () => undefined),
-  refundExternalApiKeyCredits: vi.fn(async () => undefined),
-}));
 vi.mock("./queue", () => ({
   estimateImageGenerationQueueBytes: () => 65536,
   withImageGenerationQueue: async (
@@ -183,11 +179,13 @@ describe("统一生成任务原子认领", () => {
   it("运行中的上游收到调用方断连信号，不能只取消排队", async () => {
     const caller = new AbortController();
     let upstreamSawAbort = false;
-    state.upstream.mockImplementation(async (_config, params: { signal?: AbortSignal }) => {
-      caller.abort();
-      upstreamSawAbort = params.signal?.aborted === true;
-      return { error: "fixture caller cancelled" };
-    });
+    state.upstream.mockImplementation(
+      async (_config, params: { signal?: AbortSignal }) => {
+        caller.abort();
+        upstreamSawAbort = params.signal?.aborted === true;
+        return { error: "fixture caller cancelled" };
+      }
+    );
     await runImageGenerationForUser({ ...input, signal: caller.signal });
     expect(upstreamSawAbort).toBe(true);
   });

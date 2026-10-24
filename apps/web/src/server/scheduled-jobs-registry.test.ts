@@ -45,6 +45,7 @@ const MAINTENANCE_OPERATIONS = [
   "file.recoverTasks",
   "subscription.recoverEpayFulfillments",
   "subscription.expireUpgradeReservations",
+  "image-generation.recoverRelayInitialCharges",
   "image-generation.retryRefunds",
   "image-backend-pool.cleanupRetention",
 ] as const;
@@ -73,13 +74,13 @@ it("全部维护操作都在定时任务模块中注册，并接受 cron 身份"
 });
 
 it("单步失败时仍执行后续资金恢复，最后汇总抛出失败步骤", async () => {
-  bindExecute("subscription.expireUpgradeReservations", async () => {
-    throw new Error("synthetic reservation expiry failure");
+  bindExecute("image-generation.recoverRelayInitialCharges", async () => {
+    throw new Error("synthetic relay recovery failure");
   });
   const failure = await runImageMaintenanceJob().catch((error) => error);
   expect(failure).toMatchObject({
     code: "maintenance_steps_failed",
-    failedSteps: ["subscription.expireUpgradeReservations"],
+    failedSteps: ["image-generation.recoverRelayInitialCharges"],
   });
   expect(executions.get("image-generation.retryRefunds")).toHaveBeenCalledTimes(
     1

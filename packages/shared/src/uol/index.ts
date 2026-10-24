@@ -15,3 +15,6 @@ export { creemWebhook } from "./operations/creem-webhook";
 
 // 可编辑任务纯契约；查询与恢复的数据库服务延迟加载。
 export { getEditableFileTask, recoverEditableFileTasks } from "./operations/editable-task";
+
+// 定时任务经根入口调用的恢复操作必须随根入口注册；服务实现仍延迟加载。
+export { recoverRelayInitialChargesOperation } from "./operations/relay-initial-charge";

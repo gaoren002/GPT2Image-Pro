@@ -96,10 +96,6 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (pathname === "/moderate") {
-    return NextResponse.next();
-  }
-
   if (pathname.startsWith("/v1/")) {
     const rateLimitType = getApiRateLimitType(pathname);
     if (rateLimitType) {
@@ -189,7 +185,8 @@ export const config = {
      * - public folder files
      *
      * 大请求只排除完整路径与尾斜线，不排除相似前缀、子路径或所有 Server Action。
+     * 审核代理与 MCP 在 handler 内先鉴权再限长读取，同样排除以免请求体被复制。
      */
-    "/((?!_next/static|_next/image|favicon.ico|site\\.webmanifest|sitemap\\.xml|robots\\.txt|api/(?:images/(?:chat|edit)|editable-file/generate)/?$|(?:api/)?v1/(?:images/edits|agents/images|chat/completions|responses|ppts|psds)/?$|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|site\\.webmanifest|sitemap\\.xml|robots\\.txt|api/(?:images/(?:chat|edit)|editable-file/generate|mcp/(?:user|admin))/?$|moderate/?$|(?:api/)?v1/(?:images/edits|agents/images|chat/completions|responses|ppts|psds)/?$|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };

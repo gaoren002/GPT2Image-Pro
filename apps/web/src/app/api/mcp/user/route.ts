@@ -42,6 +42,10 @@ import type { Principal } from "@repo/shared/uol";
 import { checkRateLimit } from "@repo/shared/rate-limit";
 import { logWarn } from "@repo/shared/logger";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
+import {
+  readJsonBodyWithinLimit,
+  SELF_AUTHENTICATED_BODY_MAX_BYTES,
+} from "@/server/bounded-json-body";
 import { ensureUolInitialized } from "@/server/uol-init";
 
 // 副作用导入：确保所有 UOL 操作已注册到 registry
@@ -227,42 +231,47 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // 4. 解析 JSON-RPC 请求体
-  let rpcRequest: JsonRpcRequest;
-  try {
-    const body = await request.json();
-    if (
-      !body ||
-      typeof body !== "object" ||
-      body.jsonrpc !== "2.0" ||
-      typeof body.method !== "string"
-    ) {
-      return NextResponse.json(
-        {
-          jsonrpc: "2.0",
-          id: null,
-          error: {
-            code: JSON_RPC_INVALID_REQUEST,
-            message: "Invalid JSON-RPC request",
-          },
-        } satisfies JsonRpcResponse,
-        { status: 400 },
-      );
-    }
-    rpcRequest = body as JsonRpcRequest;
-  } catch {
+  // 4. 解析 JSON-RPC 请求体。本路径不经 middleware，必须在鉴权后限长读取。
+  const parsed = await readJsonBodyWithinLimit(
+    request,
+    SELF_AUTHENTICATED_BODY_MAX_BYTES,
+  );
+  if (!parsed.ok) {
+    const tooLarge = parsed.reason === "too_large";
     return NextResponse.json(
       {
         jsonrpc: "2.0",
         id: null,
         error: {
-          code: JSON_RPC_PARSE_ERROR,
-          message: "Failed to parse JSON body",
+          code: tooLarge ? JSON_RPC_INVALID_REQUEST : JSON_RPC_PARSE_ERROR,
+          message: tooLarge
+            ? "Request body too large"
+            : "Failed to parse JSON body",
+        },
+      } satisfies JsonRpcResponse,
+      { status: tooLarge ? 413 : 400 },
+    );
+  }
+  const body = parsed.value as Partial<JsonRpcRequest> | null;
+  if (
+    !body ||
+    typeof body !== "object" ||
+    body.jsonrpc !== "2.0" ||
+    typeof body.method !== "string"
+  ) {
+    return NextResponse.json(
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: JSON_RPC_INVALID_REQUEST,
+          message: "Invalid JSON-RPC request",
         },
       } satisfies JsonRpcResponse,
       { status: 400 },
     );
   }
+  const rpcRequest = body as JsonRpcRequest;
 
   // 5. 路由 JSON-RPC method
   const response = await handleMethod(rpcRequest, principal);

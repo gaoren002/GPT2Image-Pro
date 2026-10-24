@@ -33,6 +33,13 @@ const LARGE_PATHS = [
   ),
 ];
 
+/** 先鉴权再在 handler 内限长读取的入口，同样不经 middleware。 */
+const SELF_AUTHENTICATED_PATHS = [
+  "/moderate",
+  "/api/mcp/user",
+  "/api/mcp/admin",
+];
+
 /** 调用 Next 自己的匹配器，不能用手写正则替代部署时的语义。 */
 function matches(path: string, headers?: Record<string, string>) {
   return unstable_doesMiddlewareMatch({ config, url: path, headers });
@@ -50,6 +57,25 @@ describe("大请求 middleware 边界", () => {
     expect(getLargeBodyRoutePolicy(`${path}/`)).toBe(
       getLargeBodyRoutePolicy(path)
     );
+  });
+
+  it.each(
+    SELF_AUTHENTICATED_PATHS
+  )("%s 绕过 body clone，由 handler 限长读取", (path) => {
+    expect(matches(path)).toBe(false);
+    expect(matches(`${path}/`)).toBe(false);
+    expect(getLargeBodyRoutePolicy(path)).toBe("self-authenticated");
+    expect(getLargeBodyRoutePolicy(`${path}/`)).toBe("self-authenticated");
+  });
+
+  it.each([
+    "/moderate-extra",
+    "/api/mcp/users",
+    "/api/mcp/user/extra",
+    "/api/mcp",
+  ])("相似路径 %s 仍受原 middleware 保护", (path) => {
+    expect(matches(path)).toBe(true);
+    expect(getLargeBodyRoutePolicy(path)).toBeNull();
   });
 
   it.each([

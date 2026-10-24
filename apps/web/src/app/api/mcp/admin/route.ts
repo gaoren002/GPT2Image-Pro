@@ -32,6 +32,10 @@ import {
   OperationError,
   type Principal,
 } from "@repo/shared/uol";
+import {
+  readJsonBodyWithinLimit,
+  SELF_AUTHENTICATED_BODY_MAX_BYTES,
+} from "@/server/bounded-json-body";
 import { ensureUolInitialized } from "@/server/uol-init";
 
 // 确保所有操作已注册到 registry
@@ -192,16 +196,23 @@ export async function POST(request: Request) {
     );
   }
 
-  // 4. 解析请求体
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(
-      jsonRpcError(null, JSONRPC_PARSE_ERROR, "Parse error"),
-      { status: 400 },
-    );
+  // 4. 解析请求体。本路径不经 middleware，必须在鉴权后限长读取。
+  const parsed = await readJsonBodyWithinLimit(
+    request,
+    SELF_AUTHENTICATED_BODY_MAX_BYTES,
+  );
+  if (!parsed.ok) {
+    return parsed.reason === "too_large"
+      ? NextResponse.json(
+          jsonRpcError(null, JSONRPC_INVALID_REQUEST, "Request body too large"),
+          { status: 413 },
+        )
+      : NextResponse.json(
+          jsonRpcError(null, JSONRPC_PARSE_ERROR, "Parse error"),
+          { status: 400 },
+        );
   }
+  const body = parsed.value;
 
   // 5. 校验 JSON-RPC 格式
   const rpcRequest = body as Partial<JsonRpcRequest>;

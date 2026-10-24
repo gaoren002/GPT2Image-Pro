@@ -9,6 +9,10 @@ import {
 } from "@repo/shared/config/subscription-plan";
 import { getRuntimeSettingString } from "@repo/shared/system-settings";
 import { NextResponse, type NextRequest } from "next/server";
+import {
+  readJsonBodyWithinLimit,
+  SELF_AUTHENTICATED_BODY_MAX_BYTES,
+} from "@/server/bounded-json-body";
 import { secretMatchesAny } from "./proxy-secret";
 
 type ModerationRequestImage = {
@@ -47,7 +51,9 @@ async function verifyProxySecret(request: NextRequest) {
   );
 }
 
-function parseImage(image: ModerationRequestImage): ModerationImageInput | null {
+function parseImage(
+  image: ModerationRequestImage
+): ModerationImageInput | null {
   if (!image.url && !image.data) return null;
   return {
     data: image.data ? Buffer.from(image.data, "base64") : Buffer.alloc(0),
@@ -78,12 +84,17 @@ export async function POST(request: NextRequest) {
     return errorResponse("Unauthorized", 401);
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return errorResponse("Invalid JSON body");
+  // 本路径不经 middleware（审核图片可能很大），在校验代理密钥后限长读取。
+  const parsed = await readJsonBodyWithinLimit(
+    request,
+    SELF_AUTHENTICATED_BODY_MAX_BYTES
+  );
+  if (!parsed.ok) {
+    return parsed.reason === "too_large"
+      ? errorResponse("Request body too large", 413)
+      : errorResponse("Invalid JSON body");
   }
+  const body = parsed.value;
 
   if (!body || typeof body !== "object") {
     return errorResponse("Invalid request body");

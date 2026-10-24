@@ -13,6 +13,16 @@ const EXTERNAL_IMAGE_PATH =
   /^\/(?:api\/)?v1\/(?:images\/edits|agents\/images|chat\/completions|responses|ppts|psds)$/;
 
 /**
+ * 先校验密钥/Key 再读请求体的入口：审核代理与 MCP。它们在 middleware 中只被直接放行，
+ * 移出 middleware 后由 handler 用 bounded-json-body 限长读取，不改变可接受的载荷大小。
+ */
+const SELF_AUTHENTICATED_PATHS = new Set([
+  "/moderate",
+  "/api/mcp/user",
+  "/api/mcp/admin",
+]);
+
+/**
  * 页面 AI POST 在 Node handler 统一计数，避免无 Redis 时 Edge/Node 内存桶分裂。
  * generate、web-select 的小 body 仍匹配 middleware，但不在那里重复计数。
  */
@@ -32,9 +42,10 @@ export function getHandlerRateLimitType(pathname: string): "ai" | null {
  */
 export function getLargeBodyRoutePolicy(
   pathname: string
-): "page-ai" | "external" | null {
+): "page-ai" | "external" | "self-authenticated" | null {
   const path = pathname.replace(/\/$/, "");
   if (PAGE_IMAGE_PATHS.has(path)) return "page-ai";
   if (EXTERNAL_IMAGE_PATH.test(path)) return "external";
+  if (SELF_AUTHENTICATED_PATHS.has(path)) return "self-authenticated";
   return null;
 }

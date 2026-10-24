@@ -45,10 +45,15 @@ const nextConfig = {
       "../../node_modules/.pnpm/@img+sharp-linux-x64@*/node_modules/@img/sharp-linux-x64/**",
     ],
   },
+  // middleware 会先把请求体按 proxyClientMaxBodySize 读入并复制约 3 倍，发生在鉴权
+  // 之前。大上传与自鉴权入口已在 middleware matcher 中排除并在 handler 内限长读取；
+  // 其余经过 middleware 的请求只需容纳最大的 Server Action（管理员批量导入令牌，
+  // 1 万条约 25MB）。代理上限略大于 Action 上限：超限 Action 得到明确的 413，
+  // 而不是被截断后解析失败。
   experimental: {
-    proxyClientMaxBodySize: "200mb",
+    proxyClientMaxBodySize: "32mb",
     serverActions: {
-      bodySizeLimit: "200mb",
+      bodySizeLimit: "30mb",
     },
   },
   // Transpile monorepo packages

@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   date,
   index,
   integer,
@@ -293,14 +294,30 @@ export const epayOrder = pgTable("epay_order", {
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
   businessType: text("business_type").notNull(),
-  amount: numeric("amount", { precision: 12, scale: 2, mode: "number" })
-    .notNull(),
+  amount: numeric("amount", {
+    precision: 12,
+    scale: 2,
+    mode: "number",
+  }).notNull(),
   status: text("status").notNull().default("pending"),
+  paymentTradeNo: text("payment_trade_no").unique(),
+  paidAmount: numeric("paid_amount", {
+    precision: 12,
+    scale: 2,
+    mode: "number",
+  }),
+  // 收款事实独立于履约终态；租约和冻结计划供通知重投及后台恢复。
+  paidAt: timestamp("paid_at"),
+  paymentMethod: text("payment_method"),
+  fulfillmentState: text("fulfillment_state").notNull().default("pending"),
+  fulfillmentLeaseToken: text("fulfillment_lease_token"),
+  fulfillmentLeaseExpiresAt: timestamp("fulfillment_lease_expires_at"),
+  fulfillmentPlan: json("fulfillment_plan").$type<Record<string, unknown>>(),
+  fulfilledAt: timestamp("fulfilled_at"),
   metadata: json("metadata").$type<Record<string, unknown>>().notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
-
 export type EpayOrder = typeof epayOrder.$inferSelect;
 export type NewEpayOrder = typeof epayOrder.$inferInsert;
 
@@ -1133,43 +1150,53 @@ export type NewUserImageBackendPreference =
 // ============================================
 // External API Keys
 // ============================================
-export const externalApiKey = pgTable("external_api_key", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  name: text("name").notNull().default("Default API key"),
-  keyPrefix: text("key_prefix").notNull(),
-  keyHash: text("key_hash").notNull().unique(),
-  lastFour: text("last_four").notNull(),
-  moderationBlockRiskLevel: text("moderation_block_risk_level")
-    .notNull()
-    .default("low"),
-  generationGroupId: text("generation_group_id").references(
-    () => imageBackendGroup.id,
-    { onDelete: "set null" }
-  ),
-  creditLimit: numeric("credit_limit", {
-    precision: 18,
-    scale: 2,
-    mode: "number",
-  }),
-  creditsUsed: numeric("credits_used", {
-    precision: 18,
-    scale: 2,
-    mode: "number",
-  })
-    .notNull()
-    .default(0),
-  lastUsedAt: timestamp("last_used_at"),
-  isActive: boolean("is_active").notNull().default(true),
-  // 纯中转模式：开启后该 key 的请求不写生成历史、不上传对象存储、站内不可查看，
-  // 仅保留扣费/审核/额度计数。用于保护用户隐私、不额外占用服务器存储。
-  relayOnly: boolean("relay_only").notNull().default(false),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
-
+export const externalApiKey = pgTable(
+  "external_api_key",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull().default("Default API key"),
+    keyPrefix: text("key_prefix").notNull(),
+    keyHash: text("key_hash").notNull().unique(),
+    lastFour: text("last_four").notNull(),
+    moderationBlockRiskLevel: text("moderation_block_risk_level")
+      .notNull()
+      .default("low"),
+    generationGroupId: text("generation_group_id").references(
+      () => imageBackendGroup.id,
+      { onDelete: "set null" }
+    ),
+    creditLimit: numeric("credit_limit", {
+      precision: 18,
+      scale: 2,
+      mode: "number",
+    }),
+    creditsUsed: numeric("credits_used", {
+      precision: 18,
+      scale: 2,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    lastUsedAt: timestamp("last_used_at"),
+    isActive: boolean("is_active").notNull().default(true),
+    // 用户撤销为永久失效；管理员临时禁用只改 isActive，不得恢复已撤销的凭据。
+    revokedAt: timestamp("revoked_at"),
+    // 纯中转模式：开启后该 key 的请求不写生成历史、不上传对象存储、站内不可查看，
+    // 仅保留扣费/审核/额度计数。用于保护用户隐私、不额外占用服务器存储。
+    relayOnly: boolean("relay_only").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      "external_api_key_revocation_inactive",
+      sql`${table.revokedAt} IS NULL OR ${table.isActive} = false`
+    ),
+  ]
+);
 export type ExternalApiKey = typeof externalApiKey.$inferSelect;
 export type NewExternalApiKey = typeof externalApiKey.$inferInsert;
 
@@ -1325,3 +1352,152 @@ export const mcpApiKey = pgTable(
 
 export type McpApiKey = typeof mcpApiKey.$inferSelect;
 export type NewMcpApiKey = typeof mcpApiKey.$inferInsert;
+
+/** 升级折抵财务预留。订单、请求及单用户在途约束共同阻止重复兑现。 */
+export const upgradeReservation = pgTable(
+  "upgrade_reservation",
+  {
+    outTradeNo: text("out_trade_no")
+      .primaryKey()
+      .references(() => epayOrder.outTradeNo, { onDelete: "restrict" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    clientRequestId: text("client_request_id").notNull(),
+    state: text("state").notNull(),
+    snapshot: json("snapshot").$type<Record<string, unknown>>().notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    settledAt: timestamp("settled_at"),
+    releaseReason: text("release_reason"),
+    refundRef: text("refund_ref"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("upgrade_reservation_user_request_unique").on(
+      table.userId,
+      table.clientRequestId
+    ),
+    uniqueIndex("upgrade_reservation_user_open_unique")
+      .on(table.userId)
+      .where(
+        sql`${table.state} = 'held' OR (${table.state} = 'refund_pending' AND ${table.settledAt} IS NOT NULL)`
+      ),
+    uniqueIndex("upgrade_reservation_refund_ref_unique")
+      .on(table.refundRef)
+      .where(sql`${table.refundRef} IS NOT NULL`),
+    index("upgrade_reservation_expiry_idx")
+      .on(table.expiresAt)
+      .where(sql`${table.state} = 'held'`),
+    check(
+      "upgrade_reservation_state_check",
+      sql`${table.state} IN ('held','settled','released','refund_pending','refunded')`
+    ),
+  ]
+);
+
+/** 被预留批次的关系索引：财务证据存续期间禁止删除原批次。 */
+export const upgradeReservationBatch = pgTable(
+  "upgrade_reservation_batch",
+  {
+    batchId: text("batch_id")
+      .notNull()
+      .references(() => creditsBatch.id, { onDelete: "restrict" }),
+    outTradeNo: text("out_trade_no")
+      .notNull()
+      .references(() => upgradeReservation.outTradeNo, {
+        onDelete: "restrict",
+      }),
+    amount: numeric("amount", {
+      precision: 18,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("upgrade_reservation_batch_order_unique").on(
+      table.outTradeNo,
+      table.batchId
+    ),
+    check("upgrade_reservation_batch_amount_check", sql`${table.amount} > 0`),
+  ]
+);
+
+/** 同套餐并发下单别名仍绑定原终态，避免客户端重试时重新冻结。 */
+export const upgradeReservationRequest = pgTable(
+  "upgrade_reservation_request",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    clientRequestId: text("client_request_id").notNull(),
+    outTradeNo: text("out_trade_no")
+      .notNull()
+      .references(() => upgradeReservation.outTradeNo, {
+        onDelete: "restrict",
+      }),
+  },
+  (table) => [
+    uniqueIndex("upgrade_reservation_request_unique").on(
+      table.userId,
+      table.clientRequestId
+    ),
+  ]
+);
+
+/**
+ * 生成退款持久意图：仅存财务标量，无 generation 外键以支持纯中转和可编辑文件。
+ * 账本是金额真相；本表负责恢复投递。nextAttemptAt 同时是领取租期，attempts 隔离迟到确认。
+ */
+export const generationRefundOutbox = pgTable(
+  "generation_refund_outbox",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    generationId: text("generation_id").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    requestedAmount: numeric("requested_amount", {
+      precision: 12,
+      scale: 2,
+      mode: "number",
+    }).notNull(),
+    targetCredits: numeric("target_credits", {
+      precision: 12,
+      scale: 2,
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    state: text("state")
+      .notNull()
+      .default("pending")
+      .$type<"pending" | "settled">(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    settledAt: timestamp("settled_at"),
+  },
+  (table) => [
+    uniqueIndex("generation_refund_outbox_user_ref_unique").on(
+      table.userId,
+      table.sourceRef
+    ),
+    index("generation_refund_outbox_due_idx")
+      .on(table.nextAttemptAt, table.id)
+      .where(sql`${table.state} = 'pending'`),
+    index("generation_refund_outbox_task_idx").on(
+      table.userId,
+      table.generationId
+    ),
+    check(
+      "generation_refund_outbox_state_check",
+      sql`${table.state} IN ('pending', 'settled')`
+    ),
+    check(
+      "generation_refund_outbox_amount_check",
+      sql`${table.requestedAmount} >= 0 AND ${table.targetCredits} >= 0 AND ${table.attempts} >= 0`
+    ),
+  ]
+);

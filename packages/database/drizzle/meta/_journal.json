@@ -372,6 +372,34 @@
       "when": 1792796400000,
       "tag": "0052_generation_refund_ledger_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1792882800000,
+      "tag": "0053_upgrade_credit_reservation",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1792969200000,
+      "tag": "0054_external_api_key_revocation",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1793055600000,
+      "tag": "0055_generation_refund_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1793142000000,
+      "tag": "0056_epay_fulfillment_recovery",
+      "breakpoints": true
     }
   ]
 }

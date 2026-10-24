@@ -126,6 +126,9 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: false,
+    // 通过邮件链接重置密码后吊销该用户全部会话：重置往往意味着密码泄露或被盗用，
+    // 不吊销则旧会话（默认 7 天）继续有效，重置无法把占用者踢下线。
+    revokeSessionsOnPasswordReset: true,
     sendResetPassword: async ({ user, url }) => {
       await sendEmail({
         to: user.email,

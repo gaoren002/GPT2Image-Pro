@@ -210,6 +210,8 @@ export async function changePassword(
     body: JSON.stringify({
       currentPassword,
       newPassword,
+      // 修改密码后吊销其他设备的会话；当前设备由 Better Auth 换发新会话，保持登录。
+      revokeOtherSessions: true,
     }),
   });
 

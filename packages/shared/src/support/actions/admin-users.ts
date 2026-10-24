@@ -1006,13 +1006,22 @@ export const setUserPasswordAction = withSuperAdminUsersAction(
       });
     }
 
+    // 管理员重设密码多用于账号被盗或遗忘：吊销该用户全部会话，旧会话不再随新密码继续有效。
+    const revokedSessions = await db
+      .delete(session)
+      .where(eq(session.userId, data.userId))
+      .returning({ id: session.id });
+
     await writeAdminAuditLog({
       adminUserId: ctx.userId,
       targetUserId: data.userId,
       action: "user.password.reset",
       reason: data.reason,
       // 仅记录操作发生，绝不写入明文或哈希
-      metadata: { credentialCreated: !credential },
+      metadata: {
+        credentialCreated: !credential,
+        sessionsRevoked: revokedSessions.length,
+      },
     });
 
     revalidatePath("/dashboard/users");

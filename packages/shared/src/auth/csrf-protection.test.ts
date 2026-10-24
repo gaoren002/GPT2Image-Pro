@@ -59,7 +59,7 @@ vi.mock("@repo/database", async () => {
 import type { BetterAuthOptions } from "better-auth";
 import { hashPassword } from "better-auth/crypto";
 import { auth } from "./index";
-import { stripCookiesForOriginlessAuthPost } from "./origin-compat";
+import { normalizeOriginlessAuthPost } from "./origin-compat";
 
 const APP = "https://app.example.test";
 const EMAIL = "member@example.com";
@@ -128,7 +128,7 @@ describe("认证 CSRF 防护", () => {
   it("第三方页面的跨站表单登录被拒绝且不写会话 Cookie", async () => {
     await seedMember();
     const response = await auth.handler(
-      stripCookiesForOriginlessAuthPost(
+      normalizeOriginlessAuthPost(
         signInRequest(
           {
             origin: "https://evil.example",
@@ -149,7 +149,7 @@ describe("认证 CSRF 防护", () => {
   it("同源登录正常成功", async () => {
     await seedMember();
     const response = await auth.handler(
-      stripCookiesForOriginlessAuthPost(
+      normalizeOriginlessAuthPost(
         signInRequest(
           {
             origin: APP,
@@ -171,10 +171,39 @@ describe("认证 CSRF 防护", () => {
     expect(direct.status).toBe(403);
 
     const compatible = await auth.handler(
-      stripCookiesForOriginlessAuthPost(resetPasswordRequest(webviewHeaders))
+      normalizeOriginlessAuthPost(resetPasswordRequest(webviewHeaders))
     );
     expect(compatible.status).toBe(400);
     const body = (await compatible.json()) as { code?: string };
     expect(body.code).toBe("INVALID_TOKEN");
+  });
+
+  it("内置浏览器缺失 Origin 仍可登出：兼容保留 Cookie，依赖会话的端点不被打断", async () => {
+    await seedMember();
+    const signedIn = await auth.handler(
+      normalizeOriginlessAuthPost(
+        signInRequest(
+          { origin: APP, "sec-fetch-site": "same-origin" },
+          "203.0.113.22"
+        )
+      )
+    );
+    const cookie = (signedIn.headers.get("set-cookie") ?? "").split(";")[0];
+    expect(cookie).toMatch(/session_token=/);
+
+    const signOut = (headers: Record<string, string>) =>
+      new Request(`${APP}/api/auth/sign-out`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: "{}",
+      });
+
+    const direct = await auth.handler(signOut({ cookie: cookie as string }));
+    expect(direct.status).toBe(403);
+
+    const compatible = await auth.handler(
+      normalizeOriginlessAuthPost(signOut({ cookie: cookie as string }))
+    );
+    expect(compatible.status).toBe(200);
   });
 });

@@ -1,11 +1,20 @@
+/** 管理端与服务端共用的令牌导入解析；限制 UTF-8 字节数，JWT 扫描单向前进。 */
+export const MAX_TOKEN_IMPORT_BYTES = 32 * 1024 * 1024;
+
 type TokenParseMode = "refresh" | "access" | "none";
 
+/** 首尾游标剥离包装字符；不使用未锚定的尾部重复正则。 */
 function normalizeImportedToken(value: string | null | undefined) {
   let token = value?.trim() || "";
-  token = token.replace(/^Bearer\s+/i, "").trim();
-  token = token.replace(/^["'`]+/, "").replace(/["'`,;]+$/, "").trim();
-  token = token.replace(/^Bearer\s+/i, "").trim();
-  return token.replace(/^["'`]+/, "").replace(/["'`,;]+$/, "").trim();
+  for (let pass = 0; pass < 2; pass++) {
+    token = token.replace(/^Bearer\s+/i, "").trim();
+    let start = 0;
+    let end = token.length;
+    while (start < end && "\"'`".includes(token.charAt(start))) start++;
+    while (end > start && "\"'`,;".includes(token.charAt(end - 1))) end--;
+    token = token.slice(start, end).trim();
+  }
+  return token;
 }
 
 function addToken(tokens: Set<string>, value: string | null | undefined) {
@@ -33,43 +42,93 @@ function addAccessToken(tokens: Set<string>, value: string | null | undefined) {
   }
 }
 
+/** 迭代遍历 JSON 导出，避免深层结构耗尽调用栈；只提取约定字段/数组字符串。 */
 function collectTokensFromJson(
   value: unknown,
   tokens: { refreshTokens: Set<string>; accessTokens: Set<string> },
-  mode: TokenParseMode,
-  allowBareString = false
+  mode: TokenParseMode
 ) {
-  if (!value) return;
-  if (typeof value === "string") {
-    const token = normalizeImportedToken(value);
-    if (!allowBareString) return;
-    if (mode === "refresh" && isRefreshToken(token)) {
-      tokens.refreshTokens.add(token);
-    }
-    if (mode === "access" && isLikelyPlainAccessToken(token)) {
-      tokens.accessTokens.add(token);
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectTokensFromJson(item, tokens, mode, true);
-    return;
-  }
-  if (typeof value !== "object") return;
-
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    const normalizedKey = key.toLowerCase().replace(/[-_\s]/g, "");
+  const pending: Array<{
+    value: unknown;
+    allowBareString: boolean;
+    kind?: "access" | "refresh";
+  }> = [{ value, allowBareString: false }];
+  while (pending.length) {
+    const entry = pending.pop();
+    if (!entry) break;
+    const item = entry.value;
     if (typeof item === "string") {
-      if (["refreshtoken", "rt", "refresh"].includes(normalizedKey)) {
+      if (entry.kind === "refresh") {
         addToken(tokens.refreshTokens, item);
         continue;
       }
-      if (["accesstoken", "at", "access"].includes(normalizedKey)) {
+      if (entry.kind === "access") {
         addAccessToken(tokens.accessTokens, item);
         continue;
       }
+      if (!entry.allowBareString) continue;
+      const token = normalizeImportedToken(item);
+      if (mode === "refresh" && isRefreshToken(token))
+        tokens.refreshTokens.add(token);
+      if (mode === "access" && isLikelyPlainAccessToken(token))
+        tokens.accessTokens.add(token);
+    } else if (Array.isArray(item)) {
+      for (let i = item.length - 1; i >= 0; i--)
+        pending.push({ value: item[i], allowBareString: true });
+    } else if (item && typeof item === "object") {
+      const entries = Object.entries(item);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const pair = entries[i];
+        if (!pair) continue;
+        const [key, child] = pair;
+        const normalized = key.toLowerCase().replace(/[-_\s]/g, "");
+        const kind = ["refreshtoken", "rt", "refresh"].includes(normalized)
+          ? "refresh"
+          : ["accesstoken", "at", "access"].includes(normalized)
+            ? "access"
+            : undefined;
+        pending.push({ value: child, allowBareString: false, kind });
+      }
     }
-    collectTokensFromJson(item, tokens, mode);
+  }
+}
+
+/**
+ * 按字符段扫描 JWT，段与游标只向前；无点的 eyJ 重复串只扫一次。
+ * 签名中的 eyJ 仅在后面确有另一个三段 JWT 时用作无分隔拼接边界。
+ */
+function scanJwtTokens(value: string, tokens: Set<string>) {
+  for (const run of value.matchAll(/[A-Za-z0-9_.-]+/g)) {
+    const parts = run[0].split(".");
+    let index = 0;
+    let headerStart = 0;
+    while (index + 2 < parts.length) {
+      const header = parts[index] || "";
+      const start = header.indexOf("eyJ", headerStart);
+      const payload = parts[index + 1] || "";
+      const signature = parts[index + 2] || "";
+      if (start < 0 || header.length <= start + 3 || !payload || !signature) {
+        index++;
+        headerStart = 0;
+        continue;
+      }
+      const nextHeader = signature.lastIndexOf("eyJ");
+      const concatenated =
+        nextHeader > 0 &&
+        signature.length > nextHeader + 3 &&
+        Boolean(parts[index + 3] && parts[index + 4]);
+      addAccessToken(
+        tokens,
+        `${header.slice(start)}.${payload}.${concatenated ? signature.slice(0, nextHeader) : signature}`
+      );
+      if (concatenated) {
+        index += 2;
+        headerStart = nextHeader;
+      } else {
+        index += 3;
+        headerStart = 0;
+      }
+    }
   }
 }
 
@@ -131,6 +190,13 @@ export function parseImportTokensText(
     plainFallback: "refresh",
   }
 ) {
+  // 先按 UTF-16 长度拒绝超大文本，再计算 UTF-8；浏览器和 Node 使用同一上限。
+  if (
+    value.length > MAX_TOKEN_IMPORT_BYTES ||
+    new TextEncoder().encode(value).byteLength > MAX_TOKEN_IMPORT_BYTES
+  ) {
+    throw new Error("令牌导入内容不能超过 32 MiB，请分批导入");
+  }
   const tokens = {
     refreshTokens: new Set<string>(),
     accessTokens: new Set<string>(),
@@ -152,14 +218,7 @@ export function parseImportTokensText(
     tokens.refreshTokens.add(match[0]);
   }
 
-  // access token 兜底:扫描任意位置的 JWT(以 eyJ 开头的 base64url 三段)。无论分隔符为何
-  // ——换行/空格/逗号/分号/无分隔拼接/混在文本里——都能稳健提取(OpenAI/ChatGPT access
-  // token 恒为 JWT)。第三段用 (?!eyJ) 不跨入下一个 token,兼容无分隔粘连。
-  for (const match of value.matchAll(
-    /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.(?:(?!eyJ)[A-Za-z0-9_-])+/g
-  )) {
-    addAccessToken(tokens.accessTokens, match[0]);
-  }
+  scanJwtTokens(value, tokens.accessTokens);
 
   for (const token of extractNamedTokens(value, [
     "refresh_token",

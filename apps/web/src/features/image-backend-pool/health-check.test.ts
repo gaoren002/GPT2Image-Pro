@@ -24,6 +24,15 @@ describe("测活鉴权判定", () => {
 });
 
 describe("interpretImageHealthResult", () => {
+  it("does not expose upstream response text or credentials", () => {
+    const result = interpretImageHealthResult(
+      { error: "HTTP 502: private-metadata secret-test-key" },
+      1
+    );
+    expect(result.status).toBe("error");
+    expect(result.message).not.toContain("private-metadata");
+    expect(result.message).not.toContain("secret-test-key");
+  });
   it("有 imageBase64 判为 ok", () => {
     const r = interpretImageHealthResult({ imageBase64: "abc" }, 120);
     expect(r.ok).toBe(true);

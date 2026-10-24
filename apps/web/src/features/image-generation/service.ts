@@ -17,7 +17,7 @@ import {
   getRuntimeSettingString,
 } from "@repo/shared/system-settings";
 import { eq } from "drizzle-orm";
-import { assertPublicApiBaseUrl } from "@/features/external-api/safe-image-fetch";
+import { assertSafeApiBaseUrl, fetchApiRequest } from "./safe-api-fetch";
 import { imageBackendApiUsesResponsesEndpoint } from "@/features/image-backend-pool/api-interface-mode";
 import {
   bindImageBackendStickyMember,
@@ -852,7 +852,8 @@ async function postResponsesImageRequest(
   },
   callbacks?: ImageGenerationCallbacks
 ) {
-  const response = await fetch(
+  const response = await fetchApiRequest(
+    config,
     `${stripTrailingSlash(config.baseUrl)}/responses`,
     {
       method: "POST",
@@ -2294,7 +2295,8 @@ async function generateChatImageWithChatCompletions(
     delete (body as Record<string, unknown>).requires_responses_backend;
 
     try {
-      const response = await fetch(
+      const response = await fetchApiRequest(
+        config,
         `${stripTrailingSlash(config.baseUrl)}/chat/completions`,
         {
           method: "POST",
@@ -2554,7 +2556,8 @@ async function fetchResponses(
   },
   callbacks?: ImageGenerationCallbacks
 ): Promise<ResponsesResultWithOutput> {
-  const response = await fetch(
+  const response = await fetchApiRequest(
+    config,
     `${stripTrailingSlash(config.baseUrl)}/responses`,
     {
       method: "POST",
@@ -4299,7 +4302,7 @@ export async function getUserApiConfig(
   // 请求时复检自定义 baseUrl 指向公网（弥补"仅保存时校验"的 TOCTOU：
   // 例如保存后 DNS 变更 / 指向内网）。指向内网或不可解析则丢弃该配置、回落平台后端。
   try {
-    await assertPublicApiBaseUrl(row.baseUrl);
+    await assertSafeApiBaseUrl(row.baseUrl);
   } catch (error) {
     logWarn("Rejected user API base URL failing SSRF re-check", {
       userId,
@@ -4687,44 +4690,48 @@ async function generateImageForBackend(
     // (b64 为默认返回)。中转(pool-api)后端不受影响,原样发送。
     // size 仍照发,但 codex 上游不尊重(#19175,直连端点亦然,见 shouldCodexUseDirectImagesEndpoint)。
     const isCodexDirect = shouldCodexUseDirectImagesEndpoint(config);
-    const response = await fetch(`${config.baseUrl}/images/generations`, {
-      method: "POST",
-      redirect: "manual",
-      signal: params.signal,
-      headers: getHeaders(config, {
-        "Content-Type": "application/json",
-      }),
-      body: JSON.stringify({
-        model,
-        // images 端点不吃 prompt_cache_key,改在 prompt 注入每请求唯一零宽 nonce,
-        // 打掉上游中转按请求体内容缓存导致的"同图同词出同图"。仅作用于上游请求体。
-        prompt: appendImagesUpstreamNonce(prompt),
-        n: params.n || 1,
-        size,
-        ...(dimensions && !isCodexDirect
-          ? { width: dimensions.width, height: dimensions.height }
-          : {}),
-        ...(normalizeQuality(params.quality)
-          ? { quality: normalizeQuality(params.quality) }
-          : {}),
-        ...(normalizeModeration(params.moderation)
-          ? { moderation: normalizeModeration(params.moderation) }
-          : {}),
-        ...(normalizeOutputFormat(params.outputFormat)
-          ? { output_format: normalizeOutputFormat(params.outputFormat) }
-          : {}),
-        ...(normalizeOutputCompression(params.outputCompression) !== undefined
-          ? {
-              output_compression: normalizeOutputCompression(
-                params.outputCompression
-              ),
-            }
-          : {}),
-        ...(background ? { background } : {}),
-        ...(config.useStream ? { stream: true, partial_images: 2 } : {}),
-        ...(isCodexDirect ? {} : { response_format: "b64_json" }),
-      }),
-    });
+    const response = await fetchApiRequest(
+      config,
+      `${config.baseUrl}/images/generations`,
+      {
+        method: "POST",
+        redirect: "manual",
+        signal: params.signal,
+        headers: getHeaders(config, {
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({
+          model,
+          // images 端点不吃 prompt_cache_key,改在 prompt 注入每请求唯一零宽 nonce,
+          // 打掉上游中转按请求体内容缓存导致的"同图同词出同图"。仅作用于上游请求体。
+          prompt: appendImagesUpstreamNonce(prompt),
+          n: params.n || 1,
+          size,
+          ...(dimensions && !isCodexDirect
+            ? { width: dimensions.width, height: dimensions.height }
+            : {}),
+          ...(normalizeQuality(params.quality)
+            ? { quality: normalizeQuality(params.quality) }
+            : {}),
+          ...(normalizeModeration(params.moderation)
+            ? { moderation: normalizeModeration(params.moderation) }
+            : {}),
+          ...(normalizeOutputFormat(params.outputFormat)
+            ? { output_format: normalizeOutputFormat(params.outputFormat) }
+            : {}),
+          ...(normalizeOutputCompression(params.outputCompression) !== undefined
+            ? {
+                output_compression: normalizeOutputCompression(
+                  params.outputCompression
+                ),
+              }
+            : {}),
+          ...(background ? { background } : {}),
+          ...(config.useStream ? { stream: true, partial_images: 2 } : {}),
+          ...(isCodexDirect ? {} : { response_format: "b64_json" }),
+        }),
+      }
+    );
 
     return requireImageOutput(
       applyPromptOptimizationResultVisibility(
@@ -4855,43 +4862,48 @@ async function editImageForBackend(
         `data:${file.type || "image/png"};base64,${Buffer.from(
           file.data
         ).toString("base64")}`;
-      const response = await fetch(`${config.baseUrl}/images/edits`, {
-        method: "POST",
-        redirect: "manual",
-        signal: params.signal,
-        headers: getHeaders(config, { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          model,
-          // 同生图：注入每请求唯一零宽 nonce 破上游内容缓存（仅上游请求体）。
-          prompt: appendImagesUpstreamNonce(effectiveEditPrompt),
-          n: params.n || 1,
-          size,
-          images: params.images.map((image) => ({
-            image_url: toImageUrl(image),
-          })),
-          ...(params.mask
-            ? { mask: { image_url: toImageUrl(params.mask) } }
-            : {}),
-          ...(normalizeQuality(params.quality)
-            ? { quality: normalizeQuality(params.quality) }
-            : {}),
-          ...(normalizeModeration(params.moderation)
-            ? { moderation: normalizeModeration(params.moderation) }
-            : {}),
-          ...(normalizeOutputFormat(params.outputFormat)
-            ? { output_format: normalizeOutputFormat(params.outputFormat) }
-            : {}),
-          ...(normalizeOutputCompression(params.outputCompression) !== undefined
-            ? {
-                output_compression: normalizeOutputCompression(
-                  params.outputCompression
-                ),
-              }
-            : {}),
-          ...(background ? { background } : {}),
-          ...(config.useStream ? { stream: true, partial_images: 2 } : {}),
-        }),
-      });
+      const response = await fetchApiRequest(
+        config,
+        `${config.baseUrl}/images/edits`,
+        {
+          method: "POST",
+          redirect: "manual",
+          signal: params.signal,
+          headers: getHeaders(config, { "Content-Type": "application/json" }),
+          body: JSON.stringify({
+            model,
+            // 同生图：注入每请求唯一零宽 nonce 破上游内容缓存（仅上游请求体）。
+            prompt: appendImagesUpstreamNonce(effectiveEditPrompt),
+            n: params.n || 1,
+            size,
+            images: params.images.map((image) => ({
+              image_url: toImageUrl(image),
+            })),
+            ...(params.mask
+              ? { mask: { image_url: toImageUrl(params.mask) } }
+              : {}),
+            ...(normalizeQuality(params.quality)
+              ? { quality: normalizeQuality(params.quality) }
+              : {}),
+            ...(normalizeModeration(params.moderation)
+              ? { moderation: normalizeModeration(params.moderation) }
+              : {}),
+            ...(normalizeOutputFormat(params.outputFormat)
+              ? { output_format: normalizeOutputFormat(params.outputFormat) }
+              : {}),
+            ...(normalizeOutputCompression(params.outputCompression) !==
+            undefined
+              ? {
+                  output_compression: normalizeOutputCompression(
+                    params.outputCompression
+                  ),
+                }
+              : {}),
+            ...(background ? { background } : {}),
+            ...(config.useStream ? { stream: true, partial_images: 2 } : {}),
+          }),
+        }
+      );
       return requireImageOutput(
         applyPromptOptimizationResultVisibility(
           await parseImageResponse(response, callbacks)
@@ -4996,13 +5008,17 @@ async function editImageForBackend(
       );
     }
 
-    const response = await fetch(`${config.baseUrl}/images/edits`, {
-      method: "POST",
-      redirect: "manual",
-      signal: params.signal,
-      headers: getHeaders(config, {}),
-      body: formData,
-    });
+    const response = await fetchApiRequest(
+      config,
+      `${config.baseUrl}/images/edits`,
+      {
+        method: "POST",
+        redirect: "manual",
+        signal: params.signal,
+        headers: getHeaders(config, {}),
+        body: formData,
+      }
+    );
 
     return attachImageBillingSnapshot(
       config,

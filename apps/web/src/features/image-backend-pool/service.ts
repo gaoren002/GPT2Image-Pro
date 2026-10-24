@@ -29,8 +29,6 @@ import { logWarn } from "@repo/shared/logger";
 import { canUsePlanCapability } from "@repo/shared/subscription/services/plan-capabilities";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
 import {
-  clearSystemSettingsCache,
-  getRuntimeSettingJson,
   getRuntimeSettingNumber,
   getRuntimeSettingString,
 } from "@repo/shared/system-settings";
@@ -92,6 +90,11 @@ import {
   type ImageApiHealthResult,
 } from "./health-check";
 import { parseImportTokensText } from "./import-token-parser";
+import {
+  mutateSub2ApiTaskSetting,
+  readSub2ApiTaskSetting,
+} from "./sub2api-task-store";
+import { assertSafePoolApiBaseUrl } from "@/features/image-generation/safe-api-fetch";
 import { resolvePoolModelRouting } from "./model-routing";
 import type {
   AdminImageBackendAccountListOptions,
@@ -336,7 +339,6 @@ const OPENAI_PLATFORM_OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD";
 const OPENAI_MOBILE_RT_CLIENT_ID = "app_LlGpXReQgckcGGUo2JrYvtJK";
 const OPENAI_REFRESH_SCOPES = "openid profile email";
 const AUTO_SUB2API_SYNC_STATE_KEY = "SUB2API_AUTO_SYNC_STATE";
-const AUTO_SUB2API_SYNC_TASKS_KEY = "SUB2API_AUTO_SYNC_TASKS";
 const DEFAULT_BACKEND_COOLDOWN_MINUTES = 15;
 // 工具级限流(ChatGPT image_gen.text2im)默认冷却分钟:滚动限流恢复快,比通用兜底更短。
 const DEFAULT_TOOL_RATE_LIMIT_COOLDOWN_MINUTES = 3;
@@ -5985,39 +5987,9 @@ function normalizeSub2ApiSyncTask(value: unknown): Sub2ApiAutoSyncTask | null {
   };
 }
 
+/** 配置真相只读数据库；读失败禁止降级为空任务。 */
 async function getSub2ApiAutoSyncTasks() {
-  const value = await getRuntimeSettingJson("SUB2API_AUTO_SYNC_TASKS");
-  const items = Array.isArray(value)
-    ? value
-    : value &&
-        typeof value === "object" &&
-        Array.isArray((value as { tasks?: unknown }).tasks)
-      ? (value as { tasks: unknown[] }).tasks
-      : [];
-  return items
-    .map(normalizeSub2ApiSyncTask)
-    .filter((task): task is Sub2ApiAutoSyncTask => Boolean(task));
-}
-
-async function setSub2ApiAutoSyncTasks(tasks: Sub2ApiAutoSyncTask[]) {
-  const now = new Date();
-  await db
-    .insert(systemSetting)
-    .values({
-      key: AUTO_SUB2API_SYNC_TASKS_KEY,
-      value: tasks,
-      isSecret: false,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: systemSetting.key,
-      set: {
-        value: tasks,
-        isSecret: false,
-        updatedAt: now,
-      },
-    });
-  clearSystemSettingsCache();
+  return readSub2ApiTaskSetting(normalizeSub2ApiSyncTask);
 }
 
 function buildSub2ApiAutoSyncTaskId(input: {
@@ -6056,52 +6028,55 @@ async function upsertSub2ApiAutoSyncTask(input: {
     allowMobileRtImport: input.allowMobileRtImport,
     planFilter,
   });
-  const tasks = await getSub2ApiAutoSyncTasks();
-  const existing = tasks.find((task) => task.id === id);
-  const nextTask: Sub2ApiAutoSyncTask = {
-    ...(existing || {}),
-    id,
-    enabled: true,
-    sourceGroupId: input.sourceGroupId?.trim() || null,
-    sourceGroupName: input.sourceGroupName?.trim() || null,
-    webGroupId:
-      input.webGroupId?.trim() && input.webGroupId.trim() !== "default"
-        ? input.webGroupId.trim()
-        : null,
-    responsesGroupId:
-      input.responsesGroupId?.trim() &&
-      input.responsesGroupId.trim() !== "default"
-        ? input.responsesGroupId.trim()
-        : null,
-    syncMode,
-    allowMobileRtImport: Boolean(input.allowMobileRtImport),
-    contentSafetyEnabled: input.contentSafetyEnabled,
-    overwriteLocalUnavailableState:
-      input.overwriteLocalUnavailableState !== false,
-    planFilter,
-    intervalMinutes: normalizeSub2ApiSyncIntervalMinutes(input.intervalMinutes),
-    createdAt: existing?.createdAt || now,
-    updatedAt: now,
-  };
-  const nextTasks = existing
-    ? tasks.map((task) => (task.id === id ? nextTask : task))
-    : [...tasks, nextTask];
-  await setSub2ApiAutoSyncTasks(nextTasks);
-  return nextTask;
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    const existing = tasks.find((task) => task.id === id);
+    const nextTask: Sub2ApiAutoSyncTask = {
+      ...(existing || {}),
+      id,
+      enabled: true,
+      sourceGroupId: input.sourceGroupId?.trim() || null,
+      sourceGroupName: input.sourceGroupName?.trim() || null,
+      webGroupId:
+        input.webGroupId?.trim() && input.webGroupId.trim() !== "default"
+          ? input.webGroupId.trim()
+          : null,
+      responsesGroupId:
+        input.responsesGroupId?.trim() &&
+        input.responsesGroupId.trim() !== "default"
+          ? input.responsesGroupId.trim()
+          : null,
+      syncMode,
+      allowMobileRtImport: Boolean(input.allowMobileRtImport),
+      contentSafetyEnabled: input.contentSafetyEnabled,
+      overwriteLocalUnavailableState:
+        input.overwriteLocalUnavailableState !== false,
+      planFilter,
+      intervalMinutes: normalizeSub2ApiSyncIntervalMinutes(
+        input.intervalMinutes
+      ),
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    const nextTasks = existing
+      ? tasks.map((task) => (task.id === id ? nextTask : task))
+      : [...tasks, nextTask];
+    return { tasks: nextTasks, result: nextTask };
+  });
 }
 
 async function updateSub2ApiAutoSyncTaskResult(
   taskId: string,
   result: NonNullable<Sub2ApiAutoSyncTask["lastResult"]>
 ) {
-  const tasks = await getSub2ApiAutoSyncTasks();
-  const now = new Date().toISOString();
-  const nextTasks = tasks.map((task) =>
-    task.id === taskId
-      ? { ...task, lastRunAt: now, updatedAt: now, lastResult: result }
-      : task
-  );
-  await setSub2ApiAutoSyncTasks(nextTasks);
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    const now = new Date().toISOString();
+    const nextTasks = tasks.map((task) =>
+      task.id === taskId
+        ? { ...task, lastRunAt: now, updatedAt: now, lastResult: result }
+        : task
+    );
+    return { tasks: nextTasks, result: undefined };
+  });
 }
 
 async function countAccountsForSub2ApiSyncTask(taskId: string) {
@@ -6135,17 +6110,17 @@ export async function setSub2ApiAutoSyncTaskEnabled(input: {
   enabled: boolean;
 }) {
   const taskId = input.taskId.trim();
-  const tasks = await getSub2ApiAutoSyncTasks();
-  let found = false;
-  const now = new Date().toISOString();
-  const nextTasks = tasks.map((task) => {
-    if (task.id !== taskId) return task;
-    found = true;
-    return { ...task, enabled: input.enabled, updatedAt: now };
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    let found = false;
+    const now = new Date().toISOString();
+    const nextTasks = tasks.map((task) => {
+      if (task.id !== taskId) return task;
+      found = true;
+      return { ...task, enabled: input.enabled, updatedAt: now };
+    });
+    if (!found) throw new Error("自动同步任务不存在");
+    return { tasks: nextTasks, result: { taskId, enabled: input.enabled } };
   });
-  if (!found) throw new Error("自动同步任务不存在");
-  await setSub2ApiAutoSyncTasks(nextTasks);
-  return { taskId, enabled: input.enabled };
 }
 
 export async function setSub2ApiAutoSyncTaskOverwriteLocalUnavailableState(input: {
@@ -6153,24 +6128,27 @@ export async function setSub2ApiAutoSyncTaskOverwriteLocalUnavailableState(input
   overwriteLocalUnavailableState: boolean;
 }) {
   const taskId = input.taskId.trim();
-  const tasks = await getSub2ApiAutoSyncTasks();
-  let found = false;
-  const now = new Date().toISOString();
-  const nextTasks = tasks.map((task) => {
-    if (task.id !== taskId) return task;
-    found = true;
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    let found = false;
+    const now = new Date().toISOString();
+    const nextTasks = tasks.map((task) => {
+      if (task.id !== taskId) return task;
+      found = true;
+      return {
+        ...task,
+        overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
+        updatedAt: now,
+      };
+    });
+    if (!found) throw new Error("自动同步任务不存在");
     return {
-      ...task,
-      overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
-      updatedAt: now,
+      tasks: nextTasks,
+      result: {
+        taskId,
+        overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
+      },
     };
   });
-  if (!found) throw new Error("自动同步任务不存在");
-  await setSub2ApiAutoSyncTasks(nextTasks);
-  return {
-    taskId,
-    overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
-  };
 }
 
 export async function updateSub2ApiAutoSyncTaskOptions(input: {
@@ -6186,46 +6164,46 @@ export async function updateSub2ApiAutoSyncTaskOptions(input: {
   intervalMinutes?: number | null;
 }) {
   const taskId = input.taskId.trim();
-  const tasks = await getSub2ApiAutoSyncTasks();
-  let found = false;
-  const allowMobileRtImport = Boolean(input.allowMobileRtImport);
-  const syncMode = allowMobileRtImport ? input.syncMode : "responses";
-  const now = new Date().toISOString();
-  const normalizeGroupId = (value?: string | null) =>
-    value?.trim() && value.trim() !== "default" ? value.trim() : null;
-  const nextTasks = tasks.map((task) => {
-    if (task.id !== taskId) return task;
-    found = true;
-    return {
-      ...task,
-      enabled: input.enabled,
-      webGroupId: normalizeGroupId(input.webGroupId),
-      responsesGroupId: normalizeGroupId(input.responsesGroupId),
-      syncMode,
-      allowMobileRtImport,
-      contentSafetyEnabled: input.contentSafetyEnabled,
-      overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
-      planFilter: normalizeSub2ApiPlanFilter(input.planFilter),
-      intervalMinutes: normalizeSub2ApiSyncIntervalMinutes(
-        input.intervalMinutes
-      ),
-      updatedAt: now,
-    };
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    let found = false;
+    const allowMobileRtImport = Boolean(input.allowMobileRtImport);
+    const syncMode = allowMobileRtImport ? input.syncMode : "responses";
+    const now = new Date().toISOString();
+    const normalizeGroupId = (value?: string | null) =>
+      value?.trim() && value.trim() !== "default" ? value.trim() : null;
+    const nextTasks = tasks.map((task) => {
+      if (task.id !== taskId) return task;
+      found = true;
+      return {
+        ...task,
+        enabled: input.enabled,
+        webGroupId: normalizeGroupId(input.webGroupId),
+        responsesGroupId: normalizeGroupId(input.responsesGroupId),
+        syncMode,
+        allowMobileRtImport,
+        contentSafetyEnabled: input.contentSafetyEnabled,
+        overwriteLocalUnavailableState: input.overwriteLocalUnavailableState,
+        planFilter: normalizeSub2ApiPlanFilter(input.planFilter),
+        intervalMinutes: normalizeSub2ApiSyncIntervalMinutes(
+          input.intervalMinutes
+        ),
+        updatedAt: now,
+      };
+    });
+    if (!found) throw new Error("自动同步任务不存在");
+    return { tasks: nextTasks, result: { taskId } };
   });
-  if (!found) throw new Error("自动同步任务不存在");
-  await setSub2ApiAutoSyncTasks(nextTasks);
-  return { taskId };
 }
 
 export async function deleteSub2ApiAutoSyncTask(taskIdInput: string) {
   const taskId = taskIdInput.trim();
-  const tasks = await getSub2ApiAutoSyncTasks();
-  const nextTasks = tasks.filter((task) => task.id !== taskId);
-  if (nextTasks.length === tasks.length) {
-    throw new Error("自动同步任务不存在");
-  }
-  await setSub2ApiAutoSyncTasks(nextTasks);
-  return { taskId, deleted: true };
+  return mutateSub2ApiTaskSetting(normalizeSub2ApiSyncTask, (tasks) => {
+    const nextTasks = tasks.filter((task) => task.id !== taskId);
+    if (nextTasks.length === tasks.length) {
+      throw new Error("自动同步任务不存在");
+    }
+    return { tasks: nextTasks, result: { taskId, deleted: true } };
+  });
 }
 
 async function listSub2ApiSourceGroupsFromPool(pool: Pool) {
@@ -7195,6 +7173,10 @@ async function setImageBackendApiGroups(input: {
 }
 
 export async function upsertImageBackendApi(input: UpsertApiInput) {
+  // 保存和实际发送共用 HTTPS 公网规则；DNS 失败直接拒绝保存。
+  await assertSafePoolApiBaseUrl(input.baseUrl);
+  const replacementKey = input.apiKey?.trim();
+  let existingBaseUrl: string | undefined;
   // groupIds 为多分组真相,primaryGroupId 保留为主分组/向后兼容(取首个分组)。
   const groupIds = accountGroupIdsFromInput(input);
   const primaryGroupId = groupIds[0] || null;
@@ -7205,11 +7187,24 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     const [existingApi] = await db
       .select({
         groupId: imageBackendApi.groupId,
+        baseUrl: imageBackendApi.baseUrl,
         metadata: imageBackendApi.metadata,
       })
       .from(imageBackendApi)
       .where(eq(imageBackendApi.id, input.id))
       .limit(1);
+    if (!existingApi) throw new Error("API 后端不存在");
+    existingBaseUrl = existingApi.baseUrl;
+    // 密钥不可见，改 origin 时必须主动输入新密钥，禁止保留后外传。
+    let sameOrigin = false;
+    try {
+      sameOrigin =
+        new URL(existingApi.baseUrl).origin === new URL(input.baseUrl).origin;
+    } catch {
+      /* 历史非法 URL 也必须重输密钥。 */
+    }
+    if (!sameOrigin && !replacementKey)
+      throw new Error("修改 API 主机或端口时必须重新输入密钥");
     existingPrimaryGroupId = existingApi?.groupId ?? null;
     existingApiMetadata = existingApi?.metadata ?? null;
   }
@@ -7269,10 +7264,18 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
         ? existingPrimaryGroupId || primaryGroupId
         : primaryGroupId,
     };
-    await db
+    // CAS 防止读后另一个管理员换 host/key，再把新密钥送回旧 host。
+    const [saved] = await db
       .update(imageBackendApi)
-      .set(input.apiKey ? { ...update, apiKey: input.apiKey } : update)
-      .where(eq(imageBackendApi.id, input.id));
+      .set(replacementKey ? { ...update, apiKey: replacementKey } : update)
+      .where(
+        and(
+          eq(imageBackendApi.id, input.id),
+          eq(imageBackendApi.baseUrl, existingBaseUrl ?? "")
+        )
+      )
+      .returning({ id: imageBackendApi.id });
+    if (!saved) throw new Error("API 配置已变化，请重新加载后保存");
     await setImageBackendApiGroups({
       apiId: input.id,
       groupIds,
@@ -7281,7 +7284,7 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     return input.id;
   }
 
-  if (!input.apiKey) {
+  if (!replacementKey) {
     throw new Error("apiKey is required");
   }
 
@@ -7293,7 +7296,7 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
   await db.insert(imageBackendApi).values({
     id,
     ...update,
-    apiKey: input.apiKey,
+    apiKey: replacementKey,
   });
   await setImageBackendApiGroups({
     apiId: id,

@@ -35,7 +35,7 @@ export type ImageApiHealthStatus =
   | "error"
   | "unreachable";
 
-/** 单次测活的结构化结果。`message` 为中性原始错误文本或 "OK"。 */
+/** 单次测活结果；message 只含固定分类文案，不含上游正文或异常原文。 */
 export interface ImageApiHealthResult {
   ok: boolean;
   status: ImageApiHealthStatus;
@@ -122,12 +122,13 @@ export function interpretImageHealthResult(
     };
   }
   if (result.error) {
+    const status = classifyImageHealthError(result.error);
     return {
       ok: false,
-      status: classifyImageHealthError(result.error),
+      status,
       latencyMs,
       imageReturned: false,
-      message: result.error,
+      message: healthStatusMessage(status),
     };
   }
   return {
@@ -137,6 +138,18 @@ export function interpretImageHealthResult(
     imageReturned: false,
     message: "上游未返回图片数据",
   };
+}
+
+/** 管理端/用户端共用固定摘要，避免上游回显密钥和内部服务正文。 */
+function healthStatusMessage(
+  status: Exclude<ImageApiHealthStatus, "ok">
+): string {
+  return {
+    no_image: "上游未返回图片数据",
+    auth_failed: "上游拒绝凭据",
+    unreachable: "无法连接上游或请求超时",
+    error: "上游请求失败",
+  }[status];
 }
 
 /**
@@ -208,12 +221,13 @@ export async function checkImageBackendApiHealth(
     }
     const message =
       error instanceof Error ? error.message : "Connection failed";
+    const status = classifyImageHealthError(message);
     return {
       ok: false,
-      status: classifyImageHealthError(message),
+      status,
       latencyMs,
       imageReturned: false,
-      message,
+      message: healthStatusMessage(status),
     };
   } finally {
     clearTimeout(timer);

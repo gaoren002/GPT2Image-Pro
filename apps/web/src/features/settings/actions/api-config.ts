@@ -1,94 +1,18 @@
 "use server";
 
-import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
-import { z } from "zod";
+/** 用户自定义 API 设置；复用公共 URL 校验，测活由 health-check 的安全传输执行。 */
 
 import { db } from "@repo/database";
 import { userApiConfig } from "@repo/database/schema";
 import { protectedAction } from "@repo/shared/safe-action";
 import { canUsePlanCapability } from "@repo/shared/subscription/services/plan-capabilities";
 import { getUserPlan } from "@repo/shared/subscription/services/user-plan";
+import { eq } from "drizzle-orm";
+import { nanoid } from "nanoid";
+import { z } from "zod";
 
 import { checkImageBackendApiHealth } from "@/features/image-backend-pool/health-check";
-
-/**
- * 检查 URL 是否指向私有/内部网络地址
- * 用于防止 SSRF（服务端请求伪造）攻击
- */
-function isPrivateUrl(urlString: string): boolean {
-  try {
-    const url = new URL(urlString);
-    const hostname = url.hostname.toLowerCase();
-
-    // NOTE: DNS rebinding attacks remain a limitation — a domain can resolve to
-    // a public IP at validation time and then to a private IP on the actual
-    // request. A true fix requires performing DNS resolution at validation time
-    // and pinning the resolved IP for the subsequent request.
-
-    // Reject URLs with embedded credentials (can bypass hostname checks in some parsers)
-    if (url.username || url.password) return true;
-
-    if (url.protocol !== "https:") return true;
-    if (hostname === "localhost" || hostname === "::1") return true;
-    // IPv6 loopback with brackets (as parsed by URL constructor)
-    if (hostname === "[::1]") return true;
-    if (hostname === "metadata.google.internal") return true;
-    if (hostname.endsWith(".internal")) return true;
-
-    // Reject IPv6 shorthand hex-encoded private/loopback ranges
-    // e.g., ::ffff:7f00:1 (127.0.0.1), ::ffff:a00:0 (10.0.0.0), ::ffff:c0a8:0 (192.168.0.0)
-    const ipv6HexMatch = hostname.replace(/^\[|\]$/g, "").match(
-      /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/
-    );
-    if (ipv6HexMatch?.[1] && ipv6HexMatch[2]) {
-      const high = Number.parseInt(ipv6HexMatch[1], 16);
-      const a = (high >> 8) & 0xff;
-      const b = high & 0xff;
-      if (a === 10) return true; // 10.0.0.0/8
-      if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-      if (a === 192 && b === 168) return true; // 192.168.0.0/16
-      if (a === 127) return true; // 127.0.0.0/8
-      if (a === 169 && b === 254) return true; // 169.254.0.0/16
-      if (a === 0) return true; // 0.0.0.0/8
-    }
-
-    // Check IPv6-mapped IPv4 addresses (e.g., ::ffff:127.0.0.1)
-    const ipv6MappedMatch = hostname.match(/^::ffff:(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (ipv6MappedMatch) {
-      const a = Number(ipv6MappedMatch[1]);
-      const b = Number(ipv6MappedMatch[2]);
-      if (a === 10) return true;
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      if (a === 192 && b === 168) return true;
-      if (a === 127) return true;
-      if (a === 169 && b === 254) return true;
-      if (a === 0) return true;
-    }
-
-    // 检查私有 IP 地址范围
-    const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (ipMatch) {
-      const a = Number(ipMatch[1]);
-      const b = Number(ipMatch[2]);
-
-      // Reject octal IP notation (e.g., 0177.0.0.1 = 127.0.0.1)
-      const octets = hostname.split(".");
-      if (octets.some((o) => o.length > 1 && o.startsWith("0"))) return true;
-
-      if (a === 10) return true;
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      if (a === 192 && b === 168) return true;
-      if (a === 127) return true;
-      if (a === 169 && b === 254) return true;
-      if (a === 0) return true;
-    }
-
-    return false;
-  } catch {
-    return true;
-  }
-}
+import { assertSafeApiBaseUrl } from "@/features/image-generation/safe-api-fetch";
 
 const optionalTrimmedString = z.preprocess((value) => {
   if (value === null || value === undefined) return undefined;
@@ -109,11 +33,7 @@ const apiModelMappingEntrySchema = z.object({
 });
 
 const apiConfigSchema = z.object({
-  baseUrl: z
-    .string()
-    .trim()
-    .url("Use a valid HTTPS API base URL")
-    .refine((url) => !isPrivateUrl(url), "Use a public HTTPS API base URL"),
+  baseUrl: z.string().trim().url("Use a valid HTTPS API base URL"),
   apiKey: z.string().trim().min(1, "API key is required"),
   model: optionalTrimmedString,
   modelMapping: z.array(apiModelMappingEntrySchema).max(50).optional(),
@@ -129,7 +49,9 @@ const withApiConfigAction = (name: string) =>
 async function ensureCustomApiAllowed(userId: string) {
   const plan = await getUserPlan(userId);
   if (!(await canUsePlanCapability(plan.plan, "customApi.configure"))) {
-    throw new Error("Custom API configuration requires Starter plan or higher.");
+    throw new Error(
+      "Custom API configuration requires Starter plan or higher."
+    );
   }
 }
 
@@ -148,6 +70,8 @@ export const saveApiConfig = withApiConfigAction("save")
   .schema(apiConfigSchema)
   .action(async ({ parsedInput, ctx }) => {
     await ensureCustomApiAllowed(ctx.userId);
+    // 保存前复查 DNS；连接时仍由公共传输 pin IP，不能用保存结果信任后续请求。
+    await assertSafeApiBaseUrl(parsedInput.baseUrl);
 
     const existing = await db
       .select()
@@ -215,11 +139,7 @@ export const toggleApiConfig = withApiConfigAction("toggle")
   });
 
 const apiTestSchema = z.object({
-  baseUrl: z
-    .string()
-    .trim()
-    .url("Use a valid HTTPS API base URL")
-    .refine((url) => !isPrivateUrl(url), "Use a public HTTPS API base URL"),
+  baseUrl: z.string().trim().url("Use a valid HTTPS API base URL"),
   apiKey: z.string().trim().min(1, "API key is required"),
   model: optionalTrimmedString,
   modelMapping: z.array(apiModelMappingEntrySchema).max(50).optional(),
@@ -231,7 +151,7 @@ const apiTestSchema = z.object({
  *
  * 入参为当前表单值，便于"保存前先测"。能力门禁与 SSRF 防护：
  * - 需 `customApi.configure` 能力，避免被当作 SSRF/扫描代理；
- * - baseUrl 经 `isPrivateUrl` 拒绝私网（与真实出图同一防护基线）。
+ * - baseUrl 经公共 HTTPS/DNS 校验，真实出图传输固定已验证 IP 并拒绝重定向。
  * 复用真实出图原语（reportResult=false，不计费/不落库/不改统计），但会真实消耗
  * 上游 1 张图额度；返回结构化结果由前端本地化展示。
  */
@@ -239,6 +159,7 @@ export const testApiConfig = withApiConfigAction("test")
   .schema(apiTestSchema)
   .action(async ({ parsedInput, ctx }) => {
     await ensureCustomApiAllowed(ctx.userId);
+    await assertSafeApiBaseUrl(parsedInput.baseUrl);
     return checkImageBackendApiHealth({
       baseUrl: parsedInput.baseUrl,
       apiKey: parsedInput.apiKey,

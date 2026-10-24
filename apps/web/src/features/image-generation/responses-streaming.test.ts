@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// 这些用例验证协议/回退/计价；安全连接层在 safe-api-fetch.test 独立验证。
+vi.mock("./safe-api-fetch", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./safe-api-fetch")>()),
+  fetchApiRequest: (_config: unknown, url: string, init?: RequestInit) => fetch(url, init),
+}));
+
 vi.mock("@repo/shared/system-settings", () => ({
   getRuntimeSettingBoolean: vi.fn(async () => false),
   getRuntimeSettingNumber: vi.fn(

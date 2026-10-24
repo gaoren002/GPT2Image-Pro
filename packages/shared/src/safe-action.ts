@@ -1,3 +1,4 @@
+/** Server Action 认证与错误出口；数据库失败须先脱敏，再交给日志和监控。 */
 import { headers } from "next/headers";
 import { createSafeActionClient } from "next-safe-action";
 import { z } from "zod";
@@ -11,6 +12,7 @@ import {
 } from "./auth/roles";
 import { logError, logger } from "./logger/index";
 import { captureError } from "./monitoring/index";
+import { describeErrorForLog, isDatabaseError } from "./db/error-summary";
 
 const actionMetadataSchema = z
   .object({
@@ -58,6 +60,16 @@ const baseActionClient = createSafeActionClient({
    * - 生产环境下隐藏具体错误信息
    */
   handleServerError(error) {
+    if (isDatabaseError(error)) {
+      // DrizzleQueryError 的 message/stack/query/params/cause 都可能含凭据。
+      // 创建独立错误，只传摘要；不能复用原始 stack/cause 或把原错误放入 context。
+      const safeError = new Error(describeErrorForLog(error));
+      safeError.name = "DatabaseError";
+      logError(safeError, { source: "server-action" });
+      captureError(safeError, { source: "server-action" });
+      return "数据库操作失败，请稍后重试";
+    }
+
     if (
       error instanceof ActionAuthError ||
       error instanceof ActionBannedError ||

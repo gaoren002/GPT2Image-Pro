@@ -119,6 +119,27 @@ describe("describeErrorForLog", () => {
     );
     expect(describeErrorForLog("plain string")).toBe("plain string");
   });
+
+  it.each([
+    "QUOTA_EXCEEDED",
+    "LIMIT",
+    "AUTHZ",
+  ])("普通业务码 %s 不能被当作数据库错误码", (code) => {
+    const error = Object.assign(new Error("套餐额度已用尽"), {
+      code,
+    });
+    expect(describeErrorForLog(error)).toBe("套餐额度已用尽");
+  });
+
+  it("外层业务错误仍按真实 Drizzle cause 脱敏", () => {
+    const error = new Error("导入失败", {
+      cause: drizzleError({
+        sql: "insert into account values ($1)",
+        bindings: [ACCESS_TOKEN],
+      }),
+    });
+    expect(describeErrorForLog(error)).toBe("DatabaseError");
+  });
 });
 
 describe("hasDatabaseErrorCode", () => {

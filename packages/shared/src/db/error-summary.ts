@@ -95,7 +95,8 @@ export function summarizeDatabaseError(error: unknown): DatabaseErrorSummary {
 }
 
 /**
- * 判断是否为数据库层错误：带驱动错误码，或为 drizzle 的查询包装错误。
+ * 判断是否为数据库层错误：带 PostgreSQL SQLSTATE，或为 drizzle 的查询包装错误。
+ * 普通业务 code（如 QUOTA_EXCEEDED）不属于数据库错误，不能因此隐藏业务提示。
  *
  * WHY 不按 name 判断：drizzle-orm 0.45.2 的 DrizzleQueryError 构造器不设置 this.name
  * （见 drizzle-orm/errors.js），实例的 name 就是 "Error"。它可靠的特征是自有属性
@@ -103,9 +104,14 @@ export function summarizeDatabaseError(error: unknown): DatabaseErrorSummary {
  * 没有 code 时（连接被对端关闭、取连接超时等）只能靠这些特征识别，否则会回退成
  * 原样返回 message，把 SQL 与明文参数写进日志。
  */
-function isDatabaseError(error: unknown): boolean {
+export function isDatabaseError(error: unknown): boolean {
   return collectErrorChain(error).some((link) => {
-    if (readString(link.code)) return true;
+    if (
+      typeof link.code === "string" &&
+      /^(?:[0-9][0-9A-Z]|F0|HV|P0|XX)[0-9A-Z]{3}$/.test(link.code)
+    ) {
+      return true;
+    }
     if (typeof link.query === "string" && Array.isArray(link.params)) {
       return true;
     }

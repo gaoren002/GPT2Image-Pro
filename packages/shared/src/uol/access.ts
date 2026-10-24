@@ -13,7 +13,7 @@
  *   实际归属校验延迟到 execute 内通过 ctx.assertOwnership 执行
  *   （因为此处尚无资源信息）
  */
-import type { AccessRequirement } from "./types";
+import type { AccessRequirement, OperationDefinition } from "./types";
 import type { Principal } from "./principal";
 import { OperationError } from "./errors";
 
@@ -23,12 +23,32 @@ import { OperationError } from "./errors";
  *
  * @param access - 操作声明的权限要求
  * @param principal - 当前调用者身份
+ * @param operation - 操作的只读声明；观察员缺少声明时拒绝，防止绕过网关后默认放行
  * @throws OperationError 权限不足时
  */
 export function assertAccess(
   access: AccessRequirement,
   principal: Principal,
+  operation?: Pick<
+    OperationDefinition,
+    "readOnly" | "destructive" | "hasMaintenanceWrite"
+  >,
 ): void {
+  // 只读角色的约束先于访问级别检查，防止 public/protected/viewer 写操作绕过。
+  // readOnly 与维护性写入/破坏性标记冲突时失败关闭；只读也不授予超管等更高访问级别。
+  if (
+    principal.type === "user" &&
+    principal.role === "observer_admin" &&
+    (operation?.readOnly !== true ||
+      operation.destructive !== false ||
+      operation.hasMaintenanceWrite === true)
+  ) {
+    throw new OperationError(
+      "forbidden",
+      "Observer admin access is read-only",
+    );
+  }
+
   switch (access.kind) {
     case "public":
       // 无需身份验证

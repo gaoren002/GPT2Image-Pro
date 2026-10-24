@@ -1,14 +1,26 @@
-import { describe, expect, it } from "vitest";
+/** 生成错误脱敏回归：真实 Drizzle 包装与驱动错误不得将 SQL、凭据或原始 cause 写入日志。 */
+import { DrizzleQueryError } from "drizzle-orm/errors";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { logError } = vi.hoisted(() => ({ logError: vi.fn() }));
+vi.mock("@repo/shared/logger", () => ({ logError }));
+
 import {
   isInternalDatabaseError,
   toClientErrorMessage,
 } from "./error-sanitize";
 
-// Drizzle 池查询失败的真实形态（issue #35）：message 以 "Failed query:" 开头。
-function drizzleError(): Error {
-  return new Error(
-    'Failed query: select "image_backend_api"."api_key" from "image_backend_api" ' +
-      "inner join \"image_backend_api_group\" ... params: true,true,active"
+const ACCESS_TOKEN = "test_access_token_error_sanitize";
+const REFRESH_TOKEN = "rt_test_error_sanitize";
+const QUERY =
+  'update "image_backend_account" set "access_token" = $1, "refresh_token" = $2';
+
+/** 真实 DrizzleQueryError 不设置 name，且断连 cause 可以没有 code。 */
+function drizzleError(): DrizzleQueryError {
+  return new DrizzleQueryError(
+    QUERY,
+    [ACCESS_TOKEN, REFRESH_TOKEN],
+    new Error(`connection closed ${REFRESH_TOKEN}`)
   );
 }
 
@@ -18,6 +30,8 @@ function pgError(code = "42703"): Error {
   (e as Error & { code: string }).code = code;
   return e;
 }
+
+afterEach(() => vi.clearAllMocks());
 
 describe("isInternalDatabaseError", () => {
   it("识别 Drizzle Failed query 与 Postgres SQLSTATE/severity", () => {
@@ -51,7 +65,70 @@ describe("toClientErrorMessage", () => {
     expect(msg).toBe("请稍后重试");
     expect(msg).not.toContain("Failed query");
     expect(msg).not.toContain("api_key");
-    expect(toClientErrorMessage(pgError(), ctx, "请稍后重试")).toBe("请稍后重试");
+    expect(toClientErrorMessage(pgError(), ctx, "请稍后重试")).toBe(
+      "请稍后重试"
+    );
+  });
+
+  it.each([
+    false,
+    true,
+  ])("无 code 的真实 Drizzle 错误及其 cause 包装不进入日志（wrapped=%s）", (wrapped) => {
+    const original = drizzleError();
+    expect(original.name).toBe("Error");
+    expect(original.cause).not.toHaveProperty("code");
+    expect(original.message).toContain(ACCESS_TOKEN);
+    const error = wrapped
+      ? new Error("生成服务失败", { cause: original })
+      : original;
+
+    expect(toClientErrorMessage(error, ctx, "请稍后重试")).toBe("请稍后重试");
+    expect(logError).toHaveBeenCalledTimes(1);
+    const [reported, context] = logError.mock.calls[0] ?? [];
+    expect(reported).toBeInstanceOf(Error);
+    expect(reported).not.toBe(error);
+    expect(reported).not.toBe(original);
+    expect(reported.name).toBe("DatabaseError");
+    expect(reported.message).toBe("DatabaseError");
+    expect(reported).not.toHaveProperty("cause");
+    expect(reported).not.toHaveProperty("query");
+    expect(reported).not.toHaveProperty("params");
+    expect(context).toEqual(ctx);
+    const logged = JSON.stringify({
+      reported: Object.getOwnPropertyDescriptors(reported),
+      context,
+    });
+    expect(logged).not.toContain(ACCESS_TOKEN);
+    expect(logged).not.toContain(REFRESH_TOKEN);
+    expect(logged).not.toContain(QUERY);
+    expect(logged).not.toContain("params:");
+  });
+
+  it("仅有 severity 的驱动错误也重建安全日志对象", () => {
+    const error = Object.assign(new Error(`db down ${REFRESH_TOKEN}`), {
+      severity: "FATAL",
+    });
+    expect(toClientErrorMessage(error, ctx, "请稍后重试")).toBe("请稍后重试");
+    const [reported, context] = logError.mock.calls[0] ?? [];
+    expect(reported).not.toBe(error);
+    expect(reported).toMatchObject({
+      name: "DatabaseError",
+      message: "DatabaseError",
+    });
+    expect(reported.stack).not.toContain(REFRESH_TOKEN);
+    expect(reported).not.toHaveProperty("cause");
+    expect(context).toEqual(ctx);
+  });
+
+  it("数据库日志保留错误码与可定位 context", () => {
+    toClientErrorMessage(pgError(), { source: "test" }, "fallback");
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "DatabaseError",
+        message: "DatabaseError(code=42703)",
+      }),
+      { source: "test" }
+    );
   });
 
   it("用户级错误原样透传", () => {

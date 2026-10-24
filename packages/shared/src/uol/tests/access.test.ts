@@ -60,9 +60,11 @@ describe("UOL Access Control (assertAccess)", () => {
   describe("public", () => {
     const access: AccessRequirement = { kind: "public" };
 
-    it("allows any principal", () => {
+    it("allows any principal for an explicitly read-only operation", () => {
       for (const p of Object.values(principals)) {
-        expect(() => assertAccess(access, p)).not.toThrow();
+        expect(() =>
+          assertAccess(access, p, { readOnly: true, destructive: false }),
+        ).not.toThrow();
       }
     });
   });
@@ -114,10 +116,10 @@ describe("UOL Access Control (assertAccess)", () => {
       ).not.toThrow();
     });
 
-    it("allows observer_admin", () => {
+    it("rejects observer_admin without operation read-only metadata", () => {
       expect(() =>
         assertAccess(access, principals.observerAdmin),
-      ).not.toThrow();
+      ).toThrow(OperationError);
     });
 
     it("allows system principal", () => {
@@ -175,10 +177,13 @@ describe("UOL Access Control (assertAccess)", () => {
       kind: "imageBackendPoolViewer",
     };
 
-    it("allows observer_admin, admin, super_admin", () => {
-      expect(() =>
-        assertAccess(access, principals.observerAdmin),
-      ).not.toThrow();
+    it("requires operation read-only metadata for observer_admin", () => {
+      expect(() => assertAccess(access, principals.observerAdmin)).toThrow(
+        OperationError,
+      );
+    });
+
+    it("allows admin and super_admin", () => {
       expect(() =>
         assertAccess(access, principals.admin),
       ).not.toThrow();

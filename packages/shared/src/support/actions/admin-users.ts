@@ -82,7 +82,7 @@ function assertCanActOnTarget(
   operation: string
 ) {
   if (!canActOnTargetRole(actorRole, targetRole)) {
-    throw new Error(`无权对该账户执行${operation}：目标权限不低于操作者`);
+    throw new ActionUserError(`无权对该账户执行${operation}：目标权限不低于操作者`);
   }
 }
 
@@ -254,7 +254,7 @@ async function getUserBasicOrThrow(userId: string) {
     .limit(1);
 
   if (!targetUser) {
-    throw new Error("用户不存在");
+    throw new ActionUserError("用户不存在");
   }
 
   return targetUser;
@@ -701,7 +701,12 @@ export const setUserCreditsStatusAction = withAdminUsersAction(
 )
   .schema(setCreditsStatusSchema)
   .action(async ({ parsedInput: data, ctx }) => {
-    await getUserBasicOrThrow(data.userId);
+    const targetUser = await getUserBasicOrThrow(data.userId);
+    assertCanActOnTarget(
+      ctx.role,
+      targetUser.role,
+      data.status === "frozen" ? "冻结积分" : "解冻积分"
+    );
 
     const [before] = await db
       .select()
@@ -767,8 +772,16 @@ export const setExternalApiKeyStatusAction = withAdminUsersAction(
       .limit(1);
 
     if (!apiKey) {
-      throw new Error("API Key 不存在");
+      throw new ActionUserError("API Key 不存在");
     }
+
+    // 必须以数据库中的 Key 所有者为目标校验角色，不能只验证操作者具有管理员身份。
+    const targetUser = await getUserBasicOrThrow(apiKey.userId);
+    assertCanActOnTarget(
+      ctx.role,
+      targetUser.role,
+      data.isActive ? "启用 API Key" : "禁用 API Key"
+    );
 
     await db
       .update(externalApiKey)

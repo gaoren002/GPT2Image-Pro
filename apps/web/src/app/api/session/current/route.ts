@@ -1,3 +1,4 @@
+/** 权威会话端点：复查用户、清理失效 cookie、禁止缓存，响应不包含可重放的会话 token。 */
 import { db, user } from "@repo/database";
 import { auth } from "@repo/shared/auth";
 import { eq } from "drizzle-orm";
@@ -76,9 +77,11 @@ async function getCurrentSessionResponse() {
     return clearAuthCookies(withNoStore(NextResponse.json(null)));
   }
 
+  const { token: _token, ...sessionMetadata } = session.session;
   return withNoStore(
     NextResponse.json({
       ...session,
+      session: sessionMetadata,
       user: toCurrentSessionUser(currentUser),
     })
   );

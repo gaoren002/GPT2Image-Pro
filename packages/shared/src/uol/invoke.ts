@@ -65,9 +65,9 @@ export async function invokeOperation<TOutput = unknown>(
   }
 
   // 1. 访问控制
-  assertAccess(def.access, principal);
+  assertAccess(def.access, principal, def);
 
-  // 2. 输入校验���Zod safeParse 不抛异��，手动转 OperationError）
+  // 2. 输入校验（Zod safeParse 不抛异常，手动转 OperationError）
   const parseResult = def.input.safeParse(rawInput);
   if (!parseResult.success) {
     const issues = parseResult.error.issues.map((issue) => ({

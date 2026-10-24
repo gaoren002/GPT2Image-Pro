@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -250,8 +251,33 @@ export const subscription = pgTable("subscription", {
   currentPeriodStart: timestamp("current_period_start"),
   currentPeriodEnd: timestamp("current_period_end"),
   cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  // Creem 状态水位只由已验签事件推进；其他支付渠道不写这些字段。
+  creemEventCreatedAt: bigint("creem_event_created_at", { mode: "number" }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/** Creem 已验签事件身份凭证；只存摘要，不存原始 payload/客户资料，不作为财务完成标记。 */
+export const creemWebhookEvent = pgTable("creem_webhook_event", {
+  eventId: text("event_id").primaryKey(),
+  eventCreatedAt: bigint("event_created_at", { mode: "number" }).notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  receivedAt: timestamp("received_at").notNull().defaultNow(),
+});
+
+/** 每个 provider 订阅的状态水位；无用户映射时也保留 tombstone，防 checkout 晚到复活。 */
+export const creemSubscriptionState = pgTable("creem_subscription_state", {
+  subscriptionId: text("subscription_id").primaryKey(),
+  userId: text("user_id").references(() => user.id, { onDelete: "restrict" }),
+  eventId: text("event_id").notNull(),
+  eventCreatedAt: bigint("event_created_at", { mode: "number" }).notNull(),
+  snapshot: json("snapshot").$type<{
+    status: string;
+    priceId: string;
+    periodStart: string | null;
+    periodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+  }>().notNull(),
 });
 
 // ============================================
@@ -1239,6 +1265,11 @@ export const generation = pgTable("generation", {
   // 把按 user / status 维度的查询从顺序扫转为有序索引扫描(迁移 0035)。
   index("generation_user_id_created_at_idx").on(table.userId, table.createdAt),
   index("generation_status_created_at_idx").on(table.status, table.createdAt),
+  // 下拉模型列表与默认图库计数只读窄索引，避免每次解引用大 metadata/prompt 行。
+  index("generation_user_model_idx").on(table.userId, table.model),
+  index("generation_user_completed_storage_idx")
+    .on(table.userId, table.createdAt)
+    .where(sql`${table.status} = 'completed' AND ${table.storageKey} IS NOT NULL`),
   // 另有 generation_metadata_gin_idx —— metadata 的 jsonb_path_ops GIN 表达式索引,
   // 加速画廊 draft/upload 的 @? jsonpath 过滤。表达式索引以迁移 0035 的 SQL 为准
   // (Drizzle 对 (metadata::jsonb) 这类表达式索引声明支持不稳定,故此处仅注释登记)。

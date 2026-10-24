@@ -82,7 +82,9 @@ import {
   buildChatRetryHistory,
   type ChatSourceImageReferences,
   createChatSourceImageReceiver,
-  getMessageImageUrls,
+  getChatHistoryImageInput,
+  buildEditableFileRequest,
+  readEditableFileResponse,
 } from "./chat-input-images";
 import { ChatPanel } from "./chat-panel";
 // 聊天叶子组件(高频状态订阅下沉):chatStream 流式气泡、chatMessages 去抖持久化。
@@ -140,6 +142,7 @@ import type { BatchCard as BatchCardShared } from "./chat-message-types";
 import {
   CHAT_CONVERSATION_LIMIT,
   type ChatStorageScope,
+  updateChatConversationMessage,
   compactChatConversations,
   getChatConversationTitle,
   inferChatConversationMode,
@@ -1541,7 +1544,7 @@ function toChatHistory(messages: ChatMessage[]) {
     .map((message) => ({
       role: message.role,
       text: message.text,
-      imageUrls: message.role === "user" ? getMessageImageUrls(message) : [],
+      ...getChatHistoryImageInput(message),
       variants: message.variants?.map((variant) => ({
         text:
           variant.responseText ||
@@ -1585,28 +1588,6 @@ async function urlToEditImageFile(
     previewUrl: URL.createObjectURL(file),
     sourceId,
   };
-}
-
-/** File → base64 data URL(chat(web) PPT/PSD 参考图需 data URL 传给 /api/editable-file/generate)。 */
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-    reader.readAsDataURL(file);
-  });
-}
-
-/** 读 createJsonKeepAliveResponse 响应:剥掉 keep-alive 填充,解析尾部 JSON。 */
-async function readKeepAliveJson(response: Response): Promise<{
-  error?: { message?: string };
-  result?: { primary_url?: string; zip_url?: string | null };
-  credits_charged?: number;
-}> {
-  const text = await response.text();
-  const start = text.indexOf("{");
-  if (start < 0) throw new Error("空响应");
-  return JSON.parse(text.slice(start));
 }
 
 /** 等待会话归属确认，再挂载可读写聊天数据的页面。 */
@@ -3902,7 +3883,7 @@ function AccountCreatePageClient({
           JSON.stringify(sourceMessage.attachmentIds)
         );
       }
-      const receiveSourceImages = sourceMessage
+      const receiveCurrentSourceImages = sourceMessage
         ? createChatSourceImageReceiver({
             scope: chatStorageScope,
             conversationId: chatConversationId,
@@ -3918,6 +3899,34 @@ function AccountCreatePageClient({
               reportChatPersistenceResult(result, isZh),
           })
         : null;
+      const receiveHistoryImages = historyMessages
+        .filter((message) => message.role === "user")
+        .map((message) =>
+          createChatSourceImageReceiver({
+            scope: chatStorageScope,
+            conversationId: chatConversationId,
+            mode: message.mode || "chat",
+            messageId: message.id,
+            attachmentIds: (message.attachments || [])
+              .filter(
+                (item) =>
+                  item.kind !== "file" &&
+                  item.previewUrl?.startsWith("data:image/")
+              )
+              .map((item) => item.id),
+            getMessages: getChatMessages,
+            setMessages: setChatMessages,
+            conversationsRef: chatConversationsRef,
+            setConversations: setChatConversations,
+            titleFallback: isZh ? "未命名对话" : "Untitled chat",
+            onPersistenceResult: (result) =>
+              reportChatPersistenceResult(result, isZh),
+          })
+        );
+      const receiveSourceImages = (payload: unknown) => {
+        receiveCurrentSourceImages?.(payload);
+        for (const receive of receiveHistoryImages) receive(payload);
+      };
       formData.append("prompt", prompt);
       if (generationId) formData.append("generation_id", generationId);
       formData.append(
@@ -6362,44 +6371,78 @@ function AccountCreatePageClient({
     clearChatAttachments();
     setIsChatGenerating(true);
 
-    // 完成/失败时把 assistant 消息定稿(单飞,pendingMessages 即当前状态)。
+    const receiveSourceImages = createChatSourceImageReceiver({
+      scope: chatStorageScope,
+      conversationId: chatConversationId,
+      mode: conversationMode,
+      messageId: userMessageId,
+      attachmentIds: attachmentPreviews
+        .filter((item) => item.kind === "image")
+        .map((item) => item.id),
+      getMessages: getChatMessages,
+      setMessages: setChatMessages,
+      conversationsRef: chatConversationsRef,
+      setConversations: setChatConversations,
+      titleFallback: isZh ? "未命名对话" : "Untitled chat",
+      onPersistenceResult: (result) =>
+        reportChatPersistenceResult(result, isZh),
+    });
+    // 定稿读取确认后的最新消息，导航后只更新原会话，不能把 data URL 或旧活跃指针写回。
     const applyFinal = (
       assistantPatch: Partial<ChatMessage>,
       variantPatch: Partial<ChatVariant>
     ) => {
-      const finalMessages = pendingMessages.map((message) => {
-        if (message.id !== assistantMessageId) return message;
-        const baseVariant = message.variants?.[0] as ChatVariant;
-        return {
-          ...message,
-          ...assistantPatch,
-          variants: [{ ...baseVariant, pending: false, ...variantPatch }],
-        };
-      });
-      setChatMessages(finalMessages);
-      saveChatConversationSnapshot({
-        conversations: chatConversationsRef.current,
+      updateChatConversationMessage({
+        scope: chatStorageScope,
         conversationId: chatConversationId,
         mode: conversationMode,
-        messages: finalMessages,
+        messageId: assistantMessageId,
+        getMessages: getChatMessages,
+        setMessages: setChatMessages,
+        conversationsRef: chatConversationsRef,
+        setConversations: setChatConversations,
         titleFallback: isZh ? "未命名对话" : "Untitled chat",
+        onPersistenceResult: (result) =>
+          reportChatPersistenceResult(result, isZh),
+        update: (message) => ({
+          ...message,
+          ...assistantPatch,
+          variants: [
+            {
+              ...(message.variants?.[0] as ChatVariant),
+              pending: false,
+              ...variantPatch,
+            },
+          ],
+        }),
       });
     };
 
     try {
-      const base64Images = await Promise.all(
-        imageFiles.map((item) => fileToDataUrl(item.file))
-      );
       if (!chatStorageScope.active) return;
+      const imagePreviews = attachmentPreviews.filter(
+        (item) => item.kind === "image"
+      );
       const response = await fetch("/api/editable-file/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, prompt, base64Images, chatRound: true }),
+        body: buildEditableFileRequest({
+          kind,
+          prompt,
+          messageId: userMessageId,
+          images: imageFiles.map((item, index) => ({
+            file: item.file,
+            attachmentId: imagePreviews[index]?.id || "",
+          })),
+        }),
       });
-      const data = await readKeepAliveJson(response);
+      const data = await readEditableFileResponse(
+        response,
+        receiveSourceImages
+      );
       if (!response.ok || data.error) {
         throw new Error(
-          data.error?.message || copy("Generation failed", "生成失败")
+          (typeof data.error === "string" ? data.error : data.error?.message) ||
+            copy("Generation failed", "生成失败")
         );
       }
       const files: Array<{ label: string; url: string }> = [];

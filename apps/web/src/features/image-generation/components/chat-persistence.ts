@@ -418,3 +418,55 @@ export function persistChatConversationSnapshot(
   );
   return activeResult.status === "failed" ? activeResult : result;
 }
+
+/** 异步附件确认/消息定稿共用上下文；读取最新内存，导航后仅更新原会话。 */
+export type ChatConversationUpdateContext = {
+  scope: ChatStorageScope;
+  conversationId: string;
+  mode: ConversationMode;
+  getMessages: () => ChatMessage[];
+  setMessages: (messages: ChatMessage[]) => void;
+  conversationsRef: { current: ChatConversation[] };
+  setConversations: (conversations: ChatConversation[]) => void;
+  titleFallback: string;
+  onPersistenceResult: (result: ChatPersistenceResult) => void;
+};
+
+/** 更新指定消息并保存引用；不恢复已删除会话，不修改当前活跃指针，撤销账号后无副作用。 */
+export function updateChatConversationMessage(
+  params: ChatConversationUpdateContext & {
+    messageId: string;
+    update: (message: ChatMessage) => ChatMessage;
+  }
+) {
+  if (!params.scope.active) return;
+  const current = params.getMessages();
+  const conversation = params.conversationsRef.current.find(
+    (item) => item.id === params.conversationId
+  );
+  const source = current.some((message) => message.id === params.messageId)
+    ? current
+    : conversation?.messages;
+  if (!source) return;
+  let changed = false;
+  const messages = source.map((message) => {
+    if (message.id !== params.messageId) return message;
+    const next = params.update(message);
+    if (next !== message) changed = true;
+    return next;
+  });
+  if (!changed) return;
+  if (source === current) params.setMessages(messages);
+  const conversations = buildChatConversationSnapshot({
+    conversations: params.conversationsRef.current,
+    conversationId: params.conversationId,
+    mode: params.mode,
+    messages,
+    titleFallback: params.titleFallback,
+  });
+  params.conversationsRef.current = conversations;
+  params.setConversations(conversations);
+  params.onPersistenceResult(
+    persistChatConversations(params.scope, conversations)
+  );
+}

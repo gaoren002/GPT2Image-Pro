@@ -1,3 +1,4 @@
+/** 站内聊天生成适配：会话/套餐鉴权、附件校验与引用确认，调用既有单一生成管线。 */
 import { randomUUID } from "node:crypto";
 import { withApiLogging } from "@repo/shared/api-logger";
 import { auth } from "@repo/shared/auth";
@@ -52,6 +53,13 @@ import type {
   StickyBackendMemberState,
   ThinkingLevel,
 } from "@/features/image-generation/types";
+
+import {
+  confirmHistorySourceImages,
+  InputImageReferenceError,
+  parseSourceImageMetadata,
+  prepareHistorySourceImages,
+} from "./input-image-references";
 
 const VALID_QUALITIES = new Set<ImageQuality>([
   "auto",
@@ -374,10 +382,14 @@ async function filesToResponsesInputFiles(
   );
 }
 
+type HistoryInputMessage = ChatHistoryMessage & {
+  sourceImageMetadata?: ReturnType<typeof parseSourceImageMetadata>;
+};
+
 function getHistory(
   formData: FormData,
   maxChatImages: number
-): ChatHistoryMessage[] {
+): HistoryInputMessage[] {
   const value = getText(formData, "history");
   if (!value) return [];
 
@@ -392,7 +404,7 @@ function getHistory(
     throw new Error("history must be an array.");
   }
 
-  return parsed.slice(-24).flatMap((item): ChatHistoryMessage[] => {
+  return parsed.slice(-24).flatMap((item): HistoryInputMessage[] => {
     if (!item || typeof item !== "object") return [];
     const source = item as Record<string, unknown>;
     const role = source.role === "assistant" ? "assistant" : "user";
@@ -561,6 +573,10 @@ function getHistory(
         role,
         text,
         imageUrls,
+        sourceImageMetadata: parseSourceImageMetadata(
+          source.sourceImageMetadata,
+          imageUrls.length
+        ),
         variants,
         activeVariant:
           typeof source.activeVariant === "number"
@@ -963,6 +979,7 @@ export const POST = withApiLogging(async (request: NextRequest) => {
   }
   const inputImagePayload: {
     sourceImageReferences?: ChatSourceImageReferences;
+    historySourceImageReferences?: ChatSourceImageReferences[];
   } = {};
   try {
     for (const file of sourceFiles) {
@@ -982,12 +999,31 @@ export const POST = withApiLogging(async (request: NextRequest) => {
       );
     }
 
+    const pendingHistoryImages = prepareHistorySourceImages(
+      history,
+      uploadLimits,
+      totalUploadSize
+    );
+    const confirmedHistory = await confirmHistorySourceImages(
+      session.user.id,
+      pendingHistoryImages,
+      request.signal
+    );
+    history = normalizeHistoryImageUrls(
+      request,
+      confirmedHistory.history,
+      session.user.id
+    );
+    if (confirmedHistory.references.length)
+      inputImagePayload.historySourceImageReferences =
+        confirmedHistory.references;
+
     const batchId = randomUUID();
     const sourceImageUrls = await uploadTemporaryImageUrls(
       session.user.id,
       batchId,
       sourceFiles,
-      { scope: "requests" }
+      { scope: "requests", signal: request.signal }
     );
     // 复用本次已写入的对象键，返回可由 owner 校验续签的站内 URL，不再上传。
     if (
@@ -1066,6 +1102,13 @@ export const POST = withApiLogging(async (request: NextRequest) => {
 
     if (useStreamResponse) {
       return createImageStreamResponse(async (emit) => {
+        for (const reference of inputImagePayload.historySourceImageReferences ||
+          []) {
+          await emit({
+            type: "input_images",
+            sourceImageReferences: reference,
+          });
+        }
         if (inputImagePayload.sourceImageReferences) {
           await emit({
             type: "input_images",
@@ -1151,7 +1194,13 @@ export const POST = withApiLogging(async (request: NextRequest) => {
           error instanceof Error ? error.message : "Failed to generate image.",
         ...inputImagePayload,
       },
-      { status: 400 }
+      {
+        status: request.signal.aborted
+          ? 499
+          : error instanceof InputImageReferenceError
+            ? error.status
+            : 400,
+      }
     );
   }
 });

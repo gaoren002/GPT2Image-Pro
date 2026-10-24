@@ -97,8 +97,9 @@ export async function uploadTemporaryImageUrls(
   userId: string,
   generationId: string,
   files: File[],
-  options?: { scope?: string }
+  options?: { scope?: string; signal?: AbortSignal }
 ): Promise<TemporaryUploadedImage[] | undefined> {
+  options?.signal?.throwIfAborted();
   if (files.length === 0) return undefined;
 
   try {
@@ -117,6 +118,7 @@ export async function uploadTemporaryImageUrls(
 
     return await Promise.all(
       files.map(async (file, index) => {
+        options?.signal?.throwIfAborted();
         const extension =
           file.type === "image/jpeg"
             ? "jpg"
@@ -125,12 +127,10 @@ export async function uploadTemporaryImageUrls(
               : "png";
         const scope = options?.scope || "requests";
         const key = `${userId}/${scope}/${generationId}-${index}.${extension}`;
-        await storage.putObject(
-          key,
-          bucket,
-          Buffer.from(await file.arrayBuffer()),
-          file.type || "image/png"
-        );
+        const data = Buffer.from(await file.arrayBuffer());
+        options?.signal?.throwIfAborted();
+        await storage.putObject(key, bucket, data, file.type || "image/png");
+        options?.signal?.throwIfAborted();
         const url = await storage.getSignedUrl(
           key,
           bucket,
@@ -144,6 +144,8 @@ export async function uploadTemporaryImageUrls(
       })
     );
   } catch (error) {
+    // 取消必须中止整条输入链，不能降级为 base64 后继续上传或生成。
+    options?.signal?.throwIfAborted();
     logWarn("临时图片 URL 上传失败，回退到 base64 输入", {
       generationId,
       fileCount: files.length,

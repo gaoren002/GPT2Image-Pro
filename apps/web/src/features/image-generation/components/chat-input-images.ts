@@ -1,15 +1,10 @@
 /** 聊天输入图客户端工具：消息参考图筛选、上传确认与重试上下文；只依赖客户端安全模块。 */
 import { parseStorageImageUrl } from "@repo/shared/storage/image-url";
-import type {
-  ChatConversation,
-  ChatMessage,
-  ConversationMode,
-} from "./chat-message-types";
+import type { ChatMessage } from "./chat-message-types";
 import {
-  buildChatConversationSnapshot,
-  type ChatPersistenceResult,
+  type ChatConversationUpdateContext,
   type ChatStorageScope,
-  persistChatConversations,
+  updateChatConversationMessage,
 } from "./chat-persistence";
 
 export type ChatSourceImageReferences = {
@@ -33,6 +28,63 @@ export function getMessageImageUrls(message: ChatMessage) {
     }
   }
   return urls;
+}
+
+/** 历史图片与稳定附件 ID 使用同一筛选；仅旧 data URL 需要服务器回传确认。 */
+export function getChatHistoryImageInput(message: ChatMessage) {
+  if (message.role !== "user") return { imageUrls: [] as string[] };
+  const images = (message.attachments || []).filter(
+    (attachment) =>
+      attachment.kind !== "file" &&
+      getMessageImageUrls({ ...message, attachments: [attachment] }).length > 0
+  );
+  const imageUrls = images.map((attachment) => attachment.previewUrl as string);
+  return {
+    imageUrls,
+    sourceImageMetadata: imageUrls.some((url) => url.startsWith("data:image/"))
+      ? {
+          messageId: message.id,
+          attachmentIds: images.map((attachment) => attachment.id),
+        }
+      : undefined,
+  };
+}
+
+/** PPT/PSD 使用二进制 multipart；同一图片不再在客户端另编码一份 base64 JSON。 */
+export function buildEditableFileRequest(params: {
+  kind: "ppt" | "psd";
+  prompt: string;
+  messageId: string;
+  images: Array<{ attachmentId: string; file: File }>;
+}) {
+  const form = new FormData();
+  form.set("kind", params.kind);
+  form.set("prompt", params.prompt);
+  form.set("chatRound", "true");
+  form.set("source_image_message_id", params.messageId);
+  form.set(
+    "source_image_attachment_ids",
+    JSON.stringify(params.images.map((image) => image.attachmentId))
+  );
+  for (const image of params.images) form.append("image", image.file);
+  return form;
+}
+
+/** 保活 JSON 在最终结果与错误里均可携带确认；先回填再由页面处理业务成功/失败。 */
+export async function readEditableFileResponse(
+  response: Response,
+  receive: (payload: unknown) => void
+): Promise<{
+  error?: { message?: string } | string;
+  result?: { primary_url?: string; zip_url?: string | null };
+  credits_charged?: number;
+}> {
+  const text = await response.text();
+  const start = text.indexOf("{");
+  if (start < 0) throw new Error("空响应");
+  const data = JSON.parse(text.slice(start));
+  receive(data);
+  return data;
 }
 
 /** 重试当前 prompt 时仍携带原参考图，避免把原 prompt 再当作一轮历史文本。 */
@@ -61,10 +113,33 @@ function sourceImageUrlsById(
   if (
     !payload ||
     typeof payload !== "object" ||
-    !("sourceImageReferences" in payload)
+    (!("sourceImageReferences" in payload) &&
+      !("historySourceImageReferences" in payload))
   )
     return null;
-  const value = payload.sourceImageReferences;
+  const history =
+    "historySourceImageReferences" in payload &&
+    Array.isArray(payload.historySourceImageReferences)
+      ? payload.historySourceImageReferences.filter(
+          (item: unknown) =>
+            item &&
+            typeof item === "object" &&
+            "messageId" in item &&
+            item.messageId === messageId
+        )
+      : [];
+  if (history.length > 1) return null;
+  const source =
+    "sourceImageReferences" in payload
+      ? payload.sourceImageReferences
+      : undefined;
+  const value =
+    source &&
+    typeof source === "object" &&
+    "messageId" in source &&
+    source.messageId === messageId
+      ? source
+      : history[0];
   if (
     !value ||
     typeof value !== "object" ||
@@ -99,45 +174,17 @@ function sourceImageUrlsById(
   return urls;
 }
 
-/** 仅替换目标 userMessage 的对应图片；重复事件不复制消息或触发重复写盘。 */
-function replaceSourceImageUrls(
-  messages: ChatMessage[],
-  messageId: string,
-  urls: Map<string, string>
-) {
-  let changed = false;
-  const next = messages.map((message) => {
-    if (message.id !== messageId || message.role !== "user") return message;
-    const attachments = message.attachments?.map((attachment) => {
-      const url = urls.get(attachment.id);
-      if (!url || attachment.kind === "file" || attachment.previewUrl === url)
-        return attachment;
-      changed = true;
-      return { ...attachment, previewUrl: url };
-    });
-    return changed ? { ...message, attachments } : message;
-  });
-  return changed ? next : messages;
-}
-
 /**
  * 接收 JSON 成功/失败结果及 SSE 确认，立即将已上传图片引用写回消息和快照。
  * 账号撤销后无副作用；上传无确认则保留 data URL；本机保存失败仍保留可用引用。
  * 导航期间可更新原会话列表，但不能把旧消息写入其他当前会话或改其活跃指针。
  */
-export function createChatSourceImageReceiver(params: {
-  scope: ChatStorageScope;
-  conversationId: string;
-  mode: ConversationMode;
-  messageId: string;
-  attachmentIds: string[];
-  getMessages: () => ChatMessage[];
-  setMessages: (messages: ChatMessage[]) => void;
-  conversationsRef: { current: ChatConversation[] };
-  setConversations: (conversations: ChatConversation[]) => void;
-  titleFallback: string;
-  onPersistenceResult: (result: ChatPersistenceResult) => void;
-}) {
+export function createChatSourceImageReceiver(
+  params: ChatConversationUpdateContext & {
+    messageId: string;
+    attachmentIds: string[];
+  }
+) {
   return (payload: unknown) => {
     if (!params.scope.active) return;
     const urls = sourceImageUrlsById(
@@ -147,30 +194,24 @@ export function createChatSourceImageReceiver(params: {
       params.attachmentIds
     );
     if (!urls) return;
-    const current = params.getMessages();
-    const conversation = params.conversationsRef.current.find(
-      (item) => item.id === params.conversationId
-    );
-    const source = current.some(
-      (message) => message.id === params.messageId && message.role === "user"
-    )
-      ? current
-      : conversation?.messages;
-    if (!source) return;
-    const messages = replaceSourceImageUrls(source, params.messageId, urls);
-    if (messages === source) return;
-    if (source === current) params.setMessages(messages);
-    const conversations = buildChatConversationSnapshot({
-      conversations: params.conversationsRef.current,
-      conversationId: params.conversationId,
-      mode: params.mode,
-      messages,
-      titleFallback: params.titleFallback,
+    updateChatConversationMessage({
+      ...params,
+      update: (message) => {
+        if (message.role !== "user") return message;
+        let changed = false;
+        const attachments = message.attachments?.map((attachment) => {
+          const url = urls.get(attachment.id);
+          if (
+            !url ||
+            attachment.kind === "file" ||
+            attachment.previewUrl === url
+          )
+            return attachment;
+          changed = true;
+          return { ...attachment, previewUrl: url };
+        });
+        return changed ? { ...message, attachments } : message;
+      },
     });
-    params.conversationsRef.current = conversations;
-    params.setConversations(conversations);
-    params.onPersistenceResult(
-      persistChatConversations(params.scope, conversations)
-    );
   };
 }

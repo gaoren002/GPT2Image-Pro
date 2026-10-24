@@ -1,6 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { db, verification } from "@repo/database";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import {
   getRegistrationEmailRejectionMessage,
   getRegistrationEmailRejectionReason,
@@ -23,6 +24,8 @@ import { getRuntimeRegistrationEmailPolicy } from "./registration-email-policy";
 
 const PURPOSE = "registration-email-code";
 const CODE_LENGTH = 6;
+const MAX_REGISTRATION_EMAIL_LENGTH = 254;
+const registrationEmailSchema = z.email();
 
 /** 发信失败时对外返回的通用文案；具体原因只记录在服务端日志。 */
 export const REGISTRATION_CODE_SEND_FAILED_MESSAGE =
@@ -59,7 +62,12 @@ export async function sendRegistrationVerificationCode(email: string) {
 
   const normalizedEmail = normalizeEmail(email);
 
-  if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+  // 发码只接收一个普通邮箱，不接收显示名、注释或地址列表。先限长再检查格式，
+  // 避免匿名输入进入 Nodemailer 的复杂地址解析；域名/别名策略仍由下方独立判断。
+  if (
+    normalizedEmail.length > MAX_REGISTRATION_EMAIL_LENGTH ||
+    !registrationEmailSchema.safeParse(normalizedEmail).success
+  ) {
     throw new RegistrationVerificationError("Invalid email address");
   }
 

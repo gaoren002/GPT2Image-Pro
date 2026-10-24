@@ -129,7 +129,7 @@
     "pino": "^10.3.1",
     "resend": "^6.14.0",
     "sonner": "^2.0.7",
-    "zod": "^4.4.3"
+    "zod": "4.6.6"
   },
   "peerDependencies": {
     "fumadocs-ui": ">=15",

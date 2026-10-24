@@ -1,7 +1,7 @@
 /** 真实 EventEmitter 语义：连接断开不能变成未监听异常，日志不能带凭据/SQL。 */
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
-import { observePoolErrors } from "../../database/src/pool-errors";
+import { observePoolErrors } from "@repo/database/pool-errors";
 
 afterEach(() => vi.restoreAllMocks());
 

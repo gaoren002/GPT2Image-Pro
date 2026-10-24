@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./schema": "./src/schema.ts",
     "./pool-config": "./src/pool-config.ts",
+    "./pool-errors": "./src/pool-errors.ts",
     "./session-advisory-lock": "./src/session-advisory-lock.ts"
   },
   "scripts": {

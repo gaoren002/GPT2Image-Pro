@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "@repo/ui/components/select";
 import { updateTicketStatusAction } from "../actions/ticket";
-import { ticketStatuses } from "../schemas";
+import { ticketStatuses } from "../constants";
 
 interface AdminTicketStatusSelectProps {
   /** 工单 ID */

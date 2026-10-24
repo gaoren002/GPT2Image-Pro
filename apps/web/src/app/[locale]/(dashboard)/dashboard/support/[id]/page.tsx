@@ -21,7 +21,7 @@ import {
   ticketCategories,
   ticketPriorities,
   ticketStatuses,
-} from "@repo/shared/support/schemas";
+} from "@repo/shared/support/constants";
 import { getServerSession } from "@repo/shared/auth/server";
 import { getUserRoleById } from "@repo/shared/auth/role-server";
 import { isAdminRole } from "@repo/shared/auth/roles";

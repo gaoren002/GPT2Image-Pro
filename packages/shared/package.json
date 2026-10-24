@@ -87,7 +87,9 @@
     "./mcp/user-config": "./src/mcp/user-config.ts",
     "./mcp/user-auth": "./src/mcp/user-auth.ts",
     "./mcp/user-tool-factory": "./src/mcp/user-tool-factory.ts",
-    "./mcp/user-key-actions": "./src/mcp/user-key-actions.ts"
+    "./mcp/user-key-actions": "./src/mcp/user-key-actions.ts",
+    "./support/constants": "./src/support/constants.ts",
+    "./announcements/constants": "./src/announcements/constants.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

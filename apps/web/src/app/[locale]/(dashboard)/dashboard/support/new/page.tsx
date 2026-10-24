@@ -24,7 +24,7 @@ import {
   TicketImagePicker,
   uploadTicketImages,
 } from "@repo/shared/support/components";
-import { ticketCategories, ticketPriorities } from "@repo/shared/support/schemas";
+import { ticketCategories, ticketPriorities } from "@repo/shared/support/constants";
 
 /**
  * 新建工单页面

@@ -1,43 +1,16 @@
 import { z } from "zod";
 
-export const MAX_TICKET_ATTACHMENTS = 4;
-export const MAX_TICKET_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+import { MAX_TICKET_ATTACHMENTS } from "../constants";
+export * from "../constants";
 
 const ticketAttachmentIdsSchema = z
   .array(z.string().uuid("附件ID无效"))
-  .max(MAX_TICKET_ATTACHMENTS, `每条消息最多上传${MAX_TICKET_ATTACHMENTS}张图片`)
+  .max(
+    MAX_TICKET_ATTACHMENTS,
+    `每条消息最多上传${MAX_TICKET_ATTACHMENTS}张图片`
+  )
   .refine((ids) => new Set(ids).size === ids.length, "附件不能重复")
   .default([]);
-
-/**
- * 工单类别选项
- */
-export const ticketCategories = [
-  { value: "billing", label: "账单问题" },
-  { value: "technical", label: "技术支持" },
-  { value: "bug", label: "Bug 报告" },
-  { value: "feature", label: "功能建议" },
-  { value: "other", label: "其他" },
-] as const;
-
-/**
- * 工单优先级选项
- */
-export const ticketPriorities = [
-  { value: "low", label: "低", color: "bg-green-500" },
-  { value: "medium", label: "中", color: "bg-yellow-500" },
-  { value: "high", label: "高", color: "bg-red-500" },
-] as const;
-
-/**
- * 工单状态选项
- */
-export const ticketStatuses = [
-  { value: "open", label: "待处理", color: "bg-blue-500" },
-  { value: "in_progress", label: "处理中", color: "bg-yellow-500" },
-  { value: "resolved", label: "已解决", color: "bg-green-500" },
-  { value: "closed", label: "已关闭", color: "bg-gray-500" },
-] as const;
 
 /**
  * 创建工单 Schema

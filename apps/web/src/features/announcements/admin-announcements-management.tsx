@@ -19,12 +19,12 @@ import {
   getAdminAnnouncementsAction,
   toggleAnnouncementPublishAction,
   updateAnnouncementAction,
-  type AdminAnnouncementItem,
-} from "@repo/shared/announcements";
+} from "@repo/shared/announcements/actions";
+import type { AdminAnnouncementItem } from "@repo/shared/announcements";
 import {
   announcementSeverities,
   type AnnouncementSeverity,
-} from "@repo/shared/announcements/schemas";
+} from "@repo/shared/announcements/constants";
 import { Badge } from "@repo/ui/components/badge";
 import { Button } from "@repo/ui/components/button";
 import {
@@ -347,10 +347,7 @@ export function AdminAnnouncementsManagement({
             const busy = mutatingId === item.id;
 
             return (
-              <Card
-                key={item.id}
-                className="lift-hover"
-              >
+              <Card key={item.id} className="lift-hover">
                 <CardContent className="p-5">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="min-w-0 flex-1 space-y-3">
@@ -376,9 +373,7 @@ export function AdminAnnouncementsManagement({
                         </span>
                       </div>
                       <div>
-                        <h3 className="text-base font-medium">
-                          {item.title}
-                        </h3>
+                        <h3 className="text-base font-medium">{item.title}</h3>
                         <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-sm text-muted-foreground">
                           {item.content}
                         </p>

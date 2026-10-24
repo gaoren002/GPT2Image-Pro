@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import {
   MAX_TICKET_ATTACHMENT_BYTES,
   MAX_TICKET_ATTACHMENTS,
-} from "../schemas";
+} from "../constants";
 
 const ACCEPTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 

@@ -1,18 +1,7 @@
 import { z } from "zod";
 
-export const announcementSeverities = [
-  { value: "info", label: "普通" },
-  { value: "success", label: "更新" },
-  { value: "warning", label: "重要" },
-  { value: "critical", label: "紧急" },
-] as const;
-
-export type AnnouncementSeverity =
-  (typeof announcementSeverities)[number]["value"];
-
-export const announcementSeverityValues = announcementSeverities.map(
-  (item) => item.value
-) as [AnnouncementSeverity, ...AnnouncementSeverity[]];
+import { announcementSeverityValues } from "./constants";
+export * from "./constants";
 
 const optionalDateSchema = z
   .union([z.string(), z.null(), z.undefined()])

@@ -14,6 +14,8 @@ import "./image-generation";
 import "./editable-file";
 // 积分域
 import "./credits";
+// 管理员充值（独立契约，复用原子资金/审计服务）
+import "./credits-admin-grant";
 // 订阅域
 import "./subscription";
 // 用户认证域

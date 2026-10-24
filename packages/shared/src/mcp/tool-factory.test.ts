@@ -6,6 +6,7 @@ import type { Principal } from "../uol/principal";
 import type { AccessRequirement, OperationDefinition } from "../uol/types";
 import { buildAdminMcpTools } from "./tool-factory";
 import { buildUserMcpTools } from "./user-tool-factory";
+import { MCP_ADMIN_PRINCIPAL_USER_ID } from "./admin-auth";
 
 const apiKeyPrincipal = {
   type: "apiKey",
@@ -52,6 +53,24 @@ describe("MCP tool factories", () => {
     clearRegistry();
     delete process.env.MCP_DENIED_OPS;
     delete process.env.MCP_READ_ONLY;
+  });
+
+  it("真实用户充值工具不对管理密钥的虚拟 actor 暴露", () => {
+    registerOperation({
+      name: "credits.adminGrant",
+      domain: "credits",
+      access: { kind: "admin" },
+      execute: async () => ({ ok: true }),
+    });
+    expect(
+      buildAdminMcpTools({
+        ...adminPrincipal,
+        userId: MCP_ADMIN_PRINCIPAL_USER_ID,
+      })
+    ).toEqual([]);
+    expect(buildAdminMcpTools(adminPrincipal).map((tool) => tool.name)).toEqual(
+      ["credits_adminGrant"]
+    );
   });
 
   it("hides user tools until their UOL operation is bound", () => {

@@ -28,7 +28,7 @@ export type McpAuthResult =
  * MCP Admin 固定管理员 userId（MCP 密钥绑定的虚拟身份）。
  * 审计日志中以此标识 MCP 调用来源。
  */
-const MCP_ADMIN_PRINCIPAL_USER_ID = "__mcp_admin__";
+export const MCP_ADMIN_PRINCIPAL_USER_ID = "__mcp_admin__";
 
 /**
  * 验证 MCP Admin 请求的 Authorization header。
@@ -43,7 +43,7 @@ const MCP_ADMIN_PRINCIPAL_USER_ID = "__mcp_admin__";
  * @returns 鉴权结果（含 principal 或错误描述）
  */
 export function authenticateMcpAdmin(
-  authHeader: string | null | undefined,
+  authHeader: string | null | undefined
 ): McpAuthResult {
   const configuredSecret = getMcpAdminSecret();
 

@@ -1,12 +1,7 @@
 "use server";
 
 /** 用户管理 Server Actions；列表委托共享查询，其余操作保留原鉴权、审计和事务护栏。 */
-import {
-  and,
-  desc,
-  eq,
-  sql,
-} from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -34,12 +29,15 @@ import {
   consumeCredits,
   freezeCreditsAccount,
   getCreditsBalance,
-  grantCredits,
   unfreezeCreditsAccount,
 } from "../../credits/core";
 import { expireStalePendingGenerations } from "../../generation-maintenance";
-// 管理员自助充值开关(ADMIN_SELF_CREDITS_GRANT_ENABLED)的运行时读取
-import { getRuntimeSettingBoolean } from "../../system-settings";
+import { invokeOperation } from "../../uol/invoke";
+import { OperationError } from "../../uol/errors";
+import {
+  adminGrant,
+  type AdminCreditGrantResult,
+} from "../../uol/operations/credits-admin-grant";
 import {
   ActionUserError,
   adminAction,
@@ -82,7 +80,9 @@ function assertCanActOnTarget(
   operation: string
 ) {
   if (!canActOnTargetRole(actorRole, targetRole)) {
-    throw new ActionUserError(`无权对该账户执行${operation}：目标权限不低于操作者`);
+    throw new ActionUserError(
+      `无权对该账户执行${operation}：目标权限不低于操作者`
+    );
   }
 }
 
@@ -104,14 +104,6 @@ const updateUserRoleSchema = userIdSchema.extend({
 const banUserSchema = userIdSchema.extend({
   banned: z.boolean(),
   reason: z.string().trim().max(300).optional(),
-});
-
-const grantCreditsSchema = userIdSchema.extend({
-  amount: z
-    .number()
-    .positive("积分数量必须大于0")
-    .max(100000, "单次最多充值10万积分"),
-  reason: reasonSchema,
 });
 
 const adjustCreditsSchema = userIdSchema.extend({
@@ -283,11 +275,7 @@ export const getUserDetailAction = withAdminUsersAction("getUserDetail")
       auditLogs,
       generationSummary,
     ] = await Promise.all([
-      db
-        .select()
-        .from(user)
-        .where(eq(user.id, userId))
-        .limit(1),
+      db.select().from(user).where(eq(user.id, userId)).limit(1),
       db
         .select()
         .from(creditsBalance)
@@ -449,7 +437,11 @@ export const banUserAction = withAdminUsersAction("banUser")
   .action(async ({ parsedInput: data, ctx }) => {
     const targetUser = await getUserBasicOrThrow(data.userId);
     // 目标权限护栏：禁止普通 admin 封禁/解封管理员及超管账户（防锁死超管，见 S-H5）。
-    assertCanActOnTarget(ctx.role, targetUser.role, data.banned ? "封禁" : "解封");
+    assertCanActOnTarget(
+      ctx.role,
+      targetUser.role,
+      data.banned ? "封禁" : "解封"
+    );
     const reason = data.reason || (data.banned ? "管理员操作" : "解除封禁");
 
     await db
@@ -489,66 +481,26 @@ export const banUserAction = withAdminUsersAction("banUser")
   });
 
 export const adminGrantCreditsAction = withAdminUsersAction("grantCredits")
-  .schema(grantCreditsSchema)
+  .schema(adminGrant.input)
   .action(async ({ parsedInput: data, ctx }) => {
-    const targetUser = await getUserBasicOrThrow(data.userId);
-    // 防普通管理员自助铸币(S-H5);超管为最高信任层级,始终允许给自己充值。
-    // 普通管理员默认拒绝,站长可在系统设置(ADMIN_SELF_CREDITS_GRANT_ENABLED)放开。
-    if (data.userId === ctx.userId && ctx.role !== "super_admin") {
-      // WHY: fallback 与 defaultValue 一致(true),存量库未初始化该设置时也放行,
-      // 与"默认允许、站长可关"的产品语义对齐。
-      const selfGrantAllowed = await getRuntimeSettingBoolean(
-        "ADMIN_SELF_CREDITS_GRANT_ENABLED",
-        true
+    let result: AdminCreditGrantResult;
+    try {
+      result = await invokeOperation<AdminCreditGrantResult>(
+        adminGrant.name,
+        data,
+        { type: "user", userId: ctx.userId, role: ctx.role }
       );
-      if (!selfGrantAllowed) {
-        throw new ActionUserError(
-          "不能为自己发放积分;如需允许,请在系统设置中开启「管理员给自己充值」"
-        );
+    } catch (error) {
+      if (error instanceof OperationError && error.code !== "internal_error") {
+        throw new ActionUserError(error.message);
       }
+      throw error;
     }
-    // 目标权限护栏：普通 admin 不得向管理员及超管账户发放积分。
-    assertCanActOnTarget(ctx.role, targetUser.role, "积分发放");
-
-    // 管理员手动充值的积分长期有效、不设过期(与系统赠送的免费积分区分)。
-    const expiresAt = null;
-
-    // 幂等键：确保同一管理员对同一用户的充值操作不会因重复提交而重复入账。
-    // grantCredits 内部通过 credits_batch(source_type, source_ref) 的
-    // onConflictDoNothing 实现幂等；缺少 sourceRef 会绕过该检查。
-    const sourceRef = `admin_grant:${ctx.userId}:${data.userId}:${Date.now()}`;
-
-    const result = await grantCredits({
-      userId: data.userId,
-      amount: data.amount,
-      sourceType: "bonus",
-      sourceRef,
-      debitAccount: `ADMIN:${ctx.userId}`,
-      transactionType: "admin_grant",
-      expiresAt,
-      description: `管理员手动充值: ${data.reason}`,
-      metadata: {
-        adminUserId: ctx.userId,
-        reason: data.reason,
-      },
-    });
-
-    await writeAdminAuditLog({
-      adminUserId: ctx.userId,
-      targetUserId: data.userId,
-      action: "credits.grant",
-      reason: data.reason,
-      after: {
-        amount: data.amount,
-        batchId: result.batchId,
-        transactionId: result.transactionId,
-        expiresAt: null,
-      },
-    });
-
     revalidatePath("/dashboard/users");
     return {
-      message: `已为用户充值 ${data.amount} 积分`,
+      message: result.alreadyGranted
+        ? "该充值请求已处理，本次未重复发放积分"
+        : `已为用户充值 ${result.amount} 积分`,
       ...result,
     };
   });
@@ -729,8 +681,7 @@ export const setUserCreditsStatusAction = withAdminUsersAction(
     await writeAdminAuditLog({
       adminUserId: ctx.userId,
       targetUserId: data.userId,
-      action:
-        data.status === "frozen" ? "credits.freeze" : "credits.unfreeze",
+      action: data.status === "frozen" ? "credits.freeze" : "credits.unfreeze",
       reason: data.reason,
       before: before
         ? {
@@ -748,8 +699,7 @@ export const setUserCreditsStatusAction = withAdminUsersAction(
 
     revalidatePath("/dashboard/users");
     return {
-      message:
-        data.status === "frozen" ? "积分账户已冻结" : "积分账户已解冻",
+      message: data.status === "frozen" ? "积分账户已冻结" : "积分账户已解冻",
     };
   });
 
@@ -766,6 +716,7 @@ export const setExternalApiKeyStatusAction = withAdminUsersAction(
         keyPrefix: externalApiKey.keyPrefix,
         lastFour: externalApiKey.lastFour,
         isActive: externalApiKey.isActive,
+        revokedAt: externalApiKey.revokedAt,
       })
       .from(externalApiKey)
       .where(eq(externalApiKey.id, data.keyId))
@@ -783,15 +734,33 @@ export const setExternalApiKeyStatusAction = withAdminUsersAction(
       data.isActive ? "启用 API Key" : "禁用 API Key"
     );
 
-    await db
+    if (data.isActive && apiKey.revokedAt != null) {
+      throw new ActionUserError(
+        "API Key 已被用户撤销，不能重新启用，请创建新 Key"
+      );
+    }
+
+    const updatedKeys = await db
       .update(externalApiKey)
       .set({ isActive: data.isActive, updatedAt: new Date() })
-      .where(eq(externalApiKey.id, data.keyId));
+      .where(
+        and(
+          eq(externalApiKey.id, data.keyId),
+          // 读取后用户仍可撤销；条件更新与数据库约束共同保证并发撤销胜出。
+          data.isActive ? isNull(externalApiKey.revokedAt) : undefined
+        )
+      )
+      .returning({ id: externalApiKey.id });
+    if (updatedKeys.length === 0) {
+      throw new ActionUserError("API Key 状态已变化，请刷新后重试");
+    }
 
     await writeAdminAuditLog({
       adminUserId: ctx.userId,
       targetUserId: apiKey.userId,
-      action: data.isActive ? "external_api_key.enable" : "external_api_key.disable",
+      action: data.isActive
+        ? "external_api_key.enable"
+        : "external_api_key.disable",
       reason: data.reason,
       before: {
         id: apiKey.id,

@@ -1,15 +1,13 @@
 "use server";
 
 import { randomBytes, createHash } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 
 import { db } from "@repo/database";
 import { externalApiKey } from "@repo/database/schema";
-import {
-  normalizeExternalApiKeyCreditLimit,
-} from "@/features/external-api/quota";
+import { normalizeExternalApiKeyCreditLimit } from "@/features/external-api/quota";
 import { listImageBackendGroupOptions } from "@/features/image-backend-pool/service";
 import { protectedAction } from "@repo/shared/safe-action";
 import {
@@ -166,7 +164,11 @@ export const revokeExternalApiKey = withExternalApiKeyAction("revoke")
 
     await db
       .update(externalApiKey)
-      .set({ isActive: false, updatedAt: new Date() })
+      .set({
+        isActive: false,
+        revokedAt: sql`COALESCE(${externalApiKey.revokedAt}, now())`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(externalApiKey.id, parsedInput.id),

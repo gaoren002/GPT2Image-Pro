@@ -7,6 +7,8 @@ const state = vi.hoisted(() => ({
   freeze: [] as string[],
   unfreeze: [] as string[],
   actorRole: "admin",
+  concurrentRevocation: false,
+  predicates: [] as string[],
 }));
 
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
@@ -38,6 +40,9 @@ vi.mock("@repo/database", async () => {
   );
   const { getTableName } =
     await vi.importActual<typeof import("drizzle-orm")>("drizzle-orm");
+  const { PgDialect } = await vi.importActual<
+    typeof import("drizzle-orm/pg-core")
+  >("drizzle-orm/pg-core");
   /** 从真实 Drizzle schema 提取表名，用于核对写入目标。 */
   const name = (table: unknown) => getTableName(table as never);
   /** 模拟查询链，按顺序返回测试行，不连接数据库。 */
@@ -53,8 +58,16 @@ vi.mock("@repo/database", async () => {
     select: query,
     update: (table: unknown) => ({
       set: (values: unknown) => ({
-        where: async () => {
+        where: (predicate: unknown) => {
+          state.predicates.push(
+            new PgDialect().sqlToQuery(predicate as never).sql
+          );
           state.writes.push({ op: "update", table: name(table), values });
+          const result = Promise.resolve();
+          return Object.assign(result, {
+            returning: async () =>
+              state.concurrentRevocation ? [] : [{ id: "key-1" }],
+          });
         },
       }),
     }),
@@ -137,16 +150,50 @@ const apiKey = {
   keyPrefix: "g2i_test",
   lastFour: "last",
   isActive: true,
+  revokedAt: null,
 };
 
 beforeEach(() => {
   vi.stubEnv("NODE_ENV", "production");
   state.actorRole = "admin";
+  state.concurrentRevocation = false;
+  state.predicates.length = 0;
   state.selectQueue.length = 0;
   state.writes.length = 0;
   state.freeze.length = 0;
   state.unfreeze.length = 0;
   vi.clearAllMocks();
+});
+
+describe("用户撤销的 Key 不可由管理端复活", () => {
+  it("即使超管也不得重新启用已撤销的 Key", async () => {
+    state.actorRole = "super_admin";
+    state.selectQueue.push(
+      [{ ...apiKey, isActive: false, revokedAt: new Date() }],
+      [targetUser]
+    );
+    const result = await setExternalApiKeyStatusAction({
+      keyId: apiKey.id,
+      isActive: true,
+      reason: "test revoke",
+    });
+    expect(result?.serverError).toContain("已被用户撤销");
+    expect(state.writes).toEqual([]);
+  });
+  it("读取后发生撤销时，启用条件不匹配也不得写成功审计", async () => {
+    state.concurrentRevocation = true;
+    state.selectQueue.push([{ ...apiKey, isActive: false }], [targetUser]);
+    const result = await setExternalApiKeyStatusAction({
+      keyId: apiKey.id,
+      isActive: true,
+      reason: "test concurrent",
+    });
+    expect(result?.serverError).toContain("状态已变化");
+    expect(state.predicates.at(-1)).toContain('"revoked_at" is null');
+    expect(
+      state.writes.filter((write) => write.table === "admin_audit_log")
+    ).toEqual([]);
+  });
 });
 afterEach(() => vi.unstubAllEnvs());
 

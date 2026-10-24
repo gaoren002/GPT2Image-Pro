@@ -20,6 +20,7 @@ import type { Principal } from "../uol/principal";
 import { isOperationBound, listOperations } from "../uol/registry";
 import type { AccessRequirement, OperationDefinition } from "../uol/types";
 import { getMcpDeniedOps, getMcpReadOnlyMode } from "./config";
+import { MCP_ADMIN_PRINCIPAL_USER_ID } from "./admin-auth";
 
 /**
  * MCP 工具定义（JSON-RPC tools/list 响应中的单个工具）
@@ -55,6 +56,11 @@ const ALLOWED_ACCESS_KINDS: ReadonlySet<AccessRequirement["kind"]> = new Set([
 const EXCLUDED_DOMAINS: ReadonlySet<string> = new Set([
   "image-generation",
   "external-api",
+]);
+
+// 充值审计的 actor 必须是真实 user 外键；共享管理密钥的虚拟 actor 不可冒充用户。
+const REAL_USER_OPERATIONS: ReadonlySet<string> = new Set([
+  "credits.adminGrant",
 ]);
 
 /**
@@ -113,13 +119,12 @@ function isOperationExposable(
  * 构建 MCP Admin 工具列表。
  *
  * 读取全局 registry，按权限过滤后转换为 MCP 工具格式。
- * principal 参数用于未来细粒度权限控制扩展（当前所有 MCP admin
- * 共享同一 super_admin 身份，已通过 access kind 过滤）。
+ * principal 用于排除需要真实用户审计的虚拟身份；管理权限仍由 access kind 过滤。
  *
- * @param _principal - 当前 MCP 调用者身份（预留扩展）
+ * @param principal - 当前可信的 MCP 调用者身份。
  * @returns 可暴露的 MCP 工具定义数组
  */
-export function buildAdminMcpTools(_principal: Principal): McpToolDefinition[] {
+export function buildAdminMcpTools(principal: Principal): McpToolDefinition[] {
   const deniedOps = getMcpDeniedOps();
   const readOnlyMode = getMcpReadOnlyMode();
   const allOps = listOperations();
@@ -128,6 +133,12 @@ export function buildAdminMcpTools(_principal: Principal): McpToolDefinition[] {
 
   for (const op of allOps) {
     if (!isOperationExposable(op, deniedOps, readOnlyMode)) continue;
+    if (
+      REAL_USER_OPERATIONS.has(op.name) &&
+      (principal.type !== "user" ||
+        principal.userId === MCP_ADMIN_PRINCIPAL_USER_ID)
+    )
+      continue;
 
     const tool: McpToolDefinition = {
       name: operationNameToToolName(op.name),

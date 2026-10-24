@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createAdminGrantIntent } from "./admin-grant-intent";
 import type { AdminUsersListSnapshot } from "../../services/admin-users-list";
 import { toast } from "sonner";
 
@@ -374,6 +375,10 @@ export function AdminUsersManagement({
   const [grantAmount, setGrantAmount] = useState("");
   const [grantReason, setGrantReason] = useState("");
   const [isGranting, setIsGranting] = useState(false);
+  const grantIntent = useRef<ReturnType<typeof createAdminGrantIntent> | null>(
+    null
+  );
+  if (!grantIntent.current) grantIntent.current = createAdminGrantIntent();
 
   const [creditAdjustOpen, setCreditAdjustOpen] = useState(false);
   const [creditAdjustAmount, setCreditAdjustAmount] = useState("");
@@ -533,6 +538,7 @@ export function AdminUsersManagement({
   };
 
   const openGrantDialog = (userRow: UserRow) => {
+    if (!grantIntent.current?.reset()) return;
     setSelectedUser(userRow);
     setGrantAmount("");
     setGrantReason("");
@@ -741,8 +747,13 @@ export function AdminUsersManagement({
     if (!selectedUser) {
       return;
     }
-    const amount = Number.parseFloat(grantAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
+    const amount = Number(grantAmount);
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > 100000 ||
+      Math.round((amount + Number.EPSILON) * 100) / 100 !== amount
+    ) {
       toast.error("请输入有效的积分数量");
       return;
     }
@@ -750,23 +761,31 @@ export function AdminUsersManagement({
       toast.error("请填写充值原因");
       return;
     }
+    const intent = grantIntent.current;
+    const request = intent?.begin({
+      userId: selectedUser.id,
+      amount,
+      reason: grantReason.trim(),
+    });
+    if (!intent || !request) return;
+    let succeeded = false;
     setIsGranting(true);
     try {
-      const result = await adminGrantCreditsAction({
-        userId: selectedUser.id,
-        amount,
-        reason: grantReason.trim(),
-      });
+      const result = await adminGrantCreditsAction(request);
       if (result?.data) {
+        succeeded = true;
         toast.success(result.data.message);
         setGrantOpen(false);
         await reloadCurrent();
       } else if (result?.serverError) {
         toast.error(result.serverError);
+      } else {
+        toast.error("充值未完成，请核对表单后重试");
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "充值失败");
     } finally {
+      intent.finish(request.requestId, succeeded);
       setIsGranting(false);
     }
   };
@@ -1817,7 +1836,12 @@ export function AdminUsersManagement({
         </SheetContent>
       </Sheet>
 
-      <Dialog open={grantOpen} onOpenChange={setGrantOpen}>
+      <Dialog
+        open={grantOpen}
+        onOpenChange={(open) => {
+          if (!isGranting) setGrantOpen(open);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>手动充值积分</DialogTitle>
@@ -1837,7 +1861,11 @@ export function AdminUsersManagement({
                 max={100000}
                 step={0.01}
                 value={grantAmount}
-                onChange={(event) => setGrantAmount(event.target.value)}
+                disabled={isGranting}
+                onChange={(event) => {
+                  if (!grantIntent.current?.reset()) return;
+                  setGrantAmount(event.target.value);
+                }}
               />
             </div>
             <div className="space-y-2">
@@ -1847,14 +1875,22 @@ export function AdminUsersManagement({
               <Textarea
                 id="grantReason"
                 value={grantReason}
-                onChange={(event) => setGrantReason(event.target.value)}
+                disabled={isGranting}
+                onChange={(event) => {
+                  if (!grantIntent.current?.reset()) return;
+                  setGrantReason(event.target.value);
+                }}
                 placeholder="例如：客服补偿、活动奖励、退款补偿"
                 maxLength={300}
               />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setGrantOpen(false)}>
+            <Button
+              variant="outline"
+              disabled={isGranting}
+              onClick={() => setGrantOpen(false)}
+            >
               取消
             </Button>
             <Button onClick={handleGrant} disabled={isGranting}>

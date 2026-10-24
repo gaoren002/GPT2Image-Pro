@@ -425,6 +425,7 @@ export async function ensureRegistrationBonusExpiry(userId: string) {
         eq(creditsBatch.userId, userId),
         eq(creditsBatch.sourceType, "bonus"),
         eq(creditsBatch.status, "active"),
+        gt(creditsBatch.remaining, 0),
         or(
           eq(creditsBatch.sourceRef, sourceRef),
           isNull(creditsBatch.sourceRef)
@@ -477,6 +478,7 @@ export async function extendActiveSubscriptionBatchesExpiry(params: {
         eq(creditsBatch.userId, userId),
         eq(creditsBatch.sourceType, "subscription"),
         eq(creditsBatch.status, "active"),
+        gt(creditsBatch.remaining, 0),
         isNotNull(creditsBatch.expiresAt),
         // 只顺延未过期且比新周期结束日更早的批次：不缩短、不碰已过期、不碰新批次
         gt(creditsBatch.expiresAt, now),
@@ -649,6 +651,7 @@ export async function grantCredits(params: GrantCreditsParams) {
               eq(creditsBatch.userId, userId),
               eq(creditsBatch.sourceType, "refund"),
               eq(creditsBatch.status, "active"),
+            gt(creditsBatch.remaining, 0),
               isNull(creditsBatch.sourceRef),
               or(
                 isNull(creditsBatch.expiresAt),
@@ -1234,8 +1237,10 @@ export async function voidActiveSubscriptionCreditsForUpgrade(
 /**
  * 处理过期批次
  *
- * 扫描并标记所有过期的批次，同时更新用户余额。
- * 使用条件更新保证同一批次在并发运行时只会被处理一次。
+ * 扫描只提供候选 ID；提交时复查到期日、状态和剩余量，避免并发续费或
+ * hold 后仍按旧候选扣款。UPDATE 锁批次后 RETURNING 真实 remaining，
+ * 再记账和扣钱包；与消费/退款保持批次先、钱包后的锁顺序。
+ * 每批次独立事务，失败回滚后可重试；调用方不得嵌套已有事务。
  */
 export async function processExpiredBatches(options?: { userId?: string }) {
   const now = new Date();
@@ -1272,6 +1277,7 @@ export async function processExpiredBatches(options?: { userId?: string }) {
           and(
             eq(creditsBatch.id, batch.id),
             eq(creditsBatch.status, "active"),
+            lt(creditsBatch.expiresAt, now),
             gt(creditsBatch.remaining, 0)
           )
         )
@@ -1287,19 +1293,22 @@ export async function processExpiredBatches(options?: { userId?: string }) {
         return;
       }
 
+      // 金额只取条件更新成功后的行，不能使用扫描快照；hold 已扣走的钱包
+      // 对应 consumed/remaining=0，因此不会再次进入这里扣款。
+      const expiredAmount = normalizeCreditAmount(expiredBatch.remaining);
       const transactionId = crypto.randomUUID();
       await tx.insert(creditsTransaction).values({
         id: transactionId,
         userId: expiredBatch.userId,
         type: "expiration",
-        amount: expiredBatch.remaining,
+        amount: expiredAmount,
         debitAccount: `WALLET:${expiredBatch.userId}`,
         creditAccount: "SYSTEM:expired",
         description: `批次 ${expiredBatch.id} 过期`,
         metadata: {
           batchId: expiredBatch.id,
           originalAmount: expiredBatch.amount,
-          expiredAmount: expiredBatch.remaining,
+          expiredAmount,
           expiresAt: expiredBatch.expiresAt,
         },
       });
@@ -1307,7 +1316,7 @@ export async function processExpiredBatches(options?: { userId?: string }) {
       await tx
         .update(creditsBalance)
         .set({
-          balance: sql`GREATEST(0, ${creditsBalance.balance} - ${expiredBatch.remaining})`,
+          balance: sql`GREATEST(0, ${creditsBalance.balance} - ${expiredAmount})`,
           updatedAt: new Date(),
         })
         .where(eq(creditsBalance.userId, expiredBatch.userId));
@@ -1315,14 +1324,14 @@ export async function processExpiredBatches(options?: { userId?: string }) {
       results.push({
         batchId: expiredBatch.id,
         userId: expiredBatch.userId,
-        expiredAmount: expiredBatch.remaining,
+        expiredAmount,
       });
     });
   }
 
   if (results.length > 0) {
     const totalExpired = results.reduce(
-      (sum, item) => sum + item.expiredAmount,
+      (sum, item) => normalizeCreditAmount(sum + item.expiredAmount),
       0
     );
     logEvent("credits.expired", {

@@ -246,13 +246,23 @@ export function logDebug(
 // API 响应日志
 // ============================================
 
+/** 错误响应体里可安全记录的字段：错误码、类型与截断后的信息，不含请求内容。 */
+export type ApiErrorLogDetails = {
+  errorCode?: string;
+  errorType?: string;
+  errorMessage?: string;
+};
+
 /**
  * 记录 API 响应
+ *
+ * @param details 4xx/5xx 响应体中提取的错误原因（可选），并入同一条日志，便于定位拒绝原因
  */
 export function logApiResponse(
   request: Request,
   response: Response,
-  duration: number
+  duration: number,
+  details?: ApiErrorLogDetails
 ): void {
   const url = new URL(request.url);
   const level =
@@ -264,6 +274,7 @@ export function logApiResponse(
       path: url.pathname,
       status: response.status,
       duration,
+      ...details,
     },
     `${request.method} ${url.pathname} ${response.status} ${duration}ms`
   );

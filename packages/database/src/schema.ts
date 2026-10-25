@@ -1237,6 +1237,9 @@ export const externalApiKey = pgTable(
     // 纯中转模式：开启后该 key 的请求不写生成历史、不上传对象存储、站内不可查看，
     // 仅保留扣费/审核/额度计数。用于保护用户隐私、不额外占用服务器存储。
     relayOnly: boolean("relay_only").notNull().default(false),
+    // 异步任务模式（兼容速度马）：开启后该 key 的生图/编辑一律异步，立即返回
+    // {requestId, status}，结果用 GET /v1/tasks/{requestId} 查询（迁移 0063）。
+    asyncTaskMode: boolean("async_task_mode").notNull().default(false),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },

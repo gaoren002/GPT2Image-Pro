@@ -40,6 +40,7 @@ export type ExternalApiKeySummary = {
   creditLimit: number | null;
   creditsUsed: number;
   relayOnly: boolean;
+  asyncTaskMode: boolean;
   lastUsedAt: Date | string | null;
   isActive: boolean;
   createdAt: Date | string;
@@ -70,6 +71,7 @@ export function normalizeExternalApiKeySummaries(
     creditLimit: typeof key.creditLimit === "number" ? key.creditLimit : null,
     creditsUsed: Number(key.creditsUsed || 0),
     relayOnly: key.relayOnly === true,
+    asyncTaskMode: key.asyncTaskMode === true,
     lastUsedAt:
       key.lastUsedAt instanceof Date
         ? key.lastUsedAt.toISOString()

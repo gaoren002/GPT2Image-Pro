@@ -83,10 +83,15 @@ export function toAsyncImageResultReference(
   };
 }
 
-/** 每次投递重签并按原 response_format 编码；不把生成的 b64 写回任务 Map。 */
+/**
+ * 每次投递重签并按 response_format 编码；不把生成的 b64 写回任务 Map。
+ *
+ * @param responseFormat 缺省用提交时的格式；任务模式查询传 url
+ */
 export async function renderAsyncImageResult(
   request: Request,
-  reference: AsyncImageResultReference
+  reference: AsyncImageResultReference,
+  responseFormat: "url" | "b64_json" = reference.responseFormat
 ) {
   const deliveryRequest = reference.publicBaseUrl
     ? new Request(reference.publicBaseUrl, { signal: request.signal })
@@ -154,7 +159,7 @@ export async function renderAsyncImageResult(
   }
   const payload = await toAsyncImageResultPayload(deliveryRequest, {
     results,
-    responseFormat: reference.responseFormat,
+    responseFormat,
     created: reference.created,
   });
   return {

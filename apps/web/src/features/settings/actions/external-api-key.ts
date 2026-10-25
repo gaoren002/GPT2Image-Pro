@@ -80,6 +80,7 @@ export const getExternalApiKeys = withExternalApiKeyAction("list").action(
         creditLimit: externalApiKey.creditLimit,
         creditsUsed: externalApiKey.creditsUsed,
         relayOnly: externalApiKey.relayOnly,
+        asyncTaskMode: externalApiKey.asyncTaskMode,
         lastUsedAt: externalApiKey.lastUsedAt,
         isActive: externalApiKey.isActive,
         createdAt: externalApiKey.createdAt,
@@ -108,6 +109,7 @@ export const createExternalApiKey = withExternalApiKeyAction("create")
       generationGroupId: z.string().trim().optional().nullable(),
       creditLimit: z.number().min(0).nullable().optional(),
       relayOnly: z.boolean().optional(),
+      asyncTaskMode: z.boolean().optional(),
     })
   )
   .action(async ({ parsedInput, ctx }) => {
@@ -135,6 +137,7 @@ export const createExternalApiKey = withExternalApiKeyAction("create")
       generationGroupId,
       creditLimit: normalizeExternalApiKeyCreditLimit(parsedInput.creditLimit),
       relayOnly,
+      asyncTaskMode: parsedInput.asyncTaskMode === true,
     });
 
     return { apiKey };
@@ -333,4 +336,36 @@ export const updateExternalApiKeyRelay = withExternalApiKeyAction("updateRelay")
       );
 
     return { success: true, relayOnly };
+  });
+
+/**
+ * 开关异步任务模式（兼容速度马）：开启后该 Key 的生图/编辑一律异步、立即返回 requestId，
+ * 结果用 GET /v1/tasks/{requestId} 查询。只改响应格式，不涉及额外权限，任何可用外接 API
+ * 的套餐都可开关。只更新本人的 Key。
+ */
+export const updateExternalApiKeyAsyncTaskMode = withExternalApiKeyAction(
+  "updateAsyncTaskMode"
+)
+  .schema(
+    z.object({
+      id: z.string().min(1),
+      asyncTaskMode: z.boolean(),
+    })
+  )
+  .action(async ({ parsedInput, ctx }) => {
+    await ensureExternalApiAllowed(ctx.userId);
+    await db
+      .update(externalApiKey)
+      .set({
+        asyncTaskMode: parsedInput.asyncTaskMode,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(externalApiKey.id, parsedInput.id),
+          eq(externalApiKey.userId, ctx.userId)
+        )
+      );
+
+    return { success: true, asyncTaskMode: parsedInput.asyncTaskMode };
   });

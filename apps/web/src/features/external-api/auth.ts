@@ -31,6 +31,7 @@ export async function authenticateExternalApiRequest(request: Request) {
       creditsUsed: externalApiKey.creditsUsed,
       lastUsedAt: externalApiKey.lastUsedAt,
       relayOnly: externalApiKey.relayOnly,
+      asyncTaskMode: externalApiKey.asyncTaskMode,
       userBanned: user.banned,
     })
     .from(externalApiKey)
@@ -95,5 +96,7 @@ export async function authenticateExternalApiRequest(request: Request) {
     creditLimit: apiKey.creditLimit ?? null,
     creditsUsed: Number(apiKey.creditsUsed || 0),
     relayOnly,
+    // 异步任务模式只改提交响应与查询格式，不涉及额外权限，无需按套餐复核。
+    asyncTaskMode: apiKey.asyncTaskMode === true,
   };
 }

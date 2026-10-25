@@ -7,11 +7,11 @@ GPT2IMAGE 全部文档的入口。按需选择：
 
 ## 官方参考
 
-- **[系统文档（含外部 API）](/docs/system)** — 系统架构与请求路由，以及外部 API（OpenAI 兼容）参考：鉴权、图像生成 / 编辑、异步任务查询（`async:true`、`GET /v1/images/{task_id}`、`callback_url`）、积分与错误码。
+- **[系统文档（含外部 API）](/docs/system)** — 系统架构与请求路由，以及外部 API（OpenAI 兼容）参考：鉴权、图像生成 / 编辑、异步任务查询（`async:true`、`GET /v1/images/{task_id}`、`callback_url`；兼容速度马的任务模式 `GET /v1/tasks/{requestId}`）、积分与错误码。
 - **[注册与固定邀请码](/docs/registration-invitation)** — 开放注册、固定邀请码的后台与环境变量配置、受邀用户注册步骤，以及轮换和关闭方式。
 
 ## 快速开始
 
 1. 在控制台创建 **API Key**（外部 API 需 Starter 及以上套餐）。
 2. 读 **[系统文档](/docs/system)** 的「通用规则」与鉴权说明。
-3. 图像走 `POST /v1/images/generations`；耗时较长的请求建议异步：带 `async:true` 立即拿 `task_...`，再轮询 `GET /v1/images/{task_id}` 或用 `callback_url` 回调。
+3. 图像走 `POST /v1/images/generations`；耗时较长的请求建议异步：带 `async:true` 立即拿 `task_...`，再轮询 `GET /v1/images/{task_id}` 或用 `callback_url` 回调。按速度马接口对接的客户端可改用任务模式：带 `async:"task"`（或在 Key 上开启「异步任务模式」）立即拿 `requestId`，再查询 `GET /v1/tasks/{requestId}`。

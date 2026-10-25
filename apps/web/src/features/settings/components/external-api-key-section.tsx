@@ -31,6 +31,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldCheck,
+  Timer,
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -44,6 +45,7 @@ import {
   deleteExternalApiKey,
   getExternalApiKeys,
   revokeExternalApiKey,
+  updateExternalApiKeyAsyncTaskMode,
   updateExternalApiKeyGroup,
   updateExternalApiKeyModeration,
   updateExternalApiKeyQuota,
@@ -148,6 +150,7 @@ export function ExternalApiKeySection({
   const [newKeyGroupId, setNewKeyGroupId] = useState("default");
   const [newKeyCreditLimit, setNewKeyCreditLimit] = useState("");
   const [newKeyRelayOnly, setNewKeyRelayOnly] = useState(false);
+  const [newKeyAsyncTaskMode, setNewKeyAsyncTaskMode] = useState(false);
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>(() =>
     quotaDraftsForKeys(initialKeys)
   );
@@ -294,6 +297,19 @@ export function ExternalApiKeySection({
       },
     }
   );
+
+  const {
+    execute: updateKeyAsyncTaskMode,
+    isPending: isUpdatingAsyncTaskMode,
+  } = useAction(updateExternalApiKeyAsyncTaskMode, {
+    onSuccess: () => {
+      toast.success(t("success.updated"));
+      loadKeys();
+    },
+    onError: ({ error }) => {
+      toast.error(error.serverError || t("errors.update"));
+    },
+  });
 
   useEffect(() => {
     if (didLoadRef.current) return;
@@ -494,6 +510,7 @@ export function ExternalApiKeySection({
               generationGroupId: newKeyGroupId,
               creditLimit,
               relayOnly: relayAllowed ? newKeyRelayOnly : false,
+              asyncTaskMode: newKeyAsyncTaskMode,
             });
           }}
           disabled={isCreating || !externalApiAllowed}
@@ -525,6 +542,29 @@ export function ExternalApiKeySection({
           </div>
         </div>
       )}
+      <div className="flex items-start gap-3 rounded-md border border-border bg-muted/30 p-3 transition-colors duration-150 hover:bg-muted/50">
+        <Switch
+          id="new-external-api-key-async-task"
+          checked={newKeyAsyncTaskMode}
+          onCheckedChange={setNewKeyAsyncTaskMode}
+          disabled={!externalApiAllowed}
+          aria-label="异步任务模式"
+        />
+        <div className="space-y-1">
+          <Label
+            htmlFor="new-external-api-key-async-task"
+            className="flex items-center gap-1.5 text-sm"
+          >
+            <Timer className="h-3.5 w-3.5" />
+            异步任务模式（兼容速度马）
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            开启后：生图和编辑请求立即返回任务号 requestId，图片在后台生成，用
+            GET /v1/tasks/{"{requestId}"}{" "}
+            查询结果；扣费与失败退款不变。适合按速度马接口对接的客户端。
+          </p>
+        </div>
+      </div>
       {newKeyGroup && (
         <p className="text-xs text-muted-foreground">
           {t("backendGroup.label")}: {groupOptionLabel(newKeyGroup)}
@@ -567,6 +607,12 @@ export function ExternalApiKeySection({
                     <Badge variant="secondary" className="gap-1">
                       <ShieldCheck className="h-3 w-3" />
                       纯中转
+                    </Badge>
+                  )}
+                  {key.asyncTaskMode && (
+                    <Badge variant="secondary" className="gap-1">
+                      <Timer className="h-3 w-3" />
+                      异步任务
                     </Badge>
                   )}
                 </div>
@@ -735,6 +781,33 @@ export function ExternalApiKeySection({
                     </div>
                   </div>
                 )}
+                <div className="mt-3 flex max-w-xs items-start gap-3">
+                  <Switch
+                    id={`external-key-async-task-${key.id}`}
+                    checked={key.asyncTaskMode}
+                    onCheckedChange={(checked) =>
+                      updateKeyAsyncTaskMode({
+                        id: key.id,
+                        asyncTaskMode: checked,
+                      })
+                    }
+                    disabled={!externalApiAllowed || isUpdatingAsyncTaskMode}
+                    aria-label="异步任务模式"
+                  />
+                  <div className="space-y-1">
+                    <Label
+                      htmlFor={`external-key-async-task-${key.id}`}
+                      className="flex items-center gap-1.5"
+                    >
+                      <Timer className="h-3.5 w-3.5" />
+                      异步任务模式（兼容速度马）
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      立即返回 requestId，用 /v1/tasks/{"{requestId}"}{" "}
+                      查询结果。
+                    </p>
+                  </div>
+                </div>
               </div>
               {key.isActive && (
                 <Button

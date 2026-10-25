@@ -4,6 +4,15 @@
 
 ## 未发布
 
+### 新增
+
+- **外部 API 异步任务模式（可选，兼容速度马）**：单次请求传 `async:"task"`（multipart/URL 写 `async=task`），或在设置 → 外部 API 给 Key 打开「异步任务模式」（该 Key 的生图/编辑不带参数也一律走任务模式）。提交立即返回 `{requestId, status:"processing"}`，用 `GET /v1/tasks/{requestId}` 查询 `{id, status, progress, error, data}`，状态只有 processing / succeeded / failed，成功时图片地址在 `data[].url`。执行、扣费与失败退款与普通 `async` 相同；单张任务的 `requestId` 即 generation_id，服务重启后仍可查询。默认关闭，现有 Key 与 `async:true` 行为不变。
+- **API 错误原因写入访问日志**：4xx/5xx 的 JSON 错误响应会把错误码、类型与截断后的错误信息并入同一条访问日志，排查拒绝原因不再需要按响应字节数反推。
+
+### 升级说明
+
+- 本版本包含数据库迁移 `0063_external_api_key_async_task_mode`（`external_api_key` 新增 `async_task_mode`，默认 false）。须先执行迁移再切换 Web：外部 API 鉴权会读取该列，缺列会导致全部外部 API 鉴权失败。
+
 ## v0.9.4 (2026-10-12)
 
 本版新增可选的「续费顺延积分有效期」系统设置，并修复透明图超分变黑底、

@@ -1,5 +1,11 @@
 /** R35：真实任务 Map 的引用留存、按需交付与纯中转执行前足额背压。 */
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import {
+  ASYNC_IMAGE_RELAY_RESERVATION_BYTES,
+  ASYNC_IMAGE_STORAGE_RESERVATION_BYTES,
+} from "@/features/image-generation/async-image-limits";
+import { assertAsyncImageOutputs } from "@/features/image-generation/async-image-delivery";
+import { toAsyncImageResultReference } from "./async-image-result";
 
 const storage = vi.hoisted(() => ({
   getObject: vi.fn(),
@@ -218,7 +224,10 @@ it("配置的小估算 reservation 不能缩减 relay 单图 32 MiB 上界预留
 });
 
 it("普通引用实际字节也计账，大型内联字段不挤占后续准入", () => {
-  vi.stubEnv("ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES", String(256 * 1024));
+  vi.stubEnv(
+    "ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES",
+    String(ASYNC_IMAGE_STORAGE_RESERVATION_BYTES + 8192)
+  );
   const task = tasks.createAsyncImageTask({
     userId: "owner",
     retention: "storage",
@@ -244,8 +253,7 @@ it("普通引用实际字节也计账，大型内联字段不挤占后续准入"
 });
 
 it("relay 批次预留包含全部可交付候选及编码膨胀，完成不丢已付费结果", () => {
-  const fullReservation =
-    4 * Math.ceil((32 * 1024 * 1024) / 3) * 4 + 128 * 1024 + 8192;
+  const fullReservation = ASYNC_IMAGE_RELAY_RESERVATION_BYTES + 8192;
   vi.stubEnv(
     "ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES",
     String(fullReservation)
@@ -276,6 +284,62 @@ it("relay 批次预留包含全部可交付候选及编码膨胀，完成不丢�
     status: "completed",
     ...result,
   });
+});
+
+it("64 张合法长提示词成品的引用和轮询完整保留，且未超出执行前预留", async () => {
+  const prompt = "\u0000".repeat(32_000);
+  const outputs = Array.from({ length: 64 }, (_, index) => ({
+    generationId: `long-${index}`,
+    imageUrl: `/api/storage/generations/owner/long-${index}.png`,
+    revisedPrompt: prompt,
+    upstreamRevisedPrompt: prompt,
+    outputRole: "final" as const,
+  }));
+  assertAsyncImageOutputs({ revisedPrompt: prompt }, outputs, false);
+  const imageResult = {
+    created: 123,
+    responseFormat: "url" as const,
+    results: [
+      { generationId: "long", creditsConsumed: 3, imageOutputs: outputs },
+    ],
+  };
+  const reference = toAsyncImageResultReference(imageResult, "owner");
+  expect(Buffer.byteLength(JSON.stringify(reference))).toBeLessThan(
+    ASYNC_IMAGE_STORAGE_RESERVATION_BYTES
+  );
+  const task = tasks.createAsyncImageTask({
+    userId: "owner",
+    retention: "storage",
+  });
+  const completed = tasks.completeAsyncImageTask(task.id, { imageResult });
+  if (!completed) throw new Error("missing completion");
+  const delivered = await tasks.resolveAsyncImageTaskResponse(
+    completed,
+    new Request("https://example.test/v1/images/task")
+  );
+  expect(delivered.status).toBe("completed");
+  expect(delivered.credits_consumed).toBe(3);
+  if (!("data" in delivered)) throw new Error("missing delivered images");
+  expect(delivered.data).toHaveLength(64);
+  expect(delivered.data).toEqual(
+    Array.from({ length: 64 }, () =>
+      expect.objectContaining({
+        revised_prompt: prompt,
+        url: expect.any(String),
+      })
+    )
+  );
+  expect(storage.getObject).not.toHaveBeenCalled();
+});
+
+it("普通任务先为长提示词留足容量，小于完整预留时在开工前拒绝", () => {
+  vi.stubEnv(
+    "ASYNC_IMAGE_TASK_MAX_TOTAL_RESULT_BYTES",
+    String(ASYNC_IMAGE_STORAGE_RESERVATION_BYTES - 1)
+  );
+  expect(() =>
+    tasks.createAsyncImageTask({ userId: "owner", retention: "storage" })
+  ).toThrow(/Reduce n/);
 });
 
 it("callback 与 poll 同格式按需读引用，投递失败不丢结果或修改终态", async () => {

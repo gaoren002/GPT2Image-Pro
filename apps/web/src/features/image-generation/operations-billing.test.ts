@@ -275,6 +275,37 @@ beforeEach(() => {
 });
 
 describe("async 结果在成功结算之前检查交付边界", () => {
+  it.each([
+    false,
+    true,
+  ])("合法长提示词经真实管线完整交付并正常结算，不走存储失败退款（relay=%s）", async (relayOnly) => {
+    const prompt = "图".repeat(32_000);
+    state.web.mockResolvedValueOnce({
+      imageBase64: "aW1hZ2U=",
+      revisedPrompt: prompt,
+      upstreamRevisedPrompt: prompt,
+      imageOutputs: [
+        {
+          imageBase64: "aW1hZ2U=",
+          revisedPrompt: prompt,
+          upstreamRevisedPrompt: prompt,
+        },
+      ],
+    });
+    const result = await runImageGenerationForUser({
+      ...input,
+      prompt,
+      relayOnly,
+      asyncDelivery: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.revisedPrompt).toBe(prompt);
+    expect(result.imageOutputs?.[0]?.revisedPrompt).toBe(prompt);
+    expect(result.creditsConsumed).toBeGreaterThan(0);
+    expect(state.refund).not.toHaveBeenCalled();
+    expect(state.putObject).toHaveBeenCalledTimes(relayOnly ? 0 : 1);
+    expect(state.updates.some((row) => row.status === "failed")).toBe(false);
+  });
   it("普通 async 完成状态 UPDATE 失败仍交付已付费引用与真实扣费，保留持久投影意图", async () => {
     state.failCompletionUpdate = true;
     state.web.mockResolvedValueOnce({ imageBase64: "aW1hZ2U=" });
@@ -336,7 +367,7 @@ describe("async 结果在成功结算之前检查交付边界", () => {
         : {
             ...output,
             revisedPrompt:
-              kind === "metadata" ? "图".repeat(40_000) : undefined,
+              kind === "metadata" ? "图".repeat(1024 * 1024) : undefined,
           }
     );
     if (kind === "bytes")

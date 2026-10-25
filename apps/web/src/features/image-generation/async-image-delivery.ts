@@ -4,6 +4,7 @@ import {
   ASYNC_IMAGE_MAX_RELAY_OUTPUTS,
   ASYNC_IMAGE_MAX_STORAGE_OUTPUTS,
   ASYNC_IMAGE_METADATA_BYTES,
+  ASYNC_IMAGE_METADATA_BYTES_PER_OUTPUT,
 } from "./async-image-limits";
 import { readGeneratedImage } from "./generated-image";
 import type { GeneratedImageOutput } from "./types";
@@ -12,7 +13,11 @@ import {
   getOutputFormatContentType,
 } from "./output-format";
 
-/** 对交付用元数据和数量设置有限上界；异常在原管线失败结算分支处理，不截断已付费成品。 */
+/**
+ * 按每张图实际交付的 URL/提示词检查 JSON 字节和数量，异常走原失败结算。
+ * 存图后 output.revisedPrompt 会回退到 upstreamRevisedPrompt；重复的内部副本
+ * 并不进入异步响应，不能叠加导致合法长提示词失败。单张和整批均有有限上界。
+ */
 export function assertAsyncImageOutputs(
   result: { revisedPrompt?: string },
   outputs: GeneratedImageOutput[],
@@ -24,16 +29,24 @@ export function assertAsyncImageOutputs(
   if (outputs.length > maxOutputs) {
     throw new Error("Async image output count exceeds the delivery limit.");
   }
-  const metadata = {
-    revisedPrompt: result.revisedPrompt,
-    outputs: outputs.map((output) => ({
+  const metadata = outputs.map((output) => {
+    const item = {
       imageUrl: output.imageUrl?.startsWith("data:")
         ? undefined
         : output.imageUrl,
-      revisedPrompt: output.revisedPrompt || result.revisedPrompt,
-      upstreamRevisedPrompt: output.upstreamRevisedPrompt,
-    })),
-  };
+      revisedPrompt:
+        output.revisedPrompt ||
+        output.upstreamRevisedPrompt ||
+        result.revisedPrompt,
+    };
+    if (
+      Buffer.byteLength(JSON.stringify(item)) >
+      ASYNC_IMAGE_METADATA_BYTES_PER_OUTPUT
+    ) {
+      throw new Error("Async image metadata exceeds the delivery limit.");
+    }
+    return item;
+  });
   if (
     Buffer.byteLength(JSON.stringify(metadata)) > ASYNC_IMAGE_METADATA_BYTES
   ) {

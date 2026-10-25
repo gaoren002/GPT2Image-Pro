@@ -70,10 +70,10 @@ ASYNC_IMAGE_TASK_MAX_RESULT_BYTES_PER_KEY=268435456
 进程的这三个值。`docker-compose.seoul.yml` 已通过 `env_file` 传入环境文件，
 仅更新 `.env.example` 不会更新服务器配置。本次未修改生产环境或 Compose 资源限额。
 
-普通图像完成任务只保留 generation/storage 引用，预留 128 KiB/生成，poll/callback
+普通图像完成任务只保留 generation/storage 引用，按最多 64 张成品的完整提示词预留约 12.1 MiB/生成，poll/callback
 时才读取原图并编码；不会积存 30 分钟 b64。relayOnly 不保存内容到数据库或对象存储，
 单图原始字节上界 32 MiB，每次生成最多 4 张候选。预留公式为
-`n × (4 × ceil(32 MiB / 3) × 4 + 128 KiB)`，另计任务元数据和 4 KiB 余量。
+`n × (4 × ceil(32 MiB / 3) × 4 + 4 × (32000 × 6 + 4 KiB) + 129 KiB)`，另计任务元数据和 4 KiB 余量。每张提示词按 JSON 最坏转义字节计，内部重复副本不进入交付预算。
 `n` 是 handler 拆出的生成次数，每次虽请求一张，上游 Web 等路径仍可能返回多候选；
 4 是每次生成的保守候选上界，不能直接用请求 `n` 替代，因此总预留会随 `n` 相乘。
 

@@ -1,7 +1,7 @@
 /** 图片维护与专用退款入口；退款意图由持久 outbox 恢复，金额真相仍在 credits 账本。 */
 import { db } from "@repo/database";
 import { generation, generationRefundOutbox } from "@repo/database/schema";
-import { and, asc, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import {
   enqueueGenerationRefund,
   processGenerationRefundOutbox,
@@ -38,6 +38,18 @@ export { enqueueGenerationRefund, processGenerationRefundOutbox };
 
 export const IMAGE_GENERATION_PENDING_TIMEOUT_MS = 20 * 60 * 1000;
 const FAILED_GENERATION_REFUND_SOURCE_SUFFIX = ":failed-recovery-refund";
+
+/**
+ * 失败任务退款回填只覆盖此刻之后创建的任务（新退款路径的生产上线时刻）。
+ *
+ * 旧版退款流水只在 metadata.sourceRef 里带任务 ID，没有 metadata.generationId；R10 按
+ * 任务 ID 汇总的账本净额看不到这些退款，会把旧版已退过、只保留审核费的失败任务当作
+ * 仍在扣费，再按 creditsConsumed 退一次（2026-10-25 上线首轮实测重复退回审核费）。
+ * 更早的失败任务已由旧版结算，若需补偿须按账本审计单独处理，不能用本回填。
+ */
+export const FAILED_GENERATION_RECOVERY_SINCE = new Date(
+  "2026-10-25T01:51:00.000Z"
+);
 
 // 超时文案/选择器抽到 db-free 的 ./generation-timeout（纯分类器 sla-classification
 // 也要用，不能经本模块的 `import { db }` 把数据库连接拖进纯路径）。本模块 pending 清扫
@@ -318,7 +330,8 @@ export async function refundGenerationCredits(params: {
 }
 
 /**
- * 补偿旧版或终态→enqueue 间退出的 failed 任务，只按终态恢复意图是否缺失筛选。
+ * 补偿终态→enqueue 间退出的 failed 任务，只按终态恢复意图是否缺失筛选；只扫描
+ * FAILED_GENERATION_RECOVERY_SINCE 之后创建的任务，旧版任务的账本不足以安全回填。
  * 旧 phase 的意图不代表本次终态已结算；终态意图存在后由 worker 重试，避免反复回填。
  * 只投影结算所需财务标量，最终仍由 R10 在锁内按净扣费与目标费用封顶。
  */
@@ -349,6 +362,8 @@ export async function recoverFailedGenerationRefunds(
     .where(
       and(
         eq(generation.status, "failed"),
+        // 旧版退款流水不带 generationId，账本净额不可信，见 FAILED_GENERATION_RECOVERY_SINCE。
+        gte(generation.createdAt, FAILED_GENERATION_RECOVERY_SINCE),
         sql`COALESCE(${generation.metadata}::jsonb->'asyncCompletion'->>'version', '') <> '1'`,
         // 无法证明费用目标的旧行继续留在 failed/账本待审计，不创建虚假的已结算意图。
         sql`(jsonb_typeof(COALESCE(${generation.metadata}::jsonb->'timeout'->'targetCredits',

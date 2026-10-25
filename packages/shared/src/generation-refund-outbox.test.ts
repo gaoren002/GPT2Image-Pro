@@ -32,6 +32,7 @@ vi.mock("./storage/providers", () => ({ getStorageProvider: vi.fn() }));
 
 import {
   expireStalePendingGenerations,
+  FAILED_GENERATION_RECOVERY_SINCE,
   recoverFailedGenerationRefunds,
   refundGenerationCredits,
 } from "./generation-maintenance";
@@ -205,7 +206,7 @@ describe("R11 崩溃和存量恢复", () => {
       user_id: "u1",
       status: "failed",
       credits_consumed: 10,
-      created_at: "2020-01-01 00:00:00",
+      created_at: "2026-10-26 00:00:00",
       metadata: { timeout: { targetCredits: 4 }, prompt: "secret" },
     });
     expect(await recoverFailedGenerationRefunds()).toMatchObject({
@@ -233,7 +234,7 @@ describe("R11 崩溃和存量恢复", () => {
       user_id: "u1",
       status: "pending",
       credits_consumed: 10,
-      created_at: "2020-01-01 00:00:00",
+      created_at: "2026-10-26 00:00:00",
       metadata: { creditCost: { moderationOnlyCredits: 2 } },
     });
     ledger.failOutboxInsert = true;
@@ -255,7 +256,7 @@ describe("R11 崩溃和存量恢复", () => {
       user_id: "u1",
       status: "pending",
       credits_consumed: 10,
-      created_at: "2020-01-01 00:00:00",
+      created_at: "2026-10-26 00:00:00",
       // 对照上一用例：同样的审核费配置，只多了首笔未确认标记。
       metadata: {
         creditCost: { moderationOnlyCredits: 2 },
@@ -307,6 +308,41 @@ describe("R11 崩溃和存量恢复", () => {
   });
 });
 
+it("新退款路径上线前创建的失败任务不回填：旧退款流水不带 generationId，账本净额不可信", async () => {
+  // 生产实测形状：旧版扣 10.27，以只带 sourceRef 的流水退回 10，行内保留审核费 0.27。
+  // 按任务 ID 汇总的账本只看到 10.27 的消费；若回填，会再把 0.27 退掉。
+  ledger.debit(10.27);
+  const walletBefore = ledger.wallet;
+  ledger.generations.push({
+    id: "g1",
+    user_id: "u1",
+    status: "failed",
+    credits_consumed: 0.27,
+    created_at: "2026-05-17 17:52:27",
+    metadata: {
+      moderationFailureCredits: 0.27,
+      creditCost: { moderationOnlyCredits: 0.27 },
+    },
+  });
+  expect(await recoverFailedGenerationRefunds()).toEqual({
+    enqueued: 0,
+    recoveryFailed: 0,
+  });
+  await processGenerationRefundOutbox();
+  expect(ledger.outbox).toHaveLength(0);
+  expect(ledger.wallet).toBe(walletBefore);
+  // 失败回填扫描（排除异步完成行）；异步完成恢复只扫新版写入的行，不受此限。
+  const scan = ledger.queries.find(
+    (query) =>
+      query.text.includes("NOT EXISTS") &&
+      query.text.includes("'moderationFailureCredits'")
+  );
+  expect(scan?.text).toContain('"generation"."created_at" >= $');
+  expect(scan?.values).toContain(
+    FAILED_GENERATION_RECOVERY_SINCE.toISOString()
+  );
+});
+
 it("恢复旧快照投影已降低时复用原意图，其他 generation 仍收敛", async () => {
   ledger.debit(10);
   ledger.generations.push({
@@ -315,7 +351,7 @@ it("恢复旧快照投影已降低时复用原意图，其他 generation 仍收�
     status: "failed",
     credits_consumed: 10,
     metadata: { timeout: { targetCredits: 4 } },
-    created_at: "2020-01-01 00:00:00",
+    created_at: "2026-10-26 00:00:00",
   });
   await recoverFailedGenerationRefunds();
   await processGenerationRefundOutbox();
@@ -327,7 +363,7 @@ it("恢复旧快照投影已降低时复用原意图，其他 generation 仍收�
     status: "failed",
     credits_consumed: 7,
     metadata: { timeout: { targetCredits: 2 } },
-    created_at: "2020-01-01 00:00:00",
+    created_at: "2026-10-26 00:00:00",
   });
   ledger.failedScanSnapshot = ledger.generations;
   expect(await recoverFailedGenerationRefunds()).toMatchObject({
@@ -352,7 +388,7 @@ it("旧 failed 的审核保留费高于生成失败费时不把审核费用扫�
       moderationFailureCredits: 4,
       creditCost: { moderationOnlyCredits: 1 },
     },
-    created_at: "2020-01-01 00:00:00",
+    created_at: "2026-10-26 00:00:00",
   });
   await recoverFailedGenerationRefunds();
   await processGenerationRefundOutbox();

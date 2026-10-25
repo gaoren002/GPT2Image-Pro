@@ -229,6 +229,16 @@ export class ControlledLedger {
             /"generation_refund_outbox"\."source_ref" = \("generation"\."id" \|\| \$(\d+)\)/.exec(
               text
             )?.[1];
+          // timestamp 列与参数按墙上时间比较（PG 把带 Z 的参数转成无时区 timestamp）。
+          const createdSinceParameter =
+            /"generation"\."created_at" >= \$(\d+)/.exec(text)?.[1];
+          const wallClock = (value: unknown) =>
+            String(value)
+              .replace("T", " ")
+              .replace(/(\.\d+)?Z$/, "");
+          const createdSince = createdSinceParameter
+            ? wallClock(values[Number(createdSinceParameter) - 1])
+            : null;
           const rows = (
             failed && this.failedScanSnapshot
               ? this.failedScanSnapshot
@@ -236,15 +246,18 @@ export class ControlledLedger {
           ).filter((row) =>
             failed
               ? row.status === "failed" &&
+                // 快照即 SQL 已返回的结果集，谓词已在“查询”时生效。
                 (this.failedScanSnapshot !== null ||
-                  !this.outbox.some(
-                    (intent) =>
-                      intent.user_id === row.user_id &&
-                      intent.generation_id === row.id &&
-                      (!terminalRefParameter ||
-                        intent.source_ref ===
-                          `${String(row.id)}${String(values[Number(terminalRefParameter) - 1])}`)
-                  ))
+                  ((createdSince === null ||
+                    wallClock(row.created_at) >= createdSince) &&
+                    !this.outbox.some(
+                      (intent) =>
+                        intent.user_id === row.user_id &&
+                        intent.generation_id === row.id &&
+                        (!terminalRefParameter ||
+                          intent.source_ref ===
+                            `${String(row.id)}${String(values[Number(terminalRefParameter) - 1])}`)
+                    )))
               : row.status === "pending"
           );
           if (failed) {

@@ -147,7 +147,7 @@ function seedGeneration() {
     user_id: "u1",
     status: "pending",
     credits_consumed: 10,
-    created_at: "2020-01-01 00:00:00",
+    created_at: "2026-10-26 00:00:00",
     metadata: {
       moderationFailureCredits: 4,
       creditCost: { moderationOnlyCredits: 4 },

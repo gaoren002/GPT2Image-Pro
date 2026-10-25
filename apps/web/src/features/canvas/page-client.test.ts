@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 /** 真实 React 重渲染与异步完成顺序，验证账号切换不会残留或回灌旧素材。 */
 import { act, createElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot, hydrateRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CanvasPageClient } from "./page-client";
 import type { CanvasEditorProps, CanvasImageSource } from "./types";
 
 const state = vi.hoisted(() => ({
-  owner: "a",
+  owner: "a" as string | undefined,
   latest: null as CanvasEditorProps | null,
   refresh: vi.fn(),
   router: { push: vi.fn(), replace: vi.fn() },
@@ -71,6 +72,25 @@ async function render(owner: string) {
 }
 
 describe("画布账号生命周期", () => {
+  it("SSR 身份未确认、侧栏先恢复身份时，画布水合不应重建 HTML", async () => {
+    await act(async () => root.unmount());
+    const view = createElement(CanvasPageClient, {
+      userId: "a",
+      initialImages: images("a"),
+    });
+    state.owner = undefined;
+    host.innerHTML = renderToString(view);
+    expect(host.textContent).toContain("正在确认账号");
+    state.owner = "a";
+    const recovered: unknown[] = [];
+    await act(async () => {
+      root = hydrateRoot(host, view, {
+        onRecoverableError: (error) => recovered.push(error),
+      });
+    });
+    expect(recovered).toEqual([]);
+    expect(host.textContent).toContain("a-image");
+  });
   it("A 到 B 的软刷新必须使用 B 的新素材列表", async () => {
     await render("a");
     expect(host.textContent).toContain("a-image");

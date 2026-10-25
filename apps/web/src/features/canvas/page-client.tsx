@@ -5,12 +5,25 @@ import { Tabs, TabsList, TabsTrigger } from "@repo/ui/components/tabs";
 import { GitBranch, ImageIcon, Loader2, PencilRuler } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useCreateRuntimeState } from "@/features/image-generation/create-runtime-store";
 import { useRouter } from "@/i18n/routing";
 import { getCanvasImagesAction } from "./actions";
 import { validateCanvasImageUrl } from "./scene-tools";
 import type { CanvasImageSource } from "./types";
+
+/** 水合只需比较固定快照，不订阅其他状态；客户端首次提交后 React 会切到 true。 */
+const subscribeToHydration = () => () => undefined;
+/** 浏览器后续渲染可以读取已恢复的账号状态。 */
+const readClientHydration = () => true;
+/** SSR 与水合首帧保持同一个占位，避免侧栏先写入共享身份时改掉 HTML 结构。 */
+const readServerHydration = () => false;
 
 /** 字体路径必须早于 SDK 模块求值设置，避免首次打开从公共 CDN 取字体。 */
 const Editor = dynamic(
@@ -64,6 +77,11 @@ function CanvasAccountWorkspace({
   initialImages: CanvasImageSource[];
 }) {
   const router = useRouter();
+  const hydrated = useSyncExternalStore(
+    subscribeToHydration,
+    readClientHydration,
+    readServerHydration
+  );
   const params = useSearchParams();
   const [accountId] = useCreateRuntimeState<string | null | undefined>(
     "chatAccountUserId",
@@ -136,13 +154,13 @@ function CanvasAccountWorkspace({
     [userId, router]
   );
 
-  if (accountId !== userId) {
+  if (!hydrated || accountId !== userId) {
     return (
       <div
         role="status"
         className="flex h-96 items-center justify-center text-sm text-muted-foreground"
       >
-        {accountId === undefined
+        {!hydrated || accountId === undefined
           ? "正在确认账号"
           : "账号已变更，请重新进入画布"}
       </div>

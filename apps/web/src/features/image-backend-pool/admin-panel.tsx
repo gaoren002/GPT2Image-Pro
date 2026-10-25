@@ -207,6 +207,8 @@ type Api = {
   imagesUpstreamMode: ImagesUpstreamModeFormValue;
   // 尺寸方言（metadata.sizeDialect）；缺省视为 wxh。
   sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
+  // 异步任务模式（metadata.asyncTaskMode，兼容速度马）；缺省关闭。
+  asyncTaskMode?: boolean;
   useStream: boolean;
   contentSafetyEnabled: boolean;
   isEnabled: boolean;
@@ -811,6 +813,7 @@ export function ImageBackendPoolAdminPanel({
       "responses" as ChatCompletionsUpstreamModeFormValue,
     imagesUpstreamMode: "images" as ImagesUpstreamModeFormValue,
     sizeDialect: "wxh" as ApiSizeDialectFormValue,
+    asyncTaskMode: false,
     useStream: false,
     contentSafetyEnabled: true,
     isEnabled: true,
@@ -1069,6 +1072,7 @@ export function ImageBackendPoolAdminPanel({
         "responses" as ChatCompletionsUpstreamModeFormValue,
       imagesUpstreamMode: "images" as ImagesUpstreamModeFormValue,
       sizeDialect: "wxh" as ApiSizeDialectFormValue,
+      asyncTaskMode: false,
       useStream: false,
       contentSafetyEnabled: true,
       isEnabled: true,
@@ -1226,6 +1230,7 @@ export function ImageBackendPoolAdminPanel({
         api.chatCompletionsUpstreamMode || "responses",
       imagesUpstreamMode: api.imagesUpstreamMode || "images",
       sizeDialect: api.sizeDialect || "wxh",
+      asyncTaskMode: api.asyncTaskMode === true,
       useStream: api.useStream,
       contentSafetyEnabled: api.contentSafetyEnabled,
       isEnabled: api.isEnabled,
@@ -3755,6 +3760,25 @@ export function ImageBackendPoolAdminPanel({
                     }
                   />
                 </div>
+                <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+                  <div>
+                    <Label>异步任务（兼容速度马）</Label>
+                    <p className="text-xs text-muted-foreground">
+                      上游生图/改图受理后只返回任务号 requestId 时开启：自动每 3
+                      秒查询 /v1/tasks/{"{requestId}"}，出图后照常交付，最长等
+                      20 分钟。开启后不发 stream；上游直接返回图片时照常使用。
+                    </p>
+                  </div>
+                  <Switch
+                    checked={apiForm.asyncTaskMode}
+                    onCheckedChange={(checked) =>
+                      setApiForm((current) => ({
+                        ...current,
+                        asyncTaskMode: checked,
+                      }))
+                    }
+                  />
+                </div>
                 <div className="flex items-center justify-between rounded-md border p-3">
                   <Label>是否启用</Label>
                   <Switch
@@ -3875,6 +3899,9 @@ export function ImageBackendPoolAdminPanel({
                       <ApiOperationalStatusBadge api={api} />
                       {api.isEnabled && api.alwaysActive && (
                         <Badge variant="outline">遇错常驻</Badge>
+                      )}
+                      {api.asyncTaskMode && (
+                        <Badge variant="outline">异步任务</Badge>
                       )}
                     </div>
                     <p className="mt-1 text-sm text-muted-foreground">

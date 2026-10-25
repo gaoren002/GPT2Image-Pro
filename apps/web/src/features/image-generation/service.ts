@@ -130,6 +130,10 @@ import type {
   PartialImageResult,
   ThinkingLevel,
 } from "./types";
+import {
+  pollUpstreamImageTask,
+  readUpstreamTaskId,
+} from "./upstream-async-task";
 
 const VALID_QUALITIES = new Set<ImageQuality>([
   "auto",
@@ -2711,7 +2715,8 @@ function appendImageParams(
     formData.append("background", background);
   }
 
-  if (config.useStream) {
+  // 异步任务模式的上游只回任务号，不发 stream。
+  if (config.useStream && !isAsyncTaskBackend(config)) {
     formData.append("stream", "true");
     formData.append("partial_images", "2");
   }
@@ -4280,6 +4285,81 @@ async function parseImageResponse(
   return withRetryMetadata(result, responseRetryMetadata);
 }
 
+/** 池 API 成员是否开启异步任务模式（metadata.asyncTaskMode，见 upstream-async-task.ts）。 */
+function isAsyncTaskBackend(config: ApiConfig) {
+  return (
+    config.backend?.type === "pool-api" && config.backend.asyncTaskMode === true
+  );
+}
+
+/**
+ * 异步任务模式下解析 images 接口的受理响应：带任务号时轮询 GET {baseUrl}/tasks/{id}
+ * 取图；直接返回图片、HTTP 错误、非 JSON（含 SSE）仍按 parseImageResponse 原逻辑处理，
+ * 上游临时改回同步出图也不受影响。
+ *
+ * @throws signal 中断时抛出取消错误，与同步请求被取消时的处理一致
+ */
+async function parseAsyncTaskImageResponse(
+  config: ApiConfig,
+  response: Response,
+  options: { signal?: AbortSignal; callbacks?: ImageGenerationCallbacks }
+): Promise<GenerateImageResult> {
+  const contentType = response.headers.get("content-type") || "";
+  if (!response.ok || !contentType.includes("application/json")) {
+    return parseImageResponse(response, options.callbacks);
+  }
+  const responseRetryMetadata = getResponseRetryMetadata(response);
+  const payload = safeParseJson(
+    await response.text().catch(() => "")
+  ) as ImageResponsePayload | null;
+  const direct = payload ? extractImageFromPayload(payload) : null;
+  if (direct) return withRetryMetadata(direct, responseRetryMetadata);
+
+  const taskId = readUpstreamTaskId(payload);
+  if (!taskId) {
+    return withRetryMetadata(
+      { error: getPayloadError(payload) || "API returned no image data" },
+      { ...responseRetryMetadata, ...extractPayloadRetryMetadata(payload) }
+    );
+  }
+
+  const polled = await pollUpstreamImageTask({
+    taskId,
+    signal: options.signal,
+    // 任务号已限定字符集；仍编码后拼接，且 fetchApiRequest 只放行与 baseUrl 同 origin 的请求。
+    fetchTask: (signal) =>
+      fetchApiRequest(
+        config,
+        `${config.baseUrl}/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "GET",
+          redirect: "manual",
+          signal,
+          headers: getHeaders(config, {}),
+        }
+      ),
+    formatHttpError: (taskResponse, body) =>
+      getHttpErrorMessage(taskResponse, body, "Images API"),
+  });
+  if ("error" in polled) return { error: polled.error };
+  return (
+    extractImageFromPayload({ data: polled.images }) ?? {
+      error: "API returned no image data",
+    }
+  );
+}
+
+/** images 接口响应解析入口：按成员是否开启异步任务模式分流。 */
+function parseUpstreamImageResponse(
+  config: ApiConfig,
+  response: Response,
+  options: { signal?: AbortSignal; callbacks?: ImageGenerationCallbacks }
+): Promise<GenerateImageResult> {
+  return isAsyncTaskBackend(config)
+    ? parseAsyncTaskImageResponse(config, response, options)
+    : parseImageResponse(response, options.callbacks);
+}
+
 export async function getUserApiConfig(
   userId: string
 ): Promise<ApiConfig | null> {
@@ -4727,7 +4807,10 @@ async function generateImageForBackend(
               }
             : {}),
           ...(background ? { background } : {}),
-          ...(config.useStream ? { stream: true, partial_images: 2 } : {}),
+          // 异步任务模式的上游只回任务号，不发 stream。
+          ...(config.useStream && !isAsyncTaskBackend(config)
+            ? { stream: true, partial_images: 2 }
+            : {}),
           ...(isCodexDirect ? {} : { response_format: "b64_json" }),
         }),
       }
@@ -4735,7 +4818,10 @@ async function generateImageForBackend(
 
     return requireImageOutput(
       applyPromptOptimizationResultVisibility(
-        await parseImageResponse(response, callbacks)
+        await parseUpstreamImageResponse(config, response, {
+          signal: params.signal,
+          callbacks,
+        })
       )
     );
   } catch (error) {
@@ -5024,7 +5110,10 @@ async function editImageForBackend(
       config,
       requireImageOutput(
         applyPromptOptimizationResultVisibility(
-          await parseImageResponse(response, callbacks)
+          await parseUpstreamImageResponse(config, response, {
+            signal: params.signal,
+            callbacks,
+          })
         )
       ),
       requestedQuality,

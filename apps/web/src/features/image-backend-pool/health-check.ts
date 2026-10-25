@@ -51,6 +51,8 @@ export interface ImageApiHealthCheckInput {
   model?: string | null;
   modelMapping?: ApiConfig["modelMapping"];
   useStream?: boolean;
+  /** 池 API 异步任务模式：受理只回任务号的上游，测活同样轮询任务取图。 */
+  asyncTaskMode?: boolean;
   apiInterfaceMode?: ImageBackendApiInterfaceMode;
   imagesUpstreamMode?: ImagesUpstreamMode;
   chatCompletionsUpstreamMode?: ChatCompletionsUpstreamMode;
@@ -163,8 +165,13 @@ function healthStatusMessage(
 export async function checkImageBackendApiHealth(
   input: ImageApiHealthCheckInput
 ): Promise<ImageApiHealthResult> {
+  // 异步上游先受理再出图，加上轮询间隔通常更慢，默认给到上限。
   const timeoutMs = Math.min(
-    Math.max(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS),
+    Math.max(
+      input.timeoutMs ??
+        (input.asyncTaskMode ? MAX_TIMEOUT_MS : DEFAULT_TIMEOUT_MS),
+      MIN_TIMEOUT_MS
+    ),
     MAX_TIMEOUT_MS
   );
   const controller = new AbortController();
@@ -189,6 +196,7 @@ export async function checkImageBackendApiHealth(
       apiInterfaceMode: input.apiInterfaceMode,
       imagesUpstreamMode: input.imagesUpstreamMode,
       chatCompletionsUpstreamMode: input.chatCompletionsUpstreamMode,
+      asyncTaskMode: input.asyncTaskMode === true,
       // 关键：关闭上报与租约，保证纯探测、无副作用。
       reportResult: false,
       inflightLease: false,

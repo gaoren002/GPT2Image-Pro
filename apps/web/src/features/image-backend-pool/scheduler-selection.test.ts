@@ -814,6 +814,36 @@ describe("image backend pool scheduler selection", () => {
     ]);
   });
 
+  it.each([
+    [{ asyncTaskMode: true, sizeDialect: "exact-ratio" }, true],
+    [{ asyncTaskMode: "true" }, false],
+    [null, false],
+  ])("池 API metadata %j 的异步任务模式带入出站配置", async (metadata, expected) => {
+    dbMock.state.accounts = [];
+    dbMock.state.apis = [
+      {
+        id: "api-1",
+        groupId: "group-a",
+        name: "API 1",
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "test-key",
+        interfaceMode: "images",
+        priority: 10,
+        concurrency: 1,
+        lastAcquiredAt: null,
+        lastUsedAt: null,
+        createdAt: new Date(2026, 0, 1),
+        metadata,
+      },
+    ];
+    const result = await resolveImageBackendPoolConfig({
+      userId: "user-a",
+      requestKind: "image_generation",
+    });
+    expect(result?.memberId).toBe("api-1");
+    expect(result?.config.backend?.asyncTaskMode).toBe(expected);
+  });
+
   it("行锁内采用管理员最新降低的并发上限", async () => {
     dbMock.state.accounts = [
       { ...makeAccount(1), concurrency: 3 },

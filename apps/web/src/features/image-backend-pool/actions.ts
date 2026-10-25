@@ -630,6 +630,8 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
         chatCompletionsUpstreamModeSchema.default("responses"),
       imagesUpstreamMode: imagesUpstreamModeSchema.default("images"),
       sizeDialect: apiSizeDialectSchema.default("wxh"),
+      // 异步任务模式（存 metadata.asyncTaskMode，兼容速度马）：受理只回任务号的上游。
+      asyncTaskMode: z.boolean().default(false),
       useStream: z.boolean().default(false),
       contentSafetyEnabled: z.boolean().default(true),
       isEnabled: z.boolean().default(true),
@@ -656,6 +658,7 @@ export const saveImageBackendApiAction = withImageBackendPoolAdminAction(
       chatCompletionsUpstreamMode: parsedInput.chatCompletionsUpstreamMode,
       imagesUpstreamMode: parsedInput.imagesUpstreamMode,
       sizeDialect: parsedInput.sizeDialect,
+      asyncTaskMode: parsedInput.asyncTaskMode,
       useStream: parsedInput.useStream,
       contentSafetyEnabled: parsedInput.contentSafetyEnabled,
       isEnabled: parsedInput.isEnabled,

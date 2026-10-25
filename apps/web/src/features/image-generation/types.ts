@@ -351,6 +351,9 @@ export interface ApiConfig {
     // - "ratio-string"：上游只认比例串（如 "3:2"）；预设档位请求改发比例串，
     //   自定义尺寸仍发 WxH（无法精确表达时按上游能力取舍）。
     sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
+    // 池 API 异步任务模式（metadata.asyncTaskMode，兼容速度马）：images 接口受理后只回
+    // 任务号时，轮询 GET {baseUrl}/tasks/{id} 取图，不发 stream。见 upstream-async-task.ts。
+    asyncTaskMode?: boolean;
     billingGroupId?: string | null;
     billingMultiplier?: number;
     // 池 API / 池账号成员的质量计价倍率表（quality → 倍率，DB json 原样）。

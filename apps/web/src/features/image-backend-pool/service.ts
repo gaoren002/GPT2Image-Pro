@@ -426,6 +426,14 @@ function normalizeApiSizeDialect(
   return value === "exact-ratio" || value === "ratio-string" ? value : "wxh";
 }
 
+// 池 API 异步任务模式（metadata.asyncTaskMode，兼容速度马）：只有显式 true 才开启。
+// 语义见 image-generation/types.ts 与 upstream-async-task.ts。
+function normalizeApiAsyncTaskMode(
+  metadata: Record<string, unknown> | null | undefined
+) {
+  return asGroupMetadata(metadata).asyncTaskMode === true;
+}
+
 function stripTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -3024,6 +3032,7 @@ function toResolvedPoolConfig(
             options.accountBackendPreference === "responses",
           // 尺寸方言（metadata.sizeDialect）：见 image-generation/types.ts 注释。
           sizeDialect: normalizeApiSizeDialect(member.metadata),
+          asyncTaskMode: normalizeApiAsyncTaskMode(member.metadata),
           billingGroupId: fallbackGroupId,
           // 仅组倍率，不套成员倍率。
           billingMultiplier,
@@ -7090,6 +7099,8 @@ type UpsertApiInput = {
   imagesUpstreamMode?: ImagesUpstreamMode;
   // 尺寸方言（写入 metadata.sizeDialect，解析见 image-generation/types.ts）。
   sizeDialect?: "wxh" | "exact-ratio" | "ratio-string";
+  // 异步任务模式（写入 metadata.asyncTaskMode）；undefined=不改动。
+  asyncTaskMode?: boolean;
   useStream: boolean;
   contentSafetyEnabled: boolean;
   isEnabled: boolean;
@@ -7192,13 +7203,18 @@ export async function upsertImageBackendApi(input: UpsertApiInput) {
     concurrency: Math.max(1, Math.min(10000, input.concurrency)),
     status: input.status || "active",
     updatedAt: new Date(),
-    // 尺寸方言并入 metadata（保留其他键；显式传 wxh 时也落库，便于后台回显）。
-    ...(input.sizeDialect !== undefined || input.modelBilling !== undefined
+    // 尺寸方言、异步任务模式并入 metadata（保留其他键；显式传默认值时也落库，便于后台回显）。
+    ...(input.sizeDialect !== undefined ||
+    input.asyncTaskMode !== undefined ||
+    input.modelBilling !== undefined
       ? {
           metadata: {
             ...(existingApiMetadata ?? {}),
             ...(input.sizeDialect !== undefined
               ? { sizeDialect: input.sizeDialect }
+              : {}),
+            ...(input.asyncTaskMode !== undefined
+              ? { asyncTaskMode: input.asyncTaskMode }
               : {}),
             ...(input.modelBilling !== undefined
               ? {
@@ -7384,6 +7400,7 @@ export async function probeImageBackendApi(id: string): Promise<{
       imageUpstreamMode: imageBackendApi.imageUpstreamMode,
       chatCompletionsUpstreamMode: imageBackendApi.chatCompletionsUpstreamMode,
       alwaysActive: imageBackendApi.alwaysActive,
+      metadata: imageBackendApi.metadata,
     })
     .from(imageBackendApi)
     .where(eq(imageBackendApi.id, id))
@@ -7399,6 +7416,8 @@ export async function probeImageBackendApi(id: string): Promise<{
     model: api.model,
     modelMapping: parseApiModelMapping(api.modelMapping),
     useStream: api.useStream,
+    // 异步上游测活同样要轮询任务，否则受理即被误判为“没有图片”。
+    asyncTaskMode: normalizeApiAsyncTaskMode(api.metadata),
     apiInterfaceMode: normalizeImageBackendApiInterfaceMode(api.interfaceMode),
     imagesUpstreamMode: normalizeImagesUpstreamMode(api.imageUpstreamMode),
     chatCompletionsUpstreamMode: normalizeChatCompletionsUpstreamMode(
@@ -7837,6 +7856,7 @@ export async function listAdminImageBackendPool() {
       ...api,
       // 尺寸方言从 metadata 解析（缺省 wxh），供后台表单回显。
       sizeDialect: normalizeApiSizeDialect(api.metadata),
+      asyncTaskMode: normalizeApiAsyncTaskMode(api.metadata),
       // 按模型计价表从 metadata 解析，供后台表单回显。
       modelBilling: parseModelBilling(
         asGroupMetadata(api.metadata).modelBilling

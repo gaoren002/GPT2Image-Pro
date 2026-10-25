@@ -1671,7 +1671,7 @@ curl https://gpt2image.superapi.buzz/v1/tasks/<requestId> \\
             },
           ],
           notes: [
-            '开启方式：单次请求 async:"task"（multipart/URL 写 async=task），或在设置 → 外部 API 中给 Key 打开「异步任务模式」。Key 开启后该 Key 的生图/编辑一律走任务模式，不能与 stream 同用。',
+            '开启方式：单次请求 async:"task"（multipart/URL 写 async=task），或在控制台「外接 API」页给 Key 打开「异步任务模式」。Key 开启后该 Key 的生图/编辑一律走任务模式，不能与 stream 同用。',
             "单张任务的 requestId 即 generation_id：服务重启或切换实例后，仍可从数据库查回结果；批量任务的 requestId 为 task_...，是 30 分钟有效的内存任务。",
             "任务在内存中时只能用创建它的 Key 查询；落库后的记录按用户隔离，同一用户的其他 Key 也能查到。",
             "余额不足等执行期失败在查询时体现为 failed，不会在提交时返回 402。",
@@ -3778,7 +3778,7 @@ curl https://gpt2image.superapi.buzz/v1/tasks/<requestId> \\
             },
           ],
           notes: [
-            'Enable it per request with async:"task" (async=task in multipart or the URL), or turn on "Async task mode" for the key under Settings → External API. With the key setting on, every generation/edit request from that key uses task mode; it cannot be combined with stream.',
+            'Enable it per request with async:"task" (async=task in multipart or the URL), or turn on "Async task mode" for the key on the External API page of the dashboard. With the key setting on, every generation/edit request from that key uses task mode; it cannot be combined with stream.',
             "For a single image the requestId is the generation_id, so results remain queryable from the database after a restart or instance switch; batch tasks use a task_... in-memory ID valid for 30 minutes.",
             "While a task is in memory only the key that created it can query it; persisted records are scoped to the user, so other keys of the same user can read them.",
             "Execution-time failures such as insufficient credits show up as failed when you query; submission does not return 402 for them.",

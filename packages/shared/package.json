@@ -92,6 +92,7 @@
     "./security/ip-validation": "./src/security/ip-validation.ts",
     "./uol": "./src/uol/index.ts",
     "./uol/operations": "./src/uol/operations/index.ts",
+    "./uol/operations/canvas": "./src/uol/operations/canvas.ts",
     "./mcp": "./src/mcp/index.ts",
     "./mcp/user-config": "./src/mcp/user-config.ts",
     "./mcp/user-auth": "./src/mcp/user-auth.ts",

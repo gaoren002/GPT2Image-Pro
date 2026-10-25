@@ -18,6 +18,9 @@
 // 副作用导入：触发所有操作注册到 registry
 import "@repo/shared/uol/operations";
 
+// 画布只读服务也在 agent 初始化时绑定，避免先打开页面才有真实执行体。
+import "@/features/canvas/server";
+
 import { bindExecute } from "@repo/shared/uol";
 import type { Principal, OperationContext } from "@repo/shared/uol";
 

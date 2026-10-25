@@ -38,3 +38,6 @@ import "./editable-task";
 
 // 纯中转初始财务状态恢复
 import "./relay-initial-charge";
+
+// 无限画布图片来源（归 image-generation 域）
+import "./canvas";

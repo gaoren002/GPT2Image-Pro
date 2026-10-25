@@ -3,7 +3,12 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": [".next/**", "!.next/cache/**", "dist/**"],
+      "outputs": [
+        ".next/**",
+        "!.next/cache/**",
+        "dist/**",
+        "public/excalidraw-assets/**"
+      ],
       "env": ["NEXT_PUBLIC_ASSET_PREFIX"],
       "passThroughEnv": [
         "NEXT_TELEMETRY_DISABLED",

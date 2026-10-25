@@ -75,3 +75,6 @@ deploy.tgz
 # 水墨引擎审阅样张(本地生成,不入库)
 apps/web/scripts/preview/
 .playwright-cli/
+
+# 构建时从锁定版本的 Excalidraw 复制，随 public 一起发布。
+/apps/web/public/excalidraw-assets/

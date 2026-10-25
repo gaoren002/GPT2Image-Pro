@@ -25,10 +25,6 @@ import {
   toAsyncImageResultPayload,
   runAsyncImageGeneration,
 } from "@/features/external-api/async-image-result";
-import {
-  resolveAsyncRequestMode,
-  toAsyncTaskSubmission,
-} from "@/features/external-api/async-task-mode";
 import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
@@ -673,15 +669,9 @@ export const postExternalImageEdits = withApiLogging(
     // 高清修复:显式 false 走轻量 general-x4v3;undefined/true 由后端选 SwinIR 超分。
     const hdRepair = getOptionalBoolean(formData, "hdRepair", "hd_repair");
 
-    // async=true 为普通异步；async=task 或 Key 开启任务模式时走任务模式（兼容速度马）。
-    const asyncMode = resolveAsyncRequestMode({
-      keyTaskMode: auth.asyncTaskMode,
-      values: [
-        getText(formData, "async"),
-        request.nextUrl.searchParams.get("async"),
-      ],
-    });
-    const useAsync = asyncMode.useAsync;
+    const useAsync =
+      getOptionalBoolean(formData, "async") === true ||
+      request.nextUrl.searchParams.get("async") === "true";
     let count = 1;
     try {
       // relay async 的硬批次界先于套餐界，保证超 4 在任何合法套餐下均为预付费前 413。
@@ -723,11 +713,8 @@ export const postExternalImageEdits = withApiLogging(
       );
     }
 
-    // 任务模式的查询结果一律给图片地址，与速度马的 data[].url 一致。
     const responseFormat =
-      asyncMode.taskMode || getText(formData, "response_format") === "url"
-        ? "url"
-        : "b64_json";
+      getText(formData, "response_format") === "url" ? "url" : "b64_json";
     const model = normalizeExternalImageModelInput(
       getText(formData, "model") || undefined
     );
@@ -929,9 +916,6 @@ export const postExternalImageEdits = withApiLogging(
             signal: request.signal,
           });
           task = createAsyncImageTask({
-            // 单张任务以 generationId 作任务号：重启后仍可从数据库查回。
-            id:
-              asyncMode.taskMode && count === 1 ? generationIds[0] : undefined,
             userId: auth.userId,
             apiKeyId: auth.apiKeyId,
             model,
@@ -1003,11 +987,7 @@ export const postExternalImageEdits = withApiLogging(
           }
         });
 
-        return Response.json(
-          asyncMode.taskMode
-            ? toAsyncTaskSubmission(task.id)
-            : toAsyncImageTaskResponse(task)
-        );
+        return Response.json(toAsyncImageTaskResponse(task));
       }
 
       return createJsonKeepAliveResponse(

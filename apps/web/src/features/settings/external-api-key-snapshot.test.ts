@@ -27,7 +27,6 @@ const key = {
   creditLimit: 100,
   creditsUsed: 20,
   relayOnly: true,
-  asyncTaskMode: true,
   lastUsedAt: new Date("2026-10-23T00:00:00Z"),
   isActive: true,
   createdAt: new Date("2026-10-22T00:00:00Z"),
@@ -58,7 +57,6 @@ describe("buildExternalApiKeyInitialSnapshot", () => {
     expect(snapshot?.keys[0]).toMatchObject({
       keyPrefix: "g2i_prefix",
       lastFour: "1234",
-      asyncTaskMode: true,
       lastUsedAt: "2026-10-23T00:00:00.000Z",
       createdAt: "2026-10-22T00:00:00.000Z",
     });

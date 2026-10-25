@@ -13,7 +13,6 @@ export {
   deleteExternalApiKey,
   getExternalApiKeys,
   revokeExternalApiKey,
-  updateExternalApiKeyAsyncTaskMode,
   updateExternalApiKeyGroup,
   updateExternalApiKeyModeration,
   updateExternalApiKeyQuota,

@@ -63,11 +63,6 @@ const sections = {
           kind: "image_generation",
         },
         {
-          label: "外部异步任务查询（任务模式）",
-          path: "GET /v1/tasks/{request_id}",
-          kind: "image_generation",
-        },
-        {
           label: "外部对话 API",
           path: "POST /v1/chat/completions",
           kind: "chat",
@@ -183,12 +178,6 @@ const sections = {
           "/v1/images/{task_id}",
           "image_generation",
           "查询 async=true 创建的内存异步任务，任务 30 分钟后自动过期。",
-        ],
-        [
-          "Async task (task mode)",
-          "/v1/tasks/{request_id}",
-          "image_generation",
-          "任务模式（兼容速度马）的查询：返回 id / status / progress / error / data，状态只有 processing、succeeded、failed。",
         ],
         [
           "OpenAI chat completions",
@@ -311,7 +300,6 @@ const sections = {
         "image 接口的 web_first / webFirst / force_web / forceWeb（chat 对应 mix_web_first）是 Web-first 优先路由，不是硬性只走 Web，且默认开启。开启时（不传或显式 true）按 Web-first 像素区间（IMAGE_FORCE_WEB_MIN_PIXELS / IMAGE_FORCE_WEB_MAX_PIXELS，默认 0.66MP-2MP）判定：尺寸落在区间内才优先 Web、失败回退 Codex/Responses，超出区间（如 4K）则走正常调度；auto 或无法解析的尺寸视为可优先 Web。显式传 false 则不优先 Web。该路由只对 mixed 后端分组生效（纯 Web / 纯 Codex-Responses 分组无此概念），不会覆盖用户自接 API；agent 始终走 Codex/Responses，不受此项影响。",
         "进入平台池后，纯 Web 主组的图片请求接受任意图片别名并统一使用 gpt-image-2.5。其他主组保留原模型规则；Chat/Responses 顶层文本模型白名单与套餐权限不变。",
         "异步任务（async）：body async:true 或 URL ?async=true（等价、不能与 stream 同用）会立即返回 task_... 任务，需用 GET /v1/images/{task_id} 轮询；task_... 为进程内内存对象，30 分钟后过期，服务重启或多实例切换即无法再查询。若需持久查询，改用响应里的 generation_id（gen_...）作为 GET /v1/images/{id} 的路径参数——它从数据库取回，跨重启/多实例都可查（同步请求也可用此方式按 generation_id 复查）。callback_url 是可选的完成回调 webhook——任务结束时服务端把任务对象 POST 到该公网地址，已发出的回调不受过期/重启影响。",
-        '任务模式（兼容速度马）：body async:"task"、multipart/URL 写 async=task，或在 API Key 上开启「异步任务模式」（该 Key 的生图/编辑不带任何参数也一律走任务模式），提交后立即返回 {requestId, status:"processing"}，用 GET /v1/tasks/{requestId} 查询，返回 {id, status, progress, error, data}，状态只有 processing / succeeded / failed，成功时图片地址在 data[].url（带签名的完整地址，1 小时内有效，每次查询重新签发）。执行、扣费与失败退款与普通 async 相同；单张任务的 requestId 即 generation_id，服务重启后仍可查询。',
       ],
       officialRefsTitle: "官方参考",
       officialRefs: [
@@ -1102,7 +1090,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               requirement: "可选",
               custom: true,
               description:
-                '异步开关。body 传 async:true 或 URL 追加 ?async=true，二选一即可（等价）。开启后立即返回 task_... 任务对象（status:processing），生成在后台执行，需用 GET /v1/images/{task_id} 轮询结果。不能与 stream 同时使用（同传会报错 async cannot be used with stream.）。传 "task"（multipart/URL 写 async=task）进入任务模式（兼容速度马）：立即返回 {requestId, status:"processing"}，用 GET /v1/tasks/{requestId} 查询；API Key 开启「异步任务模式」时不传也一律走任务模式。',
+                "异步开关。body 传 async:true 或 URL 追加 ?async=true，二选一即可（等价）。开启后立即返回 task_... 任务对象（status:processing），生成在后台执行，需用 GET /v1/images/{task_id} 轮询结果。不能与 stream 同时使用（同传会报错 async cannot be used with stream.）。",
             },
             {
               name: "callback_url",
@@ -1416,7 +1404,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               requirement: "可选",
               custom: true,
               description:
-                '异步开关。body 传 async:true 或 URL 追加 ?async=true，二选一即可（等价）。开启后立即返回 task_... 任务对象（status:processing），编辑在后台执行，需用 GET /v1/images/{task_id} 轮询结果。不能与 stream 同时使用（同传会报错 async cannot be used with stream.）。传 "task"（multipart/URL 写 async=task）进入任务模式（兼容速度马）：立即返回 {requestId, status:"processing"}，用 GET /v1/tasks/{requestId} 查询；API Key 开启「异步任务模式」时不传也一律走任务模式。',
+                "异步开关。body 传 async:true 或 URL 追加 ?async=true，二选一即可（等价）。开启后立即返回 task_... 任务对象（status:processing），编辑在后台执行，需用 GET /v1/images/{task_id} 轮询结果。不能与 stream 同时使用（同传会报错 async cannot be used with stream.）。",
             },
             {
               name: "callback_url",
@@ -1597,84 +1585,6 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
             "任务为进程内内存对象，30 分钟后过期；服务重启或多实例切换会导致未完成任务返回 404 无法继续查询，但 callback_url 已发送的回调不受影响。",
             "只能查询属于当前 API Key 所属用户自己创建的任务。",
             "返回结构与 callback_url 回调 POST 的任务对象完全一致。",
-          ],
-        },
-        {
-          title: "Get async task (task mode)",
-          method: "GET",
-          path: "/v1/tasks/{request_id}",
-          contentType: "无请求体",
-          description:
-            "任务模式（兼容速度马）的结果查询。{request_id} 是任务模式提交时返回的 requestId；也可传 async=true 返回的 task_... 或任意 generation_id，统一按本格式返回。查询不扣费，建议每 3～5 秒查一次。",
-          example: `# 提交（API Key 已开启「异步任务模式」时可不带 async）
-curl https://gpt2image.superapi.buzz/v1/images/generations \\
-  -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "gpt-image-2", "prompt": "一只蓝色的马", "async": "task"}'
-# => {"requestId": "...", "status": "processing"}
-
-# 查询
-curl https://gpt2image.superapi.buzz/v1/tasks/<requestId> \\
-  -H "Authorization: Bearer $GPT2IMAGE_API_KEY"`,
-          responseExample: `# 生成中
-{"id": "...", "status": "processing", "progress": 0, "error": "", "data": []}
-
-# 成功，图片地址在 data[].url
-{
-  "id": "...",
-  "status": "succeeded",
-  "progress": 100,
-  "error": "",
-  "data": [{"type": "image", "url": "https://gpt2image.superapi.buzz/api/storage/generations/...?sig=...&exp=..."}]
-}
-
-# 失败，原因在 error（费用已按失败结算退回）
-{"id": "...", "status": "failed", "progress": 0, "error": "积分不足: 需要 4，可用 1", "data": []}`,
-          fields: [
-            {
-              name: "Authorization",
-              requirement: "必填 header",
-              description: "Bearer <本站 API Key>。",
-            },
-            {
-              name: "request_id",
-              requirement: "必填路径参数",
-              custom: true,
-              description:
-                "提交返回的 requestId。长度上限 128 字符，超长返回 400；任务不存在、已过期或不属于当前 Key/用户时返回 404（code: task_not_found）。",
-            },
-          ],
-          responses: [
-            {
-              name: "id",
-              description: "任务号，与路径中的 {request_id} 一致。",
-            },
-            {
-              name: "status",
-              description:
-                "只有三种：processing（生成中）、succeeded（已出图）、failed（失败，费用已退回）。按 status 判断。",
-            },
-            {
-              name: "progress",
-              description:
-                "生成中为 0（本站不提供真实进度），成功为 100；仅供参考。",
-            },
-            {
-              name: "error",
-              description:
-                "失败原因；成功时为空字符串。批量任务部分失败时 status 仍为 succeeded，失败原因写在这里。",
-            },
-            {
-              name: "data",
-              description:
-                '图片数组，元素为 {type:"image", url}。url 为带签名的完整地址，1 小时内有效，每次查询都会重新签发；纯中转 Key 没有站内存储，url 为 data:image/png;base64,...。',
-            },
-          ],
-          notes: [
-            '开启方式：单次请求 async:"task"（multipart/URL 写 async=task），或在控制台「外接 API」页给 Key 打开「异步任务模式」。Key 开启后该 Key 的生图/编辑一律走任务模式，不能与 stream 同用。',
-            "单张任务的 requestId 即 generation_id：服务重启或切换实例后，仍可从数据库查回结果；批量任务的 requestId 为 task_...，是 30 分钟有效的内存任务。",
-            "任务在内存中时只能用创建它的 Key 查询；落库后的记录按用户隔离，同一用户的其他 Key 也能查到。",
-            "余额不足等执行期失败在查询时体现为 failed，不会在提交时返回 402。",
           ],
         },
         {
@@ -2329,11 +2239,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           kind: "image_generation",
         },
         {
-          label: "External async task query (task mode)",
-          path: "GET /v1/tasks/{request_id}",
-          kind: "image_generation",
-        },
-        {
           label: "External Chat Completions API",
           path: "POST /v1/chat/completions",
           kind: "chat",
@@ -2444,12 +2349,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
           "/v1/images/{task_id}",
           "image_generation",
           "Returns the in-memory task created with async=true. Tasks expire after 30 minutes.",
-        ],
-        [
-          "Async task (task mode)",
-          "/v1/tasks/{request_id}",
-          "image_generation",
-          "Task-mode query (suduma-compatible): returns id / status / progress / error / data, with status processing, succeeded or failed.",
         ],
         [
           "OpenAI chat completions",
@@ -2572,7 +2471,6 @@ data: {"type":"response.completed","response":{"id":"resp_...","object":"respons
         "Image endpoint web_first / webFirst / force_web / forceWeb (chat: mix_web_first) is a Web-first preference route, not hard Web-only, and is on by default. When on (omitted or explicit true) it uses the Web-first pixel range (IMAGE_FORCE_WEB_MIN_PIXELS / IMAGE_FORCE_WEB_MAX_PIXELS, default 0.66MP-2MP): only sizes inside the range prefer Web (fall back to Codex/Responses on failure), sizes outside (e.g. 4K) use normal scheduling, auto or unparseable sizes may prefer Web; explicit false disables it. It only applies to mixed backend groups (no effect for Web-only / Codex-Responses-only groups) and never overrides user custom API; agent always uses Codex/Responses and is unaffected.",
         "Within the platform pool, a Web-only primary group accepts any image alias and always uses gpt-image-2.5. Other primary groups retain their model rules; the Chat/Responses top-level text-model allowlist and plan permissions remain unchanged.",
         "Async tasks (async): body async:true or URL ?async=true (equivalent, and cannot be combined with stream) returns a task_... object immediately; poll GET /v1/images/{task_id} for the result. Tasks are in-memory objects that expire after 30 minutes and become unavailable after a restart or multi-instance switch. For persistent lookups, use the generation_id (gen_...) from the response as the GET /v1/images/{id} path parameter — it is read from the DB and survives restarts / multi-instance switches (sync requests can re-query by generation_id this way too). callback_url is an optional completion webhook — when the task finishes the server POSTs the task object to that public URL, and an already-sent callback is unaffected by expiry or restart.",
-        'Task mode (suduma-compatible): send body async:"task", async=task in multipart or the URL, or turn on "Async task mode" on the API Key (generation and edit requests from that key then always use task mode without any parameter). The endpoint returns {requestId, status:"processing"} immediately; query GET /v1/tasks/{requestId}, which returns {id, status, progress, error, data} with status processing / succeeded / failed and image URLs in data[].url (signed absolute URLs, valid for 1 hour and re-signed on every query). Execution, billing and failure refunds are the same as regular async; for a single image the requestId is the generation_id, so it can still be queried after a restart.',
       ],
       officialRefsTitle: "Official References",
       officialRefs: [
@@ -3215,7 +3113,7 @@ curl https://gpt2image.superapi.buzz/v1/images/task_... \\
               requirement: "Optional",
               custom: true,
               description:
-                'Async switch. Set body async:true OR append ?async=true to the URL (the two are equivalent). When on, the endpoint returns a task_... object immediately (status:processing) and runs generation in the background; poll GET /v1/images/{task_id} for the result. Cannot be combined with stream (sending both returns async cannot be used with stream.). Send "task" (async=task in multipart or the URL) for task mode (suduma-compatible): returns {requestId, status:"processing"} immediately; query GET /v1/tasks/{requestId}. When the API Key has "Async task mode" on, task mode applies even without this parameter.',
+                "Async switch. Set body async:true OR append ?async=true to the URL (the two are equivalent). When on, the endpoint returns a task_... object immediately (status:processing) and runs generation in the background; poll GET /v1/images/{task_id} for the result. Cannot be combined with stream (sending both returns async cannot be used with stream.).",
             },
             {
               name: "callback_url",
@@ -3524,7 +3422,7 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
               requirement: "Optional",
               custom: true,
               description:
-                'Async switch. Set body async:true OR append ?async=true to the URL (the two are equivalent). When on, the endpoint returns a task_... object immediately (status:processing) and runs the edit in the background; poll GET /v1/images/{task_id} for the result. Cannot be combined with stream (sending both returns async cannot be used with stream.). Send "task" (async=task in multipart or the URL) for task mode (suduma-compatible): returns {requestId, status:"processing"} immediately; query GET /v1/tasks/{requestId}. When the API Key has "Async task mode" on, task mode applies even without this parameter.',
+                "Async switch. Set body async:true OR append ?async=true to the URL (the two are equivalent). When on, the endpoint returns a task_... object immediately (status:processing) and runs the edit in the background; poll GET /v1/images/{task_id} for the result. Cannot be combined with stream (sending both returns async cannot be used with stream.).",
             },
             {
               name: "callback_url",
@@ -3707,81 +3605,6 @@ data: {"type":"image_edit.completed","index":0,"generation_id":"...","generation
             "Tasks are in-memory objects that expire after 30 minutes; a restart or multi-instance switch makes unfinished tasks return 404, but a callback_url webhook that already fired is unaffected.",
             "You can only query tasks created by the user that owns the current API Key.",
             "The response matches exactly the task object POSTed to callback_url.",
-          ],
-        },
-        {
-          title: "Get async task (task mode)",
-          method: "GET",
-          path: "/v1/tasks/{request_id}",
-          contentType: "No request body",
-          description:
-            "Result query for task mode (suduma-compatible). {request_id} is the requestId returned on submission; a task_... from async=true or any generation_id also works and is returned in this format. Queries are free; poll every 3-5 seconds.",
-          example: `# Submit (async can be omitted when the API Key has "Async task mode" on)
-curl https://gpt2image.superapi.buzz/v1/images/generations \\
-  -H "Authorization: Bearer $GPT2IMAGE_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "gpt-image-2", "prompt": "a blue horse", "async": "task"}'
-# => {"requestId": "...", "status": "processing"}
-
-# Query
-curl https://gpt2image.superapi.buzz/v1/tasks/<requestId> \\
-  -H "Authorization: Bearer $GPT2IMAGE_API_KEY"`,
-          responseExample: `# Running
-{"id": "...", "status": "processing", "progress": 0, "error": "", "data": []}
-
-# Succeeded; image URLs are in data[].url
-{
-  "id": "...",
-  "status": "succeeded",
-  "progress": 100,
-  "error": "",
-  "data": [{"type": "image", "url": "https://gpt2image.superapi.buzz/api/storage/generations/...?sig=...&exp=..."}]
-}
-
-# Failed; the reason is in error (credits were refunded)
-{"id": "...", "status": "failed", "progress": 0, "error": "Insufficient credits", "data": []}`,
-          fields: [
-            {
-              name: "Authorization",
-              requirement: "Required header",
-              description: "Bearer <your API Key>.",
-            },
-            {
-              name: "request_id",
-              requirement: "Required path parameter",
-              custom: true,
-              description:
-                "The requestId returned on submission. Max 128 chars (400 if longer); 404 (code: task_not_found) when the task does not exist, has expired, or belongs to another key/user.",
-            },
-          ],
-          responses: [
-            { name: "id", description: "Task ID, same as {request_id}." },
-            {
-              name: "status",
-              description:
-                "One of processing, succeeded or failed (credits refunded). Branch on status.",
-            },
-            {
-              name: "progress",
-              description:
-                "0 while running (real progress is not available) and 100 on success; for reference only.",
-            },
-            {
-              name: "error",
-              description:
-                "Failure reason; empty string on success. If part of a batch fails, status is still succeeded and the reason is reported here.",
-            },
-            {
-              name: "data",
-              description:
-                'Image array of {type:"image", url}. url is a signed absolute URL valid for 1 hour and re-signed on every query; relay-only keys have no stored copy, so url is a data:image/png;base64,... URI.',
-            },
-          ],
-          notes: [
-            'Enable it per request with async:"task" (async=task in multipart or the URL), or turn on "Async task mode" for the key on the External API page of the dashboard. With the key setting on, every generation/edit request from that key uses task mode; it cannot be combined with stream.',
-            "For a single image the requestId is the generation_id, so results remain queryable from the database after a restart or instance switch; batch tasks use a task_... in-memory ID valid for 30 minutes.",
-            "While a task is in memory only the key that created it can query it; persisted records are scoped to the user, so other keys of the same user can read them.",
-            "Execution-time failures such as insufficient credits show up as failed when you query; submission does not return 402 for them.",
           ],
         },
         {

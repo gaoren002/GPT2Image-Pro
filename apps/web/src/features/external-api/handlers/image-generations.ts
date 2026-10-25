@@ -24,10 +24,6 @@ import {
   toAsyncImageResultPayload,
   runAsyncImageGeneration,
 } from "@/features/external-api/async-image-result";
-import {
-  resolveAsyncRequestMode,
-  toAsyncTaskSubmission,
-} from "@/features/external-api/async-task-mode";
 import { normalizeExternalImageModelInput } from "@/features/external-api/image-model-input";
 import {
   createExternalImageStreamResponse,
@@ -111,8 +107,7 @@ const externalImageGenerationSchema = z.object({
   hdRepair: z.boolean().optional(),
   hd_repair: z.boolean().optional(),
   stream: z.boolean().optional(),
-  // true 为普通异步；"task" 为任务模式（兼容速度马：返回 requestId，用 /v1/tasks 查询）。
-  async: z.union([z.boolean(), z.literal("task")]).optional(),
+  async: z.boolean().optional(),
   callback_url: z.string().url().optional(),
 });
 
@@ -209,11 +204,9 @@ export const postExternalImageGenerations = withApiLogging(
     }
 
     const imageModel = normalizeExternalImageModelInput(parsed.data.model);
-    const asyncMode = resolveAsyncRequestMode({
-      keyTaskMode: auth.asyncTaskMode,
-      values: [parsed.data.async, request.nextUrl.searchParams.get("async")],
-    });
-    const useAsync = asyncMode.useAsync;
+    const useAsync =
+      parsed.data.async === true ||
+      request.nextUrl.searchParams.get("async") === "true";
     const count = parsed.data.n || 1;
     if (
       useAsync &&
@@ -308,10 +301,7 @@ export const postExternalImageGenerations = withApiLogging(
         parsed.data.forceWeb,
       hdRepair: parsed.data.hdRepair ?? parsed.data.hd_repair,
     };
-    // 任务模式的查询结果一律给图片地址，与速度马的 data[].url 一致。
-    const responseFormat = asyncMode.taskMode
-      ? "url"
-      : parsed.data.response_format || "b64_json";
+    const responseFormat = parsed.data.response_format || "b64_json";
 
     if (useStreamResponse) {
       return createExternalImageStreamResponse(async (emit) => {
@@ -381,8 +371,6 @@ export const postExternalImageGenerations = withApiLogging(
           signal: request.signal,
         });
         task = createAsyncImageTask({
-          // 单张任务以 generationId 作任务号：重启后仍可从数据库查回。
-          id: asyncMode.taskMode && count === 1 ? generationIds[0] : undefined,
           userId: auth.userId,
           apiKeyId: auth.apiKeyId,
           model: imageModel,
@@ -465,11 +453,7 @@ export const postExternalImageGenerations = withApiLogging(
         }
       });
 
-      return Response.json(
-        asyncMode.taskMode
-          ? toAsyncTaskSubmission(task.id)
-          : toAsyncImageTaskResponse(task)
-      );
+      return Response.json(toAsyncImageTaskResponse(task));
     }
 
     return createJsonKeepAliveResponse(

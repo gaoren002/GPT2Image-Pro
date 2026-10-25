@@ -442,6 +442,13 @@
       "when": 1793660400000,
       "tag": "0063_external_api_key_async_task_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1793746800000,
+      "tag": "0064_drop_external_api_key_async_task_mode",
+      "breakpoints": true
     }
   ]
 }

@@ -29,8 +29,7 @@ export const getExternalImageTask = withApiLogging(
       return openAIImageError("Invalid task_id.");
     }
 
-    // 1. 先查内存异步任务存储(async 请求创建,按 task_<uuid> 为键;
-    // 任务模式的单张任务以 generation_id 为键)。
+    // 1. 先查内存异步任务存储(async=true 创建,按 task_<uuid> 为键)。
     const task = getAsyncImageTask(taskId);
     if (
       task &&

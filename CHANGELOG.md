@@ -6,13 +6,12 @@
 
 ### 新增
 
-- **外部 API 异步任务模式（可选，兼容速度马）**：单次请求传 `async:"task"`（multipart/URL 写 `async=task`），或在控制台「外接 API」页给 Key 打开「异步任务模式」（该 Key 的生图/编辑不带参数也一律走任务模式）。提交立即返回 `{requestId, status:"processing"}`，用 `GET /v1/tasks/{requestId}` 查询 `{id, status, progress, error, data}`，状态只有 processing / succeeded / failed，成功时图片地址在 `data[].url`。执行、扣费与失败退款与普通 `async` 相同；单张任务的 `requestId` 即 generation_id，服务重启后仍可查询。默认关闭，现有 Key 与 `async:true` 行为不变。
 - **生图后端池：外接 API 上游的异步任务模式（可选，兼容速度马）**：上游图片接口受理后只返回任务号 `requestId`（如速度马）时，在后台「生图后端池」编辑该 API 后端，打开「异步任务（兼容速度马）」。开启后提交请求不再发 `stream`，拿到任务号即每 3 秒查询一次上游 `GET {baseUrl}/tasks/{requestId}`，网络抖动、5xx、429 持续重试，最长等 20 分钟；成功后取 `data[].url` 按原流程交付，失败按原流程退款与换后端。上游直接返回图片时照常使用。测活同样轮询，默认超时放宽到 180 秒。开关存于后端 metadata，无需迁移；默认关闭，其他后端行为不变。
 - **API 错误原因写入访问日志**：4xx/5xx 的 JSON 错误响应会把错误码、类型与截断后的错误信息并入同一条访问日志，排查拒绝原因不再需要按响应字节数反推。
 
 ### 升级说明
 
-- 本版本包含数据库迁移 `0063_external_api_key_async_task_mode`（`external_api_key` 新增 `async_task_mode`，默认 false）。须先执行迁移再切换 Web：外部 API 鉴权会读取该列，缺列会导致全部外部 API 鉴权失败。
+- 本版本包含数据库迁移 `0063_external_api_key_async_task_mode` 与 `0064_drop_external_api_key_async_task_mode`：0063 曾为已撤下的 Key 级异步任务模式给 `external_api_key` 新增 `async_task_mode`，0064 将其删除，表结构回到 0062 时的状态。已执行过 0063 的部署须先切换到本版本 Web 再执行 0064：旧版 Web 的外部 API 鉴权会读取该列，先删列会导致全部外部 API 鉴权失败。全新部署按顺序执行即可。
 
 ## v0.9.4 (2026-10-12)
 

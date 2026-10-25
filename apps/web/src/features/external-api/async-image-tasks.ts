@@ -39,11 +39,6 @@ export type AsyncImageTask = {
 };
 
 type CreateAsyncImageTaskParams = {
-  /**
-   * 指定任务 ID。任务模式的单张任务传 generationId：服务重启或切换实例后内存任务丢失，
-   * 查询仍能按同一 ID 从数据库取回。已被占用时退回随机 task_ ID。
-   */
-  id?: string;
   userId: string;
   apiKeyId?: string;
   model?: string;
@@ -237,11 +232,7 @@ export async function validateCallbackUrl(value: string) {
 
 /** 创建处理态图像任务；超过数量或元数据预算时同步拒绝，不启动后台工作。 */
 export function createAsyncImageTask(params: CreateAsyncImageTaskParams) {
-  removeExpiredTasks();
-  const id =
-    params.id && !asyncImageTasks.has(params.id)
-      ? params.id
-      : `task_${randomUUID().replace(/-/g, "")}`;
+  const id = `task_${randomUUID().replace(/-/g, "")}`;
   const generationIds = params.generationIds?.filter(Boolean);
   const now = new Date();
   const task: AsyncImageTask = {
@@ -311,15 +302,10 @@ export function toAsyncImageTaskResponse(task: AsyncImageTask) {
   return publicTask;
 }
 
-/**
- * 归属由 handler 先验证；普通图在 poll/callback 时才读取内容，不缓存编码后的响应。
- *
- * @param options.responseFormat 覆盖提交时的输出格式；任务模式查询一律输出 url
- */
+/** 归属由 handler 先验证；普通图在 poll/callback 时才读取内容，不缓存编码后的响应。 */
 export async function resolveAsyncImageTaskResponse(
   task: AsyncImageTask,
-  request: Request,
-  options: { responseFormat?: "url" | "b64_json" } = {}
+  request: Request
 ) {
   const reference = asyncImageTasks.get(task.id)?.imageResult;
   const publicTask = toAsyncImageTaskResponse(task);
@@ -332,11 +318,7 @@ export async function resolveAsyncImageTaskResponse(
   } = publicTask;
   return {
     ...identity,
-    ...(await renderAsyncImageResult(
-      request,
-      reference,
-      options.responseFormat
-    )),
+    ...(await renderAsyncImageResult(request, reference)),
   };
 }
 
@@ -355,9 +337,8 @@ export type GenerationTaskRow = {
 /**
  * 把一条 generation 记录转成 /v1/images/{id} 的响应（DB 回退路径，纯函数 DB-free）。
  *
- * 内存异步任务存储是临时态（仅 async 请求创建、按 task_<uuid> 为键（任务模式的单张任务以
- * generation_id 为键）、进程内、30 分钟完成后 TTL、多实例不共享、重启即清），同步请求拿到的是
- * generation_id 而非 task id。本函数让
+ * 内存异步任务存储是临时态（仅 async=true 创建、按 task_<uuid> 为键、进程内、30 分钟
+ * 完成后 TTL、多实例不共享、重启即清），同步请求拿到的是 generation_id 而非 task id。本函数让
  * 接口可按 generation_id 从 DB 持久取回，对同步/异步、跨实例/重启都稳。归属校验（userId）
  * 由调用方在查库后完成，本函数只做结构映射，不含权限判断。
  *

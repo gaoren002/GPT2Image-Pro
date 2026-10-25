@@ -93,7 +93,7 @@ Chat 模式和 Agent 模式分开：Chat 更适合用户主动对话和上下文
 - **页面创作**：文生图、图生图、逐行批量、瀑布流、chat(codex) 上下文生图、chat(web) 对话式生成（图像 / 可编辑 PPT / 分层 PSD）、Agent 自动迭代、图库、历史记录、参考图引用和发送到其他创作入口。
 - **OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/{task_id}`、`/v1/responses`、`/v1/agents/images`、`/v1/models`、`/v1/credits`。
 - **可编辑文件生成 API**：`/v1/ppts`、`/v1/psds`——对话式驱动 ChatGPT 代码解释器产出可编辑 `.pptx` / 分层 `.psd`（含素材 zip），仅调付费级 Web 账号，按任务固定价扣费；支持同步 keep-alive 与 `async:true`（`GET /v1/editable-file-tasks/{task_id}` 轮询 + `callback_url` 回调）。
-- **异步图片任务**：图片生成和编辑接口支持同步返回，也支持 `async`、`callback_url` 和任务查询；可选兼容速度马的任务模式（单次请求 `async:"task"` 或在 API Key 上开启「异步任务模式」，立即返回 `requestId`，用 `GET /v1/tasks/{requestId}` 查询）。
+- **异步图片任务**：图片生成和编辑接口支持同步返回，也支持 `async`、`callback_url` 和任务查询。
 - **账号池与调度**：Web 账号、Codex/Responses 账号、外接 API、mixed 分组、优先级、权重、并发、排队、冷却、错误标记、分组倍率和 Sub2API 同步任务。
 - **分辨率超分与高清修复**：最终图自动超分校准到目标分辨率（Real-ESRGAN，Web/Codex 也可补足到接近 4K），并可选 SCUNet 高清修复（盲复原、手动开、服务端串行）。
 - **计费与套餐**：能力矩阵、套餐订阅、按量积分包、API Key 独立额度、尺寸价格曲线、Chat/Agent 轮次价格、积分流水和用户侧计费明细。

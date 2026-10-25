@@ -6,7 +6,8 @@
  *   对齐到目标边界（不裁剪、不改宽高比，保全画面内容）。
  *
  * 使用方：image-generation/operations.ts 存图函数，落库前。
- * 关键依赖：super-resolution.ts（独立 Real-ESRGAN Worker 客户端）、sharp。
+ * 关键依赖：super-resolution.ts（独立 Real-ESRGAN Worker 客户端）、worker 协议的
+ *   输入上限（inference-protocol.mjs 的 LIMITS）、sharp。
  *
  * 设计：校准模式由纯函数 getResolutionCalibrationMode 决定，便于 DB-free 单测；实际
  *   放大/缩放有副作用（CPU + IO），由 calibrateImageResolution 编排。非取消失败回退原图。
@@ -15,6 +16,7 @@
 import { logWarn } from "@repo/shared/logger";
 import sharp, { type Sharp } from "sharp";
 
+import { LIMITS } from "../../../worker/inference-protocol.mjs";
 import type { InferenceOptions } from "./inference-worker";
 import { parseImageSize } from "./resolution";
 import { superResolve } from "./super-resolution";
@@ -85,7 +87,12 @@ export async function calibrateImageResolution(
     }
 
     const source =
-      mode === "super-resolution" ? await superResolve(image, options) : image;
+      mode === "super-resolution"
+        ? await superResolve(
+            await fitSuperResolutionInput(image, actual),
+            options
+          )
+        : image;
     options.signal?.throwIfAborted();
     const format = meta.format;
     const pipeline = sharp(source).resize(target.width, target.height, {
@@ -104,6 +111,36 @@ export async function calibrateImageResolution(
     });
     return { buffer: image, applied: false };
   }
+}
+
+/**
+ * 把超分输入等比缩到 worker 的像素与边长上限之内。
+ *
+ * worker 只接受不超过 LIMITS["super-resolution"] 的输入（4 倍输出不超过 1600 万像素），
+ * 上游常见的 1536x1024 等底图会超出该上限，直接发送会被拒绝并整体回退原图，
+ * 导致大尺寸请求拿不到目标分辨率。先缩到上限内再超分，调用方随后仍缩放到目标边界。
+ *
+ * @param image 待超分的原图字节
+ * @param size 原图尺寸（已由调用方读取）
+ * @returns 已在上限内时返回原字节（不重新编码）；否则返回缩小后的 PNG
+ */
+async function fitSuperResolutionInput(
+  image: Buffer,
+  size: { width: number; height: number }
+): Promise<Buffer> {
+  const { maxPixels, maxEdge } = LIMITS["super-resolution"];
+  const pixels = size.width * size.height;
+  const edge = Math.max(size.width, size.height);
+  if (pixels <= maxPixels && edge <= maxEdge) return image;
+  const scale = Math.min(Math.sqrt(maxPixels / pixels), maxEdge / edge);
+  return sharp(image)
+    .resize(
+      Math.max(1, Math.floor(size.width * scale)),
+      Math.max(1, Math.floor(size.height * scale)),
+      { fit: "inside" }
+    )
+    .png()
+    .toBuffer();
 }
 
 /** 按原图格式编码，未知格式回退 png。 */

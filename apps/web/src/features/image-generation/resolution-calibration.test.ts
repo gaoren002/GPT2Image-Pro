@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LIMITS } from "../../../worker/inference-protocol.mjs";
 import { superResolve } from "./super-resolution";
 
 vi.mock("./super-resolution", () => ({
@@ -154,6 +155,46 @@ describe("calibrateImageResolution", () => {
     expect(result.applied).toBe(true);
     expect(metadata.width).toBe(512);
     expect(metadata.height).toBe(512);
+  });
+});
+
+describe("超出 worker 超分上限的底图", () => {
+  it("先等比缩到上限内再超分，最终仍达到请求尺寸", async () => {
+    // 上游常见 1536x1024（约 157 万像素）超过 worker 超分输入上限 1048576 像素。
+    const input = await sharp({
+      create: { width: 1536, height: 1024, channels: 3, background: "white" },
+    })
+      .png()
+      .toBuffer();
+
+    const result = await calibrateImageResolution(input, "3456x2304");
+
+    const sent = vi.mocked(superResolve).mock.calls[0]?.[0];
+    expect(sent).toBeDefined();
+    const sentMetadata = await sharp(sent).metadata();
+    expect(
+      (sentMetadata.width ?? 0) * (sentMetadata.height ?? 0)
+    ).toBeLessThanOrEqual(LIMITS["super-resolution"].maxPixels);
+    expect(sentMetadata.width).toBe(1254);
+    expect(sentMetadata.height).toBe(836);
+    expect(result.applied).toBe(true);
+    expect(await sharp(result.buffer).metadata()).toMatchObject({
+      width: 3456,
+      height: 2304,
+      format: "png",
+    });
+  });
+
+  it("恰在上限内的底图原样发送，不重新编码", async () => {
+    const input = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: "white" },
+    })
+      .png()
+      .toBuffer();
+
+    await calibrateImageResolution(input, "2048x2048");
+
+    expect(vi.mocked(superResolve).mock.calls[0]?.[0]).toBe(input);
   });
 });
 

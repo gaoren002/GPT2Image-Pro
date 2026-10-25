@@ -9,6 +9,7 @@ import {
   Headset,
   Image,
   ImagePlus,
+  LayoutTemplate,
   Layers,
   LayoutDashboard,
   Megaphone,
@@ -159,6 +160,11 @@ export const dashboardNav: NavGroup[] = [
         title: "Create",
         href: "/dashboard/create",
         icon: ImagePlus,
+      },
+      {
+        title: "Canvas",
+        href: "/dashboard/canvas",
+        icon: LayoutTemplate,
       },
       {
         title: "Gallery",

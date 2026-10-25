@@ -609,6 +609,7 @@
     "nav": {
       "dashboard": "控制台",
       "create": "创作",
+      "canvas": "无限画布",
       "gallery": "图库",
       "history": "历史记录",
       "backendHelp": "系统文档",
@@ -628,6 +629,7 @@
     "pages": {
       "dashboard": "控制台",
       "create": "创作",
+      "canvas": "无限画布",
       "generate": "生成",
       "gallery": "图库",
       "history": "历史记录",

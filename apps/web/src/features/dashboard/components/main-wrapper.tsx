@@ -15,6 +15,7 @@ function getPageTitleKey(pathname: string): string {
   const keyMap: Record<string, string> = {
     "/dashboard": "dashboard",
     "/dashboard/create": "create",
+    "/dashboard/canvas": "canvas",
     "/dashboard/gallery": "gallery",
     "/dashboard/history": "history",
     "/dashboard/generate": "generate",
@@ -66,6 +67,7 @@ export function DashboardMainWrapper({
 }) {
   const { isCollapsed, toggleSidebar, toggleMobile } = useSidebar();
   const pathname = usePathname();
+  const isCanvas = /\/dashboard\/canvas\/?$/.test(pathname);
   const t = useTranslations("Dashboard.pages");
   const pageTitleKey = getPageTitleKey(pathname);
   const pageTitle = t(pageTitleKey);
@@ -122,7 +124,7 @@ export function DashboardMainWrapper({
         </header>
 
         {/* 内容区域 */}
-        <div className="min-w-0 flex-1 overflow-x-auto p-6">{children}</div>
+        <div className={cn("min-w-0 flex-1", isCanvas ? "overflow-hidden" : "overflow-x-auto p-6")}>{children}</div>
       </div>
     </main>
   );

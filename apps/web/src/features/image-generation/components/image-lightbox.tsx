@@ -1,5 +1,7 @@
 "use client";
 
+/** 图库、历史与最近作品共用的图片详情灯箱，复用既有创作交接与画布导航入口。 */
+
 import { formatCredits } from "@repo/shared/credits/format";
 import { formatDateInTimeZone } from "@repo/shared/time-zone";
 import { Badge } from "@repo/ui/components/badge";
@@ -246,6 +248,16 @@ export function ImageLightbox({
       : visibleReferenceImages.find((item) => item.id === activePreviewId) ||
         null;
   const previewImageUrl = activeReference?.imageUrl || imageUrl;
+  // 只将当前已完成的本站存储图交给画布；不下载、不写存储、不触发生图。
+  const canvasHref =
+    generation.status === "completed" &&
+    previewImageUrl &&
+    /^\/api\/storage\//.test(previewImageUrl)
+      ? `/${locale}/dashboard/canvas?${new URLSearchParams({
+          ref: previewImageUrl,
+          sourceId: activeReference?.id || generation.id,
+        }).toString()}`
+      : null;
   const previewLabel =
     activeReference?.name ||
     (activeReference ? copy("Reference image", "参考图") : generation.prompt);
@@ -639,6 +651,20 @@ export function ImageLightbox({
             </div>
 
             <div className="flex flex-col gap-2 border-t border-border bg-background p-6">
+              {canvasHref && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-center"
+                  onClick={() => {
+                    router.push(canvasHref);
+                    onClose();
+                  }}
+                >
+                  <ImageIcon className="mr-2 h-4 w-4" />
+                  {copy("Add to canvas", "加入画布")}
+                </Button>
+              )}
               {previewImageUrl && (
                 <>
                   <Button

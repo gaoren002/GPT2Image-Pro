@@ -1,6 +1,7 @@
 import { generateSignedImageUrl } from "@repo/shared/storage/signed-url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CLIENT_CLOSED_REQUEST_ERROR } from "@/features/image-generation/abort-reason";
 import { NO_WEB_ACCOUNT_ERROR } from "@/features/image-generation/editable-file-util";
 import {
   createExternalImageStreamResponse,
@@ -650,6 +651,8 @@ it.each([
     499,
     "image_generation_cancelled",
   ],
+  // 生成已开始后客户端断开：与排队阶段取消同一语义，不能落成 502 上游错误。
+  [CLIENT_CLOSED_REQUEST_ERROR, 499, "image_generation_cancelled"],
 ])("本地队列错误保留客户端可处理的状态: %s", (message, status, code) => {
   expect(toOpenAIErrorPayload(message).error).toMatchObject({ status, code });
 });

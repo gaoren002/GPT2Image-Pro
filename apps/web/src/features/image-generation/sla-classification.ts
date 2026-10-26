@@ -1,3 +1,5 @@
+import { CLIENT_CLOSED_REQUEST_ERROR } from "./abort-reason";
+
 export type GenerationErrorCategory =
   | "platform"
   | "moderation"
@@ -80,6 +82,10 @@ const USER_REQUEST_PATTERNS = [
   "upload is too large",
   "invalid or missing api key",
   "account frozen",
+  // 客户端在结果就绪前主动断开（运行中断开 / 排队时取消）是用户侧行为，不是平台故障，
+  // 不应拉低平台成功率。模式须小写：normalizeErrorText 会先把输入转小写再做子串匹配。
+  CLIENT_CLOSED_REQUEST_ERROR.toLowerCase(),
+  "queue request cancelled",
 ];
 
 const MODERATION_SERVICE_FAILURE_PATTERNS = [

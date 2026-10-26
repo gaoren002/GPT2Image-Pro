@@ -1,5 +1,6 @@
 import { logWarn } from "@repo/shared/logger";
 import { buildPublicImageUrl } from "@repo/shared/storage/signed-url";
+import { CLIENT_CLOSED_REQUEST_ERROR } from "@/features/image-generation/abort-reason";
 import { readGeneratedImage } from "@/features/image-generation/generated-image";
 import type { ImageGenerationOperationResult } from "@/features/image-generation/operations";
 import { isContentSafetyRejection } from "@/features/image-generation/sla-classification";
@@ -460,7 +461,12 @@ function classifyExternalApiError(message: string) {
       status: 413,
     };
   }
-  if (message === "Image generation queue request cancelled.") {
+  // 排队阶段取消与运行中客户端断开是同一语义：对方已不在线，按 499 记录，
+  // 不能落成 502 上游错误而被当作平台故障。
+  if (
+    message === "Image generation queue request cancelled." ||
+    message === CLIENT_CLOSED_REQUEST_ERROR
+  ) {
     return {
       type: "invalid_request_error",
       code: "image_generation_cancelled",

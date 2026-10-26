@@ -35,6 +35,7 @@ import type {
   ImageBackendPreferenceMode,
   ImageBackendRequestKind,
 } from "@/features/image-backend-pool/types";
+import { resolveGenerationAbortError } from "./abort-reason";
 import {
   applyApiModelMapping,
   parseApiModelMapping,
@@ -1153,8 +1154,10 @@ async function retryPoolBackendResult(
       leasePersisted: backend.inflightLeasePersisted,
     });
   };
+  // 外层信号中止时的统一结果；文案按 signal.reason 区分客户端断开与截止超时，
+  // 真实的单次尝试错误仍保留在 backendAttempts 里。
   const abortedResult = () => ({
-    error: "The operation was aborted due to timeout",
+    error: resolveGenerationAbortError(options?.signal),
   });
   if (options?.signal?.aborted) {
     await releaseCandidateLease(config);
@@ -1774,14 +1777,14 @@ export async function repairModerationBlockedPrompt(
       } catch (error) {
         return {
           error: params.signal?.aborted
-            ? "The operation was aborted due to timeout"
+            ? resolveGenerationAbortError(params.signal)
             : error instanceof Error
               ? error.message
               : "Prompt repair failed",
         };
       }
       if (params.signal?.aborted) {
-        return { error: "The operation was aborted due to timeout" };
+        return { error: resolveGenerationAbortError(params.signal) };
       }
       if (repaired.error) return repaired;
       const repairedPrompt = sanitizePromptRepairOutput(repaired.responseText);

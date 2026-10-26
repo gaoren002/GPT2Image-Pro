@@ -1,5 +1,6 @@
 /** 后端错误分类行为回归；运行时设置使用默认值，不访问外部服务。 */
 import { describe, expect, it, vi } from "vitest";
+import { CLIENT_CLOSED_REQUEST_ERROR } from "@/features/image-generation/abort-reason";
 
 // 让分类函数 DB-free:运行时设置一律返回默认值(避免 classifyFailure 经
 // isUnrecoverableBackendError 去查 system_setting 表)。只调纯函数的用例不受影响。
@@ -25,6 +26,8 @@ describe("image backend error classification", () => {
   it.each([
     "The operation was aborted due to timeout",
     "This operation was aborted",
+    // 客户端断开是用户侧行为：不冷却后端、不换号，也不算未分类错误。
+    CLIENT_CLOSED_REQUEST_ERROR,
     "fetch failed",
     "ChatGPT Web proxy failed: HTTP 502 proxyconnect tcp: connection refused",
   ])("本地和基础设施故障不冷却或逐号切换：%s", async (error) => {

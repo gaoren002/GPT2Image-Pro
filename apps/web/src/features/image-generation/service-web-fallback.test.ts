@@ -290,6 +290,49 @@ describe("image service Web-first fallback", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("reports a client disconnect during prompt repair as a client close, not a timeout", async () => {
+    process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
+    const { repairModerationBlockedPrompt } = await import("./service");
+    const { chatWithChatGptWeb } = await import("./chatgpt-web");
+    const { CLIENT_CLOSED_REQUEST_ERROR } = await import("./abort-reason");
+    const controller = new AbortController();
+    vi.mocked(chatWithChatGptWeb).mockImplementationOnce(async () => {
+      const reason = new Error();
+      reason.name = "ResponseAborted";
+      controller.abort(reason);
+      return { error: "This operation was aborted" };
+    });
+
+    const result = await repairModerationBlockedPrompt(
+      {
+        baseUrl: "https://chatgpt.com",
+        apiKey: "web-key",
+        backend: {
+          type: "pool-account",
+          id: "web-client-closed",
+          groupId: "web-group",
+          userId: "user-1",
+          requestKind: "chat",
+          accountBackend: "web",
+          reportResult: true,
+          inflightLease: true,
+        },
+      },
+      {
+        prompt: "blocked prompt",
+        failureReason: "Content failed moderation",
+        mode: "generate",
+        signal: controller.signal,
+      }
+    );
+
+    expect(result.error).toBe(CLIENT_CLOSED_REQUEST_ERROR);
+    expect(backendPoolMock.reportImageBackendResult).not.toHaveBeenCalled();
+    expect(
+      backendPoolMock.resolveImageBackendPoolConfig
+    ).not.toHaveBeenCalled();
+  });
+
   it("switches Web text accounts and does not consume image quota for prompt repair", async () => {
     process.env.DATABASE_URL ||= "postgresql://test:test@127.0.0.1:5432/test";
     const { repairModerationBlockedPrompt } = await import("./service");

@@ -5,6 +5,10 @@ import {
 } from "@repo/shared/generation-timeout";
 import { describe, expect, it } from "vitest";
 import {
+  CLIENT_CLOSED_REQUEST_ERROR,
+  GENERATION_ABORTED_ERROR,
+} from "./abort-reason";
+import {
   classifyGenerationError,
   isContentSafetyRejection,
 } from "./sla-classification";
@@ -201,5 +205,28 @@ describe("generation SLA error classification", () => {
       expect(classifyGenerationError(error)).toBe("platform");
       expect(isContentSafetyRejection(error)).toBe(false);
     }
+  });
+
+  it("classifies client-side cancellations as user_request, not platform", () => {
+    // 客户端在结果就绪前断开（运行中断开、排队时取消）是用户侧行为，
+    // 记成平台错误会污染平台失败率与 SLA 成功率。
+    expect(classifyGenerationError(CLIENT_CLOSED_REQUEST_ERROR)).toBe(
+      "user_request"
+    );
+    expect(
+      classifyGenerationError("Image generation queue request cancelled.")
+    ).toBe("user_request");
+    expect(isContentSafetyRejection(CLIENT_CLOSED_REQUEST_ERROR)).toBe(false);
+  });
+
+  it("keeps the generic aborted/timeout text and bad-output errors as platform errors", () => {
+    // 无法证明是客户端断开的中止（含截止超时）仍按平台处理；上游坏图也是平台问题。
+    expect(classifyGenerationError(GENERATION_ABORTED_ERROR)).toBe("platform");
+    expect(classifyGenerationError("This operation was aborted")).toBe(
+      "platform"
+    );
+    expect(
+      classifyGenerationError("Storage error: Input buffer has corrupt header:")
+    ).toBe("platform");
   });
 });

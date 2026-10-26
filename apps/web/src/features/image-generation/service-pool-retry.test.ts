@@ -29,7 +29,15 @@ vi.mock("./chatgpt-web", () => ({
   chatWithChatGptWeb: web.run,
 }));
 
+import { CLIENT_CLOSED_REQUEST_ERROR } from "./abort-reason";
 import { editImage, generateChatImage, generateImage } from "./service";
+
+/** 与 Next 在连接先于响应结束关闭时给 request.signal 的 reason 同形：name 为 ResponseAborted 的 Error。 */
+function responseAborted() {
+  const error = new Error();
+  error.name = "ResponseAborted";
+  return error;
+}
 
 /** 构造已由池调度持久预留的配置；复用时其 inflightLease 会被真实入口消费。 */
 function config(id = "web-1"): ApiConfig {
@@ -91,6 +99,35 @@ describe("池租约、取消和二次生成", () => {
       signal: controller.signal,
     });
     expect(result.error).toContain("aborted");
+    expect(web.run).not.toHaveBeenCalled();
+    expect(pool.reportImageBackendResult).not.toHaveBeenCalled();
+    expect(pool.releaseImageBackendInflightLease).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(entries)(
+    "客户端断开导致的中止使用客户端取消文案，不记成超时 %#",
+    async (entry) => {
+      const controller = new AbortController();
+      web.run.mockImplementationOnce(async () => {
+        controller.abort(responseAborted());
+        return { error: "This operation was aborted" };
+      });
+      const result = await entry(config(), controller.signal);
+      expect(result.error).toBe(CLIENT_CLOSED_REQUEST_ERROR);
+      expect(pool.reportImageBackendResult).not.toHaveBeenCalled();
+      expect(pool.resolveImageBackendPoolConfig).not.toHaveBeenCalled();
+      expect(pool.releaseImageBackendInflightLease).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("进入前客户端已断开：归还预留、不启动上游，并使用客户端取消文案", async () => {
+    const controller = new AbortController();
+    controller.abort(responseAborted());
+    const result = await generateImage(config(), {
+      prompt: "cat",
+      signal: controller.signal,
+    });
+    expect(result.error).toBe(CLIENT_CLOSED_REQUEST_ERROR);
     expect(web.run).not.toHaveBeenCalled();
     expect(pool.reportImageBackendResult).not.toHaveBeenCalled();
     expect(pool.releaseImageBackendInflightLease).toHaveBeenCalledTimes(1);

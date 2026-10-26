@@ -53,6 +53,7 @@ import {
 } from "./backend-credential-error";
 import { nanoid } from "nanoid";
 import { Pool } from "pg";
+import { CLIENT_CLOSED_REQUEST_ERROR } from "@/features/image-generation/abort-reason";
 import { parseApiModelMapping } from "@/features/image-generation/api-model-mapping";
 import {
   normalizeQualityBillingForStorage,
@@ -1543,6 +1544,8 @@ function isUserRequestBackendError(error?: string | null) {
     normalized.includes("user_error") ||
     normalized.includes("content_policy") ||
     normalized.includes("policy_violation") ||
+    // 客户端已断开:换后端也没有人等结果 → 不冷却后端、不换号、不算未分类错误。
+    normalized.includes(CLIENT_CLOSED_REQUEST_ERROR.toLowerCase()) ||
     // 用户输入超限(提示词过长 / 参考图超数 / 输入图过大):切后端也救不了 → 不重试、直接报。
     // 与 SLA 侧共用 USER_INPUT_LIMIT_PATTERNS(sla-classification.ts),码 + 中英文案兜底,避免
     // 两处分类器漂移;限流类(rate limit/concurrency/too many requests)不在表内,仍可切换。

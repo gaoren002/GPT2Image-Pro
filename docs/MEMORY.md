@@ -21,6 +21,7 @@
 - [2026-10-22 侧栏切页](memory/2026-10-22-sidebar-navigation.md) — 去掉 window.stop+location.assign 整页跳转拦截、恢复默认预取；**每个 dashboard 路由必须保留 loading.tsx**（否则预取执行页面，公告 / 工单详情的渲染期写入会被误触发）
 - [2026-10-22 系统设置首屏](memory/2026-10-22-admin-settings-first-load.md) — 配置快照服务端预取直出（省一次 action 往返）；页面静态导入的客户端组件必进首屏入口 chunk，重面板须 `next/dynamic`（后端池面板经 lazy-pool-panel）
 - [2026-10-22 全局状态冷路径](memory/2026-10-22-admin-status-cold-path.md) — `generation.metadata` 是 json 文本列，聚合须每行只转换一次（offset 0 子查询）；全站累计改走 `generation_daily_stats` 日汇总 + 实时尾巴，冷路径 31s -> 0.6s；chat completions 的 base64 输入图入库问题已由用户处理
+- [2026-10-26 客户端断开与中止文案](memory/2026-10-26-client-abort-classification.md) — 状态页的 `aborted due to timeout` 实为客户端自行断开：外部 API 同步请求的 200 响应体字节数是 2049 的整数倍即客户端未收到最终 JSON；`ResponseAborted` 才是客户端断开，截止超时是 `TimeoutError`；客户端取消归 `user_request` 并映射 499；另记录 `corrupt header` 的未做缺口（校验在重试循环外、只验头部、无诊断）
 
 - [图像后端池调度策略](image-backend-pool-scheduling.md) — 车道模型(web/codex/mixed × mixed-only)、候选资格(account 靠 implementationMode、api/adobe 靠分组车道)、mixed 分组 web 先行→回退 codex、满并发短等、冷却=已尝试;**常驻 alwaysActive 与换号判断正交**(只动持久化状态,不影响要不要换/换到谁/回退)
 

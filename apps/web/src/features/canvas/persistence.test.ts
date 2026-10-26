@@ -551,7 +551,12 @@ describe("canvas IndexedDB persistence", () => {
     expect(await (await storage("bob", "workflow")).read()).toBeNull();
   });
 
-  it("accepts exactly 32 MiB and rejects one extra byte before parsing or writing", async () => {
+  // 该用例要对 32 MiB 的字符串做三遍 UTF-8 计数与 JSON 解析，并经假 IndexedDB 来回拷贝：
+  // 单独运行约 0.25 秒，全量并行约 1.5 秒；GitHub 的 2 核机器遇到 CPU 与 GC 争抢时
+  // 曾超过默认的 5 秒（fc7cf7bb 那次推送）。断言不变，只放宽该用例的时限。
+  it("accepts exactly 32 MiB and rejects one extra byte before parsing or writing", {
+    timeout: 30_000,
+  }, async () => {
     expect(MAX_CANVAS_BYTES).toBe(32 * 1024 * 1024);
     const handle = await storage();
     const exact = sceneWithBytes(MAX_CANVAS_BYTES);
